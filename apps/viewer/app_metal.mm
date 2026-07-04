@@ -67,22 +67,20 @@ int runMetalApp(int maxFrames) {
             updateDrawableSize(window, layer);
 
             id<CAMetalDrawable> drawable = [layer nextDrawable];
-            if (!drawable) {
-                continue;
+            if (drawable) {
+                MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                pass.colorAttachments[0].texture = drawable.texture;
+                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.45, 0.5, 1.0);
+
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                id<MTLRenderCommandEncoder> encoder =
+                    [commands renderCommandEncoderWithDescriptor:pass];
+                [encoder endEncoding];
+                [commands presentDrawable:drawable];
+                [commands commit];
             }
-
-            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-            pass.colorAttachments[0].texture = drawable.texture;
-            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-            pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.45, 0.5, 1.0);
-
-            id<MTLCommandBuffer> commands = [queue commandBuffer];
-            id<MTLRenderCommandEncoder> encoder =
-                [commands renderCommandEncoderWithDescriptor:pass];
-            [encoder endEncoding];
-            [commands presentDrawable:drawable];
-            [commands commit];
         }
 
         ++frame;

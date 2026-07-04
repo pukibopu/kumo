@@ -1,0 +1,4 @@
+add_library(kumo_math INTERFACE)
+target_include_directories(kumo_math INTERFACE include)
+target_link_libraries(kumo_math INTERFACE glm::glm)
+target_compile_definitions(kumo_math INTERFACE GLM_FORCE_DEPTH_ZERO_TO_ONE GLM_FORCE_RADIANS)

@@ -1,0 +1,15 @@
+# build output
+build/
+cmake-build-*/
+.cache/
+compile_commands.json
+
+# OS noise
+.DS_Store
+
+# secrets and machine-local config
+.env
+kumo.config.json
+
+# runtime-generated shaders live locally until reviewed and promoted
+shaders/generated/

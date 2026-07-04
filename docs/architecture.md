@@ -1,6 +1,21 @@
 # 架构
 
-（随里程碑推进持续补充，当前对应 M0。）
+（随里程碑推进持续补充，当前对应 M1。）
+
+## 应用与平台层（macOS）
+
+Metal 侧统一使用 metal-cpp（Apple 官方 C++ 绑定），Objective-C 只保留 metal-cpp 覆盖不到的 AppKit 接缝——把 `CAMetalLayer` 挂到 NSView 的十几行 shim（`apps/viewer/metal_layer_glue.mm`）。对象生命周期遵循 CoreFoundation 计数规则：`new*/create*` 返回值用 `NS::TransferPtr` 接管，逐帧 autoreleased 对象由每帧 `NS::AutoreleasePool` 回收。
+
+viewer 的启动与主循环（`apps/viewer/app_metal.cpp`）：
+
+1. GLFW 以 `GLFW_NO_API` 创建窗口（1280×720，可缩放）；
+2. shim 创建 `CAMetalLayer` 挂到 contentView，桥接为 `CA::MetalLayer*`；
+3. `MTL::CreateSystemDefaultDevice` + command queue；
+4. 每帧：`glfwPollEvents` → 检查 framebuffer 尺寸变化并同步 `drawableSize`（resize 处理）→ `nextDrawable` → 清屏 render pass → present + commit。
+
+垂直同步由 `CAMetalLayer` 默认的 display sync 提供（约 60 fps）。`viewer --frames N` 渲染 N 帧后自动退出，供脚本化验证使用。
+
+当前 `app_metal.cpp` 是刻意直写的临时实现，M2 引入 RHI 后整体替换。
 
 ## 模块与依赖
 

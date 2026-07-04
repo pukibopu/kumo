@@ -1,6 +1,19 @@
 # 架构
 
-（随里程碑推进持续补充，当前对应 M0。）
+（随里程碑推进持续补充，当前对应 M1。）
+
+## 应用与平台层（macOS）
+
+viewer 的启动与主循环：
+
+1. GLFW 以 `GLFW_NO_API` 创建窗口（1280×720，可缩放）；
+2. 创建 `CAMetalLayer` 并挂到 NSWindow 的 contentView（`apps/viewer/app_metal.mm`）；
+3. `MTLCreateSystemDefaultDevice` + command queue；
+4. 每帧：`glfwPollEvents` → 检查 framebuffer 尺寸变化并同步 `drawableSize`（resize 处理）→ `nextDrawable` → 清屏 render pass → present + commit。
+
+垂直同步由 `CAMetalLayer` 默认的 display sync 提供（约 60 fps）。`viewer --frames N` 渲染 N 帧后自动退出，供脚本化验证使用。
+
+当前 `app_metal.mm` 是刻意直写的临时实现，M2 引入 RHI 后整体替换。
 
 ## 模块与依赖
 

@@ -1,2 +1,6 @@
 add_subdirectory(core)
 add_subdirectory(math)
+add_subdirectory(rhi)
+if(APPLE)
+    add_subdirectory(rhi_metal)
+endif()

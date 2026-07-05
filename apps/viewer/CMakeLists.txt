@@ -1,6 +1,6 @@
 set(VIEWER_SOURCES main.cpp)
 if(APPLE)
-    list(APPEND VIEWER_SOURCES app_metal.cpp metal_layer_glue.mm)
+    list(APPEND VIEWER_SOURCES app.cpp metal_layer_glue.mm)
 endif()
 
 add_executable(viewer ${VIEWER_SOURCES})
@@ -10,5 +10,5 @@ kumo_target_warnings(viewer)
 
 if(APPLE)
     set_source_files_properties(metal_layer_glue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(viewer PRIVATE metal_cpp "-framework Cocoa")
+    target_link_libraries(viewer PRIVATE kumo_rhi kumo_rhi_metal imgui_lib "-framework Cocoa")
 endif()

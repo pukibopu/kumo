@@ -13,3 +13,6 @@ kumo.config.json
 
 # runtime-generated shaders live locally until reviewed and promoted
 shaders/generated/
+
+# generated at runtime
+imgui.ini

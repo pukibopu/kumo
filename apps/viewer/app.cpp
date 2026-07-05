@@ -20,6 +20,15 @@ namespace {
 
 using namespace kumo;
 
+constexpr rhi::TextureFormat kSwapchainFormat = rhi::TextureFormat::BGRA8Unorm;
+
+void configureSurface(rhi::Surface& surface, int width, int height) {
+    surface.configure(
+        {.size = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)},
+         .format = kSwapchainFormat});
+}
+
+// Bindings follow binding_map.h: set 1 -> texture index 8, sampler index 9.
 constexpr const char* kTriangleMSL = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -104,9 +113,7 @@ int runApp(int maxFrames) {
     int fbWidth = 0;
     int fbHeight = 0;
     glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
-    surface->configure({.size = {static_cast<std::uint32_t>(fbWidth),
-                                 static_cast<std::uint32_t>(fbHeight)},
-                        .format = rhi::TextureFormat::BGRA8Unorm});
+    configureSurface(*surface, fbWidth, fbHeight);
 
     rhi::Ptr<rhi::Buffer> vertexBuffer = device->createBuffer({
         .size = sizeof(kTriangle),
@@ -148,15 +155,13 @@ int runApp(int maxFrames) {
     rhi::Ptr<rhi::RenderPipeline> pipeline = device->createRenderPipeline({
         .vertexShader = vertexShader,
         .fragmentShader = fragmentShader,
-        .vertexBuffers = {{.stride = sizeof(Vertex),
-                           .attributes = {{.format = rhi::VertexFormat::Float32x2,
-                                           .offset = 0,
-                                           .shaderLocation = 0},
-                                          {.format = rhi::VertexFormat::Float32x2,
-                                           .offset = 8,
-                                           .shaderLocation = 1}}}},
+        .vertexBuffers =
+            {{.stride = sizeof(Vertex),
+              .attributes =
+                  {{.format = rhi::VertexFormat::Float32x2, .offset = 0, .shaderLocation = 0},
+                   {.format = rhi::VertexFormat::Float32x2, .offset = 8, .shaderLocation = 1}}}},
         .bindGroupLayouts = {nullptr, materialLayout},
-        .colorFormats = {rhi::TextureFormat::BGRA8Unorm},
+        .colorFormats = {kSwapchainFormat},
     });
     if (!pipeline) {
         glfwDestroyWindow(window);
@@ -166,6 +171,7 @@ int runApp(int maxFrames) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr; // no imgui.ini in the working directory
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOther(window, true);
     ImGui_ImplMetal_Init(static_cast<MTL::Device*>(device->nativeHandles().device));
@@ -180,9 +186,7 @@ int runApp(int maxFrames) {
         if (width != fbWidth || height != fbHeight) {
             fbWidth = width;
             fbHeight = height;
-            surface->configure({.size = {static_cast<std::uint32_t>(fbWidth),
-                                         static_cast<std::uint32_t>(fbHeight)},
-                                .format = rhi::TextureFormat::BGRA8Unorm});
+            configureSurface(*surface, fbWidth, fbHeight);
         }
 
         rhi::Ptr<rhi::CommandEncoder> encoder = device->queue().createCommandEncoder();
@@ -223,6 +227,7 @@ int runApp(int maxFrames) {
         }
     }
 
+    device->queue().waitIdle();
     ImGui_ImplMetal_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

@@ -205,6 +205,8 @@ public:
     virtual Texture* acquireNextTexture() = 0;
     // Backbuffer count; sizes the ImGui backend. Metal keeps 3 drawables.
     virtual std::uint32_t imageCount() const { return 3; }
+    // Configured swapchain/drawable format; drives the ImGui backend setup.
+    virtual TextureFormat format() const = 0;
 };
 
 class CommandEncoder {

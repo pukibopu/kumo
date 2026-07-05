@@ -38,6 +38,7 @@
 #include "kumo/core/log.h"
 #include "kumo/rhi_vulkan/layout_tracker.h"
 
+#include <array>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -47,6 +48,7 @@ namespace kumo::rhi::vulkan {
 namespace {
 
 constexpr std::uint32_t kFramesInFlight = 2;
+constexpr std::uint32_t kMaxColorAttachments = 4;
 
 VkFormat toVk(TextureFormat format) {
     switch (format) {
@@ -244,11 +246,20 @@ BarrierMasks masksFor(ImageLayoutState state) {
     return {VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0};
 }
 
-void recordBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,
-                   LayoutTransition transition) {
-    const BarrierMasks src = masksFor(transition.oldLayout);
-    const BarrierMasks dst = masksFor(transition.newLayout);
+// Attachment-write scope for a same-layout write-after-write barrier on a
+// persistent attachment reused across frames (no layout change to react to).
+BarrierMasks writeMasksFor(ImageLayoutState state) {
+    if (state == ImageLayoutState::DepthAttachment) {
+        return {VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                    VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT};
+    }
+    return masksFor(state);
+}
 
+VkImageMemoryBarrier2 makeBarrier(VkImage image, VkImageAspectFlags aspect, const BarrierMasks& src,
+                                  const BarrierMasks& dst) {
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = src.stage;
@@ -261,7 +272,13 @@ void recordBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
     barrier.subresourceRange = {aspect, 0, 1, 0, 1};
+    return barrier;
+}
 
+void recordBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,
+                   LayoutTransition transition) {
+    const VkImageMemoryBarrier2 barrier =
+        makeBarrier(image, aspect, masksFor(transition.oldLayout), masksFor(transition.newLayout));
     VkDependencyInfo dependency{};
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.imageMemoryBarrierCount = 1;
@@ -428,9 +445,10 @@ class VulkanQueue; // fwd
 class VulkanSurface final : public Surface {
 public:
     VulkanSurface(VkInstance instance, VkPhysicalDevice physical, VkDevice device,
-                  std::uint32_t graphicsFamily, VkSurfaceKHR surface, VulkanQueue* queue)
+                  std::uint32_t graphicsFamily, VkSurfaceKHR surface, VulkanQueue* queue,
+                  LayoutTracker* tracker)
         : instance_(instance), physical_(physical), device_(device),
-          graphicsFamily_(graphicsFamily), surface_(surface), queue_(queue) {}
+          graphicsFamily_(graphicsFamily), surface_(surface), queue_(queue), tracker_(tracker) {}
 
     ~VulkanSurface() override {
         vkDeviceWaitIdle(device_);
@@ -472,11 +490,13 @@ public:
         }
         currentImageIndex_ = index;
         acquired_ = true;
+        markAcquireSignaled();
         texture_.reset(images_[index], imageViews_[index], extent_, format_);
         return &texture_;
     }
 
     std::uint32_t imageCount() const override { return static_cast<std::uint32_t>(images_.size()); }
+    TextureFormat format() const override { return format_; }
 
     bool acquired() const { return acquired_; }
     void clearAcquired() { acquired_ = false; }
@@ -487,12 +507,21 @@ public:
     VkSemaphore currentRenderFinishedSemaphore() const {
         return renderFinished_[currentImageIndex_];
     }
-    VkFormat swapchainFormat() const { return swapchainFormat_; }
 
 private:
     VkSemaphore imageAvailableSemaphore() const; // defined after VulkanQueue
+    void markAcquireSignaled();                  // defined after VulkanQueue
+
+    void forgetSwapchainImages() {
+        if (tracker_ != nullptr) {
+            for (VkImage image : images_) {
+                tracker_->forget(reinterpret_cast<std::uint64_t>(image));
+            }
+        }
+    }
 
     void destroySwapchain() {
+        forgetSwapchainImages();
         for (VkImageView view : imageViews_) {
             vkDestroyImageView(device_, view, nullptr);
         }
@@ -501,6 +530,10 @@ private:
             vkDestroySemaphore(device_, semaphore, nullptr);
         }
         renderFinished_.clear();
+        for (VkSemaphore semaphore : retiredSemaphores_) {
+            vkDestroySemaphore(device_, semaphore, nullptr);
+        }
+        retiredSemaphores_.clear();
         if (swapchain_ != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(device_, swapchain_, nullptr);
             swapchain_ = VK_NULL_HANDLE;
@@ -536,18 +569,23 @@ private:
         }
         vkb::Swapchain vkbSwapchain = swap_ret.value();
 
+        // Semaphores retired by the previous recreate are now idle; destroy them.
+        for (VkSemaphore semaphore : retiredSemaphores_) {
+            vkDestroySemaphore(device_, semaphore, nullptr);
+        }
+        retiredSemaphores_.clear();
         for (VkImageView view : oldViews) {
             vkDestroyImageView(device_, view, nullptr);
         }
-        for (VkSemaphore semaphore : oldRenderFinished) {
-            vkDestroySemaphore(device_, semaphore, nullptr);
-        }
+        // The presentation engine may still hold renderFinished after SUBOPTIMAL;
+        // waitIdle does not cover it, so retire rather than destroy immediately.
+        retiredSemaphores_ = std::move(oldRenderFinished);
+        forgetSwapchainImages();
         if (oldSwapchain != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(device_, oldSwapchain, nullptr);
         }
 
         swapchain_ = vkbSwapchain.swapchain;
-        swapchainFormat_ = vkbSwapchain.image_format;
         extent_ = {vkbSwapchain.extent.width, vkbSwapchain.extent.height};
         images_ = vkbSwapchain.get_images().value();
         imageViews_ = vkbSwapchain.get_image_views().value();
@@ -567,12 +605,13 @@ private:
     std::uint32_t graphicsFamily_;
     VkSurfaceKHR surface_;
     VulkanQueue* queue_;
+    LayoutTracker* tracker_;
 
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
-    VkFormat swapchainFormat_ = VK_FORMAT_B8G8R8A8_UNORM;
     std::vector<VkImage> images_;
     std::vector<VkImageView> imageViews_;
     std::vector<VkSemaphore> renderFinished_;
+    std::vector<VkSemaphore> retiredSemaphores_;
     VulkanTexture texture_;
     Extent2D extent_;
     TextureFormat format_ = TextureFormat::BGRA8Unorm;
@@ -586,15 +625,20 @@ struct FrameSlot {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence inFlight = VK_NULL_HANDLE;
     VkSemaphore imageAvailable = VK_NULL_HANDLE;
+    bool pendingAcquire = false;
 };
 
 class VulkanRenderPassEncoder final : public RenderPassEncoder {
 public:
     void begin(VkCommandBuffer cmd, LayoutTracker& tracker, const RenderPassDesc& desc) {
         cmd_ = cmd;
+        open_ = true;
 
-        std::vector<VkRenderingAttachmentInfo> colorInfos;
-        colorInfos.reserve(desc.colorAttachments.size());
+        KUMO_ASSERT(desc.colorAttachments.size() <= kMaxColorAttachments);
+        std::array<VkRenderingAttachmentInfo, kMaxColorAttachments> colorInfos{};
+        std::array<VkImageMemoryBarrier2, kMaxColorAttachments + 1> barriers{};
+        std::uint32_t colorCount = 0;
+        std::uint32_t barrierCount = 0;
         Extent2D renderExtent{};
 
         for (const RenderPassColorAttachment& attachment : desc.colorAttachments) {
@@ -604,10 +648,18 @@ public:
 
             const auto id = reinterpret_cast<std::uint64_t>(target->image());
             if (auto transition = tracker.request(id, ImageLayoutState::ColorAttachment)) {
-                recordBarrier(cmd_, target->image(), VK_IMAGE_ASPECT_COLOR_BIT, *transition);
+                barriers[barrierCount++] =
+                    makeBarrier(target->image(), VK_IMAGE_ASPECT_COLOR_BIT,
+                                masksFor(transition->oldLayout), masksFor(transition->newLayout));
+            } else {
+                // No layout change, but a persistent attachment reused next frame
+                // still needs a write-after-write barrier.
+                const BarrierMasks waw = writeMasksFor(ImageLayoutState::ColorAttachment);
+                barriers[barrierCount++] =
+                    makeBarrier(target->image(), VK_IMAGE_ASPECT_COLOR_BIT, waw, waw);
             }
 
-            VkRenderingAttachmentInfo info{};
+            VkRenderingAttachmentInfo& info = colorInfos[colorCount++];
             info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
             info.imageView = target->view();
             info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -615,7 +667,6 @@ public:
             info.storeOp = toVk(attachment.storeOp);
             info.clearValue.color = {{attachment.clearColor.r, attachment.clearColor.g,
                                       attachment.clearColor.b, attachment.clearColor.a}};
-            colorInfos.push_back(info);
         }
 
         VkRenderingAttachmentInfo depthInfo{};
@@ -625,7 +676,13 @@ public:
             renderExtent = target->extent();
             const auto id = reinterpret_cast<std::uint64_t>(target->image());
             if (auto transition = tracker.request(id, ImageLayoutState::DepthAttachment)) {
-                recordBarrier(cmd_, target->image(), VK_IMAGE_ASPECT_DEPTH_BIT, *transition);
+                barriers[barrierCount++] =
+                    makeBarrier(target->image(), VK_IMAGE_ASPECT_DEPTH_BIT,
+                                masksFor(transition->oldLayout), masksFor(transition->newLayout));
+            } else {
+                const BarrierMasks waw = writeMasksFor(ImageLayoutState::DepthAttachment);
+                barriers[barrierCount++] =
+                    makeBarrier(target->image(), VK_IMAGE_ASPECT_DEPTH_BIT, waw, waw);
             }
             depthInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
             depthInfo.imageView = target->view();
@@ -636,18 +693,25 @@ public:
             hasDepth = true;
         }
 
+        if (barrierCount > 0) {
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency.imageMemoryBarrierCount = barrierCount;
+            dependency.pImageMemoryBarriers = barriers.data();
+            vkCmdPipelineBarrier2(cmd_, &dependency);
+        }
+
         VkRenderingInfo rendering{};
         rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
         rendering.renderArea = {{0, 0}, {renderExtent.width, renderExtent.height}};
         rendering.layerCount = 1;
-        rendering.colorAttachmentCount = static_cast<std::uint32_t>(colorInfos.size());
+        rendering.colorAttachmentCount = colorCount;
         rendering.pColorAttachments = colorInfos.data();
         rendering.pDepthAttachment = hasDepth ? &depthInfo : nullptr;
         vkCmdBeginRendering(cmd_, &rendering);
 
         // Negative-height viewport flips Y so the same GLSL clip space renders
-        // identically to Metal; framebuffer coords then match, so winding maps
-        // 1:1 and FrontFace needs no inversion.
+        // identically to Metal.
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = static_cast<float>(renderExtent.height);
@@ -700,19 +764,25 @@ public:
     }
 
     void end() override {
-        if (cmd_ != VK_NULL_HANDLE) {
+        if (cmd_ != VK_NULL_HANDLE && open_) {
             vkCmdEndRendering(cmd_);
         }
+        open_ = false;
     }
 
     void* nativeEncoderHandle() override { return cmd_; }
     void* nativePassDescriptorHandle() override { return nullptr; }
 
-    void reset() { cmd_ = VK_NULL_HANDLE; }
+    void reset() {
+        cmd_ = VK_NULL_HANDLE;
+        open_ = false;
+    }
+    bool open() const { return open_; }
 
 private:
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     VkPipelineLayout currentLayout_ = VK_NULL_HANDLE;
+    bool open_ = false;
 };
 
 class VulkanCommandEncoder final : public CommandEncoder {
@@ -721,18 +791,36 @@ public:
         : queue_(queue), slot_(slot), tracker_(tracker) {}
 
     ~VulkanCommandEncoder() override {
-        if (!submitted_) {
-            // Drain the frame slot so its fence is signaled for the next reuse.
-            vkEndCommandBuffer(slot_->cmd);
-            VkCommandBufferSubmitInfo cmdInfo{};
-            cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-            cmdInfo.commandBuffer = slot_->cmd;
-            VkSubmitInfo2 submit{};
-            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-            submit.commandBufferInfoCount = 1;
-            submit.pCommandBufferInfos = &cmdInfo;
-            vkQueueSubmit2(queue_, 1, &submit, slot_->inFlight);
+        if (submitted_) {
+            return;
         }
+        // Drain the frame slot so its fence is signaled for the next reuse.
+        if (passEncoder_.open()) {
+            passEncoder_.end();
+        }
+        vkEndCommandBuffer(slot_->cmd);
+
+        VkCommandBufferSubmitInfo cmdInfo{};
+        cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cmdInfo.commandBuffer = slot_->cmd;
+
+        VkSemaphoreSubmitInfo waitInfo{};
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        waitInfo.semaphore = slot_->imageAvailable;
+        waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        if (slot_->pendingAcquire) {
+            // acquireNextTexture signaled this slot's semaphore but nothing
+            // consumed it; the drain must wait so the signal is not left dangling.
+            submit.waitSemaphoreInfoCount = 1;
+            submit.pWaitSemaphoreInfos = &waitInfo;
+            slot_->pendingAcquire = false;
+        }
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &cmdInfo;
+        vkQueueSubmit2(queue_, 1, &submit, slot_->inFlight);
     }
 
     RenderPassEncoder& beginRenderPass(const RenderPassDesc& desc) override {
@@ -748,6 +836,8 @@ public:
 
         VkSemaphore renderFinished = VK_NULL_HANDLE;
         if (present) {
+            // The wait below consumes the acquire semaphore signaled for this slot.
+            slot_->pendingAcquire = false;
             VulkanTexture* target = surface->currentTexture();
             const auto id = reinterpret_cast<std::uint64_t>(target->image());
             if (auto transition = tracker_->request(id, ImageLayoutState::PresentSrc)) {
@@ -846,10 +936,17 @@ public:
             VkFenceCreateInfo fenceInfo{};
             fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
             fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-            vkCreateFence(device_, &fenceInfo, nullptr, &slot.inFlight);
+            if (vkCreateFence(device_, &fenceInfo, nullptr, &slot.inFlight) != VK_SUCCESS) {
+                logError("vkCreateFence failed");
+                return false;
+            }
             VkSemaphoreCreateInfo semaphoreInfo{};
             semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &slot.imageAvailable);
+            if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &slot.imageAvailable) !=
+                VK_SUCCESS) {
+                logError("vkCreateSemaphore failed");
+                return false;
+            }
         }
         return true;
     }
@@ -931,20 +1028,24 @@ public:
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        recordBarrier(cmd, vkTexture.image(), VK_IMAGE_ASPECT_COLOR_BIT,
-                      {ImageLayoutState::Undefined, ImageLayoutState::TransferDst});
+        const auto id = reinterpret_cast<std::uint64_t>(vkTexture.image());
+        if (auto transition = tracker_->request(id, ImageLayoutState::TransferDst)) {
+            recordBarrier(cmd, vkTexture.image(), VK_IMAGE_ASPECT_COLOR_BIT, *transition);
+        }
 
         VkBufferImageCopy copy{};
         copy.bufferOffset = 0;
         copy.bufferRowLength = 0;
         copy.bufferImageHeight = 0;
-        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageSubresource = {static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_COLOR_BIT), 0, 0,
+                                 1};
         copy.imageExtent = {size.width, size.height, 1};
         vkCmdCopyBufferToImage(cmd, staging, vkTexture.image(),
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
-        recordBarrier(cmd, vkTexture.image(), VK_IMAGE_ASPECT_COLOR_BIT,
-                      {ImageLayoutState::TransferDst, ImageLayoutState::ShaderReadOnly});
+        if (auto transition = tracker_->request(id, ImageLayoutState::ShaderReadOnly)) {
+            recordBarrier(cmd, vkTexture.image(), VK_IMAGE_ASPECT_COLOR_BIT, *transition);
+        }
 
         vkEndCommandBuffer(cmd);
 
@@ -967,6 +1068,10 @@ public:
         KUMO_ASSERT(activeSlot_ != nullptr);
         return activeSlot_->imageAvailable;
     }
+    void markAcquireSignaled() {
+        KUMO_ASSERT(activeSlot_ != nullptr);
+        activeSlot_->pendingAcquire = true;
+    }
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;
@@ -981,6 +1086,10 @@ private:
 
 VkSemaphore VulkanSurface::imageAvailableSemaphore() const {
     return queue_->currentImageAvailableSemaphore();
+}
+
+void VulkanSurface::markAcquireSignaled() {
+    queue_->markAcquireSignaled();
 }
 
 class VulkanDevice final : public Device {
@@ -1004,11 +1113,18 @@ public:
         poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
         poolInfo.queueFamilyIndex = graphicsFamily_;
-        vkCreateCommandPool(device_, &poolInfo, nullptr, &uploadPool_);
+        if (vkCreateCommandPool(device_, &poolInfo, nullptr, &uploadPool_) != VK_SUCCESS) {
+            logError("vkCreateCommandPool (upload) failed");
+            return;
+        }
 
         VkDescriptorSetLayoutCreateInfo emptyInfo{};
         emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        vkCreateDescriptorSetLayout(device_, &emptyInfo, nullptr, &emptySetLayout_);
+        if (vkCreateDescriptorSetLayout(device_, &emptyInfo, nullptr, &emptySetLayout_) !=
+            VK_SUCCESS) {
+            logError("vkCreateDescriptorSetLayout (empty) failed");
+            return;
+        }
 
         ok_ = queue_.init(device_, graphicsQueue_, graphicsFamily_, allocator_, uploadPool_,
                           &tracker_);
@@ -1118,9 +1234,10 @@ public:
         viewInfo.viewType = desc.dimension == TextureDimension::Cube ? VK_IMAGE_VIEW_TYPE_CUBE
                                                                      : VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = toVk(desc.format);
-        viewInfo.subresourceRange = {isDepthFormat(desc.format) ? VK_IMAGE_ASPECT_DEPTH_BIT
-                                                                : VK_IMAGE_ASPECT_COLOR_BIT,
-                                     0, desc.mipLevelCount, 0, imageInfo.arrayLayers};
+        viewInfo.subresourceRange = {
+            static_cast<VkImageAspectFlags>(isDepthFormat(desc.format) ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                                                       : VK_IMAGE_ASPECT_COLOR_BIT),
+            0, desc.mipLevelCount, 0, imageInfo.arrayLayers};
         VkImageView view = VK_NULL_HANDLE;
         if (vkCreateImageView(device_, &viewInfo, nullptr, &view) != VK_SUCCESS) {
             logError("createTexture: image view failed");
@@ -1325,8 +1442,11 @@ public:
         rasterization.cullMode = desc.cullMode == CullMode::None    ? VK_CULL_MODE_NONE
                                  : desc.cullMode == CullMode::Front ? VK_CULL_MODE_FRONT_BIT
                                                                     : VK_CULL_MODE_BACK_BIT;
-        rasterization.frontFace = desc.frontFace == FrontFace::CCW ? VK_FRONT_FACE_COUNTER_CLOCKWISE
-                                                                   : VK_FRONT_FACE_CLOCKWISE;
+        // Negative-height viewport flips framebuffer winding; invert front face so
+        // culling matches Metal.
+        rasterization.frontFace = desc.frontFace == FrontFace::CCW
+                                      ? VK_FRONT_FACE_CLOCKWISE
+                                      : VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterization.lineWidth = 1.0f;
 
         VkPipelineMultisampleStateCreateInfo multisample{};
@@ -1424,7 +1544,7 @@ public:
         KUMO_ASSERT(desc.nativeSurface != nullptr);
         return std::make_shared<VulkanSurface>(instance_, physical_, device_, graphicsFamily_,
                                                reinterpret_cast<VkSurfaceKHR>(desc.nativeSurface),
-                                               &queue_);
+                                               &queue_, &tracker_);
     }
 
     Queue& queue() override { return queue_; }

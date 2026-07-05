@@ -341,6 +341,8 @@ public:
         return &texture_;
     }
 
+    TextureFormat format() const override { return format_; }
+
     CA::MetalDrawable* currentDrawable() const { return drawable_.get(); }
     void releaseDrawable() { drawable_.reset(); }
 

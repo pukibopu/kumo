@@ -1,5 +1,7 @@
 add_library(kumo_core STATIC
     src/assert.cpp
+    src/file.cpp
+    src/file_watcher.cpp
     src/log.cpp
 )
 target_include_directories(kumo_core PUBLIC include)

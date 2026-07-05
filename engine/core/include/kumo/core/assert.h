@@ -12,5 +12,6 @@ namespace kumo::detail {
         }                                                                                          \
     } while (false)
 #else
-#define KUMO_ASSERT(cond) ((void)0)
+// Keeps cond referenced (unevaluated) so release builds do not trip -Wunused.
+#define KUMO_ASSERT(cond) ((void)(false && (cond)))
 #endif

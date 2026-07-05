@@ -1,5 +1,6 @@
 #include "kumo/core/file_watcher.h"
 
+#include <cstddef>
 #include <system_error>
 #include <utility>
 
@@ -26,18 +27,23 @@ void FileWatcher::poll() {
     }
     lastCheck_ = now;
 
-    for (Entry& entry : entries_) {
+    // Index-based over a captured count: a callback may call watch() and reallocate
+    // entries_, so hold no Entry reference across it; new entries wait for next poll.
+    const std::size_t count = entries_.size();
+    for (std::size_t i = 0; i < count; ++i) {
         std::error_code ec;
-        auto mtime = std::filesystem::last_write_time(entry.path, ec);
+        auto mtime = std::filesystem::last_write_time(entries_[i].path, ec);
         if (ec) {
-            entry.present = false;
+            entries_[i].present = false;
             continue;
         }
-        bool changed = !entry.present || mtime != entry.lastWrite;
-        entry.present = true;
-        entry.lastWrite = mtime;
+        bool changed = !entries_[i].present || mtime != entries_[i].lastWrite;
+        entries_[i].present = true;
+        entries_[i].lastWrite = mtime;
         if (changed) {
-            entry.callback(entry.path);
+            Callback callback = entries_[i].callback;
+            std::filesystem::path path = entries_[i].path;
+            callback(path);
         }
     }
 }

@@ -3,6 +3,7 @@
 #include "internal.h"
 
 #include <kumo/core/assert.h>
+#include <kumo/core/file.h>
 
 #include <SPIRV/GlslangToSpv.h>
 #include <glslang/Public/ResourceLimits.h>
@@ -11,8 +12,8 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
-#include <fstream>
-#include <iterator>
+#include <filesystem>
+#include <format>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -43,11 +44,17 @@ class FileIncluder : public glslang::TShader::Includer {
 public:
     explicit FileIncluder(const std::vector<std::string>& dirs) : dirs_(dirs) {}
 
-    IncludeResult* includeLocal(const char* headerName, const char*, size_t) override {
-        return read(headerName);
+    IncludeResult* includeLocal(const char* headerName, const char* includerName, size_t) override {
+        const std::filesystem::path includer(includerName);
+        if (includer.has_parent_path()) {
+            if (IncludeResult* result = readPath(includer.parent_path() / headerName)) {
+                return result;
+            }
+        }
+        return searchDirs(headerName);
     }
     IncludeResult* includeSystem(const char* headerName, const char*, size_t) override {
-        return read(headerName);
+        return searchDirs(headerName);
     }
     void releaseInclude(IncludeResult* result) override {
         if (result != nullptr) {
@@ -57,16 +64,25 @@ public:
     }
 
 private:
-    IncludeResult* read(const char* headerName) {
+    IncludeResult* readPath(const std::filesystem::path& path) {
+        auto content = readTextFile(path);
+        if (!content) {
+            return nullptr;
+        }
+        // glslang owns the IncludeResult until releaseInclude; the backing string
+        // must outlive it, so hand ownership to userData and free it there.
+        auto* owned = new std::string(std::move(*content));
+        return new IncludeResult(path.string(), owned->data(), owned->size(), owned);
+    }
+
+    IncludeResult* searchDirs(const char* headerName) {
         for (const std::string& dir : dirs_) {
-            std::string path = dir.empty() ? std::string(headerName) : dir + "/" + headerName;
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
-                continue;
+            const std::filesystem::path path = dir.empty()
+                                                   ? std::filesystem::path(headerName)
+                                                   : std::filesystem::path(dir) / headerName;
+            if (IncludeResult* result = readPath(path)) {
+                return result;
             }
-            auto* content = new std::string(std::istreambuf_iterator<char>(file),
-                                            std::istreambuf_iterator<char>());
-            return new IncludeResult(path, content->data(), content->size(), content);
         }
         return nullptr;
     }
@@ -119,12 +135,19 @@ CompileError parseErrorLine(std::string_view line) {
     return CompileError{.file = {}, .line = 0, .message = std::string(line), .secondStage = false};
 }
 
+bool isSummaryLine(std::string_view line) {
+    // glslang appends a trailing "ERROR: N compilation errors.  No code generated."
+    // count line that is not an actual diagnostic.
+    return line.find("compilation errors.") != std::string_view::npos ||
+           line.find("No code generated") != std::string_view::npos;
+}
+
 void parseInfoLog(std::string_view log, std::vector<CompileError>& errors) {
     std::istringstream stream{std::string(log)};
     std::string raw;
     while (std::getline(stream, raw)) {
         const std::string line = trim(raw);
-        if (line.rfind("ERROR:", 0) == 0) {
+        if (line.rfind("ERROR:", 0) == 0 && !isSummaryLine(line)) {
             errors.push_back(parseErrorLine(line));
         }
     }
@@ -189,12 +212,19 @@ CompileResult compileGlsl(std::string_view source, Stage stage, const CompileOpt
         return std::unexpected(std::move(errors));
     }
 
-    if (std::optional<CompileError> error = detail::translateToMsl(result, stage)) {
-        errors.push_back(std::move(*error));
+    std::vector<CompileError> mslErrors = detail::translateToMsl(result, stage);
+    if (!mslErrors.empty()) {
+        errors.insert(errors.end(), std::make_move_iterator(mslErrors.begin()),
+                      std::make_move_iterator(mslErrors.end()));
         return std::unexpected(std::move(errors));
     }
 
     return result;
+}
+
+std::string formatError(const CompileError& error, std::string_view sourceName) {
+    const std::string_view name = error.file.empty() ? sourceName : std::string_view(error.file);
+    return std::format("{}:{}: {}", name, error.line, error.message);
 }
 
 } // namespace kumo::shaderc

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <format>
 #include <tuple>
 
 namespace kumo::shaderc::detail {
@@ -12,6 +13,7 @@ namespace {
 // Mirror of kumo::rhi::metal in engine/rhi_metal/include/kumo/rhi_metal/binding_map.h.
 // Duplicated locally so shaderc does not depend on the Metal backend module.
 constexpr std::uint32_t kMaxBindingsPerSet = 8;
+constexpr std::uint32_t kMaxSets = 3;
 constexpr std::uint32_t kPushConstantBufferIndex = 24;
 
 spv::ExecutionModel toExecutionModel(Stage stage) {
@@ -47,9 +49,26 @@ void collect(spirv_cross::CompilerMSL& compiler,
     }
 }
 
+std::vector<CompileError> validateBindingRanges(const Reflection& reflection) {
+    std::vector<CompileError> errors;
+    for (const ReflectionBinding& b : reflection.bindings) {
+        if (b.set >= kMaxSets || b.binding >= kMaxBindingsPerSet) {
+            errors.push_back(CompileError{
+                .file = {},
+                .line = 0,
+                .message = std::format("binding out of range: set={} binding={} (sets 0-{}, "
+                                       "bindings 0-{})",
+                                       b.set, b.binding, kMaxSets - 1, kMaxBindingsPerSet - 1),
+                .secondStage = true,
+            });
+        }
+    }
+    return errors;
+}
+
 } // namespace
 
-std::optional<CompileError> translateToMsl(CompiledShader& shader, Stage stage) {
+std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage) {
     try {
         spirv_cross::CompilerMSL compiler(shader.spirv);
 
@@ -65,6 +84,11 @@ std::optional<CompileError> translateToMsl(CompiledShader& shader, Stage stage) 
         collect(compiler, resources.storage_buffers, "storage_buffer", model, shader.reflection);
         collect(compiler, resources.separate_images, "sampled_texture", model, shader.reflection);
         collect(compiler, resources.separate_samplers, "sampler", model, shader.reflection);
+
+        if (std::vector<CompileError> violations = validateBindingRanges(shader.reflection);
+            !violations.empty()) {
+            return violations;
+        }
 
         if (!resources.push_constant_buffers.empty()) {
             const spirv_cross::Resource& pc = resources.push_constant_buffers.front();
@@ -101,12 +125,12 @@ std::optional<CompileError> translateToMsl(CompiledShader& shader, Stage stage) 
                 ? "main0"
                 : compiler.get_cleansed_entry_point_name(entryPoints.front().name,
                                                          entryPoints.front().execution_model);
-        return std::nullopt;
+        return {};
     } catch (const std::exception& e) {
-        return CompileError{.file = {}, .line = 0, .message = e.what(), .secondStage = true};
+        return {CompileError{.file = {}, .line = 0, .message = e.what(), .secondStage = true}};
     } catch (...) {
-        return CompileError{
-            .file = {}, .line = 0, .message = "unknown SPIRV-Cross error", .secondStage = true};
+        return {CompileError{
+            .file = {}, .line = 0, .message = "unknown SPIRV-Cross error", .secondStage = true}};
     }
 }
 

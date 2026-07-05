@@ -14,7 +14,9 @@ struct CompileError {
     std::string file; // "" for the main source, else include name
     int line = 0;     // 0 when unknown
     std::string message;
-    bool secondStage = false; // SPIRV-Cross / MSL-translation error
+    // Marks SPIRV-Cross / Metal-translation-stage errors (vs. front-end glslang
+    // errors); consumed by the M6 agent loop to route fixes to the right stage.
+    bool secondStage = false;
 };
 
 struct ReflectionBinding {
@@ -45,6 +47,11 @@ struct CompileOptions {
 
 using CompileResult = std::expected<CompiledShader, std::vector<CompileError>>;
 
+// Not thread-safe: glslang per-thread pools are not configured, so calls must be
+// serialized on a single thread.
 CompileResult compileGlsl(std::string_view source, Stage stage, const CompileOptions& options = {});
+
+// "<file-or-sourceName>:<line>: <message>"
+std::string formatError(const CompileError& error, std::string_view sourceName);
 
 } // namespace kumo::shaderc

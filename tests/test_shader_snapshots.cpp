@@ -39,8 +39,7 @@ std::string formatErrors(const std::string& sourceName,
                          const std::vector<shaderc::CompileError>& errors) {
     std::string out;
     for (const shaderc::CompileError& err : errors) {
-        out += (err.file.empty() ? sourceName : err.file) + ":" + std::to_string(err.line) + ": " +
-               err.message + "\n";
+        out += shaderc::formatError(err, sourceName) + "\n";
     }
     return out;
 }
@@ -98,6 +97,9 @@ TEST_CASE("shader reflection snapshots") {
                                                   "create it");
             continue;
         }
+        // Windows checkouts (core.autocrlf) turn the LF snapshots into CRLF; the
+        // actual string is built with LF, so normalize before comparing.
+        std::erase(*expected, '\r');
         CHECK(actual == *expected);
     }
 }

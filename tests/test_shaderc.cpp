@@ -76,13 +76,26 @@ void main() { color = pc.m[0]; }
 
 TEST_CASE("syntax error yields structured error list") {
     constexpr const char* source = R"(#version 460
-void main() { this is not valid glsl }
+void main() { gl_Position = vec4(0.0) }
 )";
     const auto result = shaderc::compileGlsl(source, shaderc::Stage::Vertex);
     REQUIRE(!result.has_value());
-    REQUIRE(!result.error().empty());
+    REQUIRE(result.error().size() == 1); // summary line must not be counted as an error
     CHECK(result.error().front().line > 0);
     CHECK(!result.error().front().message.empty());
+}
+
+TEST_CASE("binding out of range fails validation") {
+    constexpr const char* source = R"(#version 460
+layout(set = 3, binding = 0) uniform Data { vec4 v; } data;
+layout(location = 0) out vec4 color;
+void main() { color = data.v; }
+)";
+    const auto result = shaderc::compileGlsl(source, shaderc::Stage::Fragment);
+    REQUIRE(!result.has_value());
+    REQUIRE(!result.error().empty());
+    CHECK(result.error().front().secondStage);
+    CHECK(contains(result.error().front().message, "set=3"));
 }
 
 TEST_CASE("vertex stage reflects input locations") {

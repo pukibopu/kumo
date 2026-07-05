@@ -12,6 +12,8 @@ kumo_target_warnings(kumo_tests)
 if(MSVC)
     # doctest 2.4.12 specializes std::tuple, which recent MSVC flags as C5285.
     target_compile_options(kumo_tests PRIVATE /wd5285)
+    # std::getenv trips C4996 under /WX; it is standard and portable.
+    target_compile_definitions(kumo_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 if(APPLE)

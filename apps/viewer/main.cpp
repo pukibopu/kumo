@@ -21,7 +21,11 @@ int main(int argc, char** argv) {
         const std::string_view arg(argv[i]);
         if (arg == "--frames" && i + 1 < argc) {
             maxFrames = std::atoi(argv[++i]);
-        } else if (arg == "--rhi" && i + 1 < argc) {
+        } else if (arg == "--rhi") {
+            if (i + 1 >= argc) {
+                kumo::logError("--rhi requires a value: metal|vulkan");
+                return 1;
+            }
             const std::string_view value(argv[++i]);
             if (value == "metal") {
                 backend = kumo::rhi::Backend::Metal;

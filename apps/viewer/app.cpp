@@ -1,3 +1,4 @@
+#include <kumo/core/assert.h>
 #include <kumo/core/file.h>
 #include <kumo/core/file_watcher.h>
 #include <kumo/core/log.h>
@@ -215,7 +216,12 @@ rhi::Ptr<rhi::Surface> createSurface(rhi::Device& device, rhi::Backend backend,
             logError("glfwCreateWindowSurface failed");
             return nullptr;
         }
-        return device.createSurface({.nativeSurface = vkSurface});
+        rhi::Ptr<rhi::Surface> surface = device.createSurface({.nativeSurface = vkSurface});
+        if (!surface) {
+            vkDestroySurfaceKHR(reinterpret_cast<VkInstance>(handles.vkInstance), vkSurface,
+                                nullptr);
+        }
+        return surface;
 #else
         (void)window;
         return nullptr;
@@ -234,7 +240,18 @@ void imguiInit(rhi::Device& device, rhi::Backend backend, GLFWwindow* window,
     if (backend == rhi::Backend::Vulkan) {
 #if defined(KUMO_HAS_VULKAN)
         const rhi::NativeHandles handles = device.nativeHandles();
-        static const VkFormat kColorFormat = VK_FORMAT_B8G8R8A8_UNORM;
+        VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+        switch (surface.format()) {
+        case rhi::TextureFormat::BGRA8Unorm:
+            colorFormat = VK_FORMAT_B8G8R8A8_UNORM;
+            break;
+        case rhi::TextureFormat::BGRA8UnormSrgb:
+            colorFormat = VK_FORMAT_B8G8R8A8_SRGB;
+            break;
+        default:
+            KUMO_ASSERT(false);
+            break;
+        }
         ImGui_ImplGlfw_InitForVulkan(window, true);
         ImGui_ImplVulkan_InitInfo init{};
         init.ApiVersion = VK_API_VERSION_1_3;
@@ -244,13 +261,13 @@ void imguiInit(rhi::Device& device, rhi::Backend backend, GLFWwindow* window,
         init.QueueFamily = handles.vkQueueFamily;
         init.Queue = reinterpret_cast<VkQueue>(handles.vkQueue);
         init.DescriptorPoolSize = 16;
-        init.MinImageCount = 2;
+        init.MinImageCount = std::max<std::uint32_t>(2, surface.imageCount());
         init.ImageCount = surface.imageCount();
         init.UseDynamicRendering = true;
         init.PipelineInfoMain.PipelineRenderingCreateInfo.sType =
             VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         init.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
-        init.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &kColorFormat;
+        init.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &colorFormat;
         ImGui_ImplVulkan_Init(&init);
         return;
 #endif

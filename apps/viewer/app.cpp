@@ -14,10 +14,13 @@
 #include <backends/imgui_impl_metal.h>
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <vector>
 
 void* attachMetalLayer(GLFWwindow* window);
 
@@ -44,23 +47,80 @@ constexpr std::array<Vertex, 3> kTriangle = {{
     {0.6f, -0.6f, 1.0f, 1.0f},
 }};
 
-rhi::Ptr<rhi::ShaderModule> loadShaderModule(rhi::Device& device, const std::string& sourceName,
-                                             shaderc::Stage stage, rhi::ShaderStage rhiStage) {
-    const std::filesystem::path path = std::filesystem::path(KUMO_SHADER_DIR) / sourceName;
+struct ShaderStageInfo {
+    const char* sourceName;
+    shaderc::Stage stage;
+    rhi::ShaderStage rhiStage;
+};
+
+constexpr std::array<ShaderStageInfo, 2> kShaderStages = {{
+    {"triangle.vert", shaderc::Stage::Vertex, rhi::ShaderStage::Vertex},
+    {"triangle.frag", shaderc::Stage::Fragment, rhi::ShaderStage::Fragment},
+}};
+
+struct ExpectedBinding {
+    std::uint32_t set;
+    std::uint32_t binding;
+    std::string_view type;
+};
+
+// Material contract: fragment reflects set 1 texture + sampler; vertex reflects none.
+std::vector<ExpectedBinding> expectedBindings(shaderc::Stage stage) {
+    if (stage == shaderc::Stage::Fragment) {
+        return {{1, 0, "sampled_texture"}, {1, 1, "sampler"}};
+    }
+    return {};
+}
+
+bool validateReflection(std::string_view sourceName, shaderc::Stage stage,
+                        const shaderc::Reflection& reflection) {
+    const std::vector<ExpectedBinding> expected = expectedBindings(stage);
+    bool ok = true;
+    for (const ExpectedBinding& e : expected) {
+        const bool found =
+            std::any_of(reflection.bindings.begin(), reflection.bindings.end(),
+                        [&](const shaderc::ReflectionBinding& b) {
+                            return b.set == e.set && b.binding == e.binding && b.type == e.type;
+                        });
+        if (!found) {
+            logError("{}: missing binding set={} binding={} type={}", sourceName, e.set, e.binding,
+                     e.type);
+            ok = false;
+        }
+    }
+    for (const shaderc::ReflectionBinding& b : reflection.bindings) {
+        const bool allowed =
+            std::any_of(expected.begin(), expected.end(), [&](const ExpectedBinding& e) {
+                return e.set == b.set && e.binding == b.binding && e.type == b.type;
+            });
+        if (!allowed) {
+            logError("{}: unexpected binding set={} binding={} type={}", sourceName, b.set,
+                     b.binding, b.type);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+rhi::Ptr<rhi::ShaderModule> loadShaderModule(rhi::Device& device, const ShaderStageInfo& info) {
+    const std::filesystem::path path = std::filesystem::path(KUMO_SHADER_DIR) / info.sourceName;
     auto source = readTextFile(path);
     if (!source) {
         logError("{}: {}", path.string(), source.error());
         return nullptr;
     }
-    auto compiled = shaderc::compileGlsl(*source, stage, {.sourceName = sourceName});
+    auto compiled = shaderc::compileGlsl(*source, info.stage, {.sourceName = info.sourceName});
     if (!compiled) {
         for (const shaderc::CompileError& err : compiled.error()) {
-            logError("{}:{}: {}", err.file.empty() ? sourceName : err.file, err.line, err.message);
+            logError("{}", shaderc::formatError(err, info.sourceName));
         }
         return nullptr;
     }
+    if (!validateReflection(info.sourceName, info.stage, compiled->reflection)) {
+        return nullptr;
+    }
     return device.createShaderModule({
-        .stage = rhiStage,
+        .stage = info.rhiStage,
         .language = rhi::ShaderSourceLanguage::MSL,
         .source = compiled->msl,
         .entryPoint = compiled->mslEntryPoint,
@@ -157,10 +217,8 @@ int runApp(int maxFrames) {
         .entries = {{.binding = 0, .texture = texture}, {.binding = 1, .sampler = sampler}},
     });
 
-    rhi::Ptr<rhi::ShaderModule> vertexShader = loadShaderModule(
-        *device, "triangle.vert", shaderc::Stage::Vertex, rhi::ShaderStage::Vertex);
-    rhi::Ptr<rhi::ShaderModule> fragmentShader = loadShaderModule(
-        *device, "triangle.frag", shaderc::Stage::Fragment, rhi::ShaderStage::Fragment);
+    rhi::Ptr<rhi::ShaderModule> vertexShader = loadShaderModule(*device, kShaderStages[0]);
+    rhi::Ptr<rhi::ShaderModule> fragmentShader = loadShaderModule(*device, kShaderStages[1]);
     if (!vertexShader || !fragmentShader) {
         glfwDestroyWindow(window);
         glfwTerminate();
@@ -182,8 +240,10 @@ int runApp(int maxFrames) {
         reloadPending = true;
         reloadPath = changed;
     };
-    shaderWatcher.watch(std::filesystem::path(KUMO_SHADER_DIR) / "triangle.vert", onShaderChange);
-    shaderWatcher.watch(std::filesystem::path(KUMO_SHADER_DIR) / "triangle.frag", onShaderChange);
+    for (const ShaderStageInfo& info : kShaderStages) {
+        shaderWatcher.watch(std::filesystem::path(KUMO_SHADER_DIR) / info.sourceName,
+                            onShaderChange);
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -199,10 +259,8 @@ int runApp(int maxFrames) {
         shaderWatcher.poll();
         if (reloadPending) {
             reloadPending = false;
-            rhi::Ptr<rhi::ShaderModule> newVertex = loadShaderModule(
-                *device, "triangle.vert", shaderc::Stage::Vertex, rhi::ShaderStage::Vertex);
-            rhi::Ptr<rhi::ShaderModule> newFragment = loadShaderModule(
-                *device, "triangle.frag", shaderc::Stage::Fragment, rhi::ShaderStage::Fragment);
+            rhi::Ptr<rhi::ShaderModule> newVertex = loadShaderModule(*device, kShaderStages[0]);
+            rhi::Ptr<rhi::ShaderModule> newFragment = loadShaderModule(*device, kShaderStages[1]);
             if (newVertex && newFragment) {
                 rhi::Ptr<rhi::RenderPipeline> newPipeline =
                     buildPipeline(*device, newVertex, newFragment, materialLayout);

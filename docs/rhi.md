@@ -1,6 +1,8 @@
 # RHI
 
-（M2 起 Metal 后端已实现；compute、MSAA resolve 与 Vulkan 后端随后续里程碑落地。）
+（M2 起 Metal 后端、M3 起 Vulkan 后端（MoltenVK/Windows）均已实现；compute 与 MSAA resolve 随 M4 落地。）
+
+Vulkan 后端要点：vk-bootstrap 初始化（Vulkan 1.3，dynamic rendering + synchronization2）、VMA 内存分配、直接链接 SDK loader（未用 volk——1.3 核心入口点由 loader 导出）、负高度 viewport 统一 NDC Y 方向、图像布局转换由 `layout_tracker.h`（纯逻辑，有单测）驱动、描述符按 bind group 创建期分配（增长式池）。运行需 LunarG Vulkan SDK。
 
 WebGPU 风格的图形 API 抽象层，接口聚合在 `kumo/rhi/rhi.h`（枚举在 `types.h`）。核心类型：
 

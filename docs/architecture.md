@@ -36,7 +36,10 @@ math ← scene ← asset
 - `engine/math`——基于 glm 的数学类型封装（`kumo::math`）
 - `engine/rhi`——RHI 纯虚接口与描述结构（见 rhi.md）
 - `engine/rhi_metal`——Metal 后端（metal-cpp，单翻译单元）
+- `engine/rhi_vulkan`——Vulkan 后端（vk-bootstrap + VMA，dynamic rendering；仅在找到 Vulkan SDK 时构建）
 - `engine/shadercompiler`——GLSL→SPIR-V→MSL 进程内交叉编译（见 shaders.md）
+
+viewer 以 `--rhi metal|vulkan` 选择后端（Apple 默认 metal，其余平台默认 vulkan），同一份 GLSL 双后端渲染一致。
 
 viewer 自 M2 起完全跑在 RHI 上：贴图三角形 + Dear ImGui 覆盖层（经 RHI native 逃生口使用官方 Metal/GLFW backend），M1 的直写 Metal 代码已删除。
 

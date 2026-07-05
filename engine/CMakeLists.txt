@@ -1,6 +1,7 @@
 add_subdirectory(core)
 add_subdirectory(math)
 add_subdirectory(rhi)
+add_subdirectory(shadercompiler)
 if(APPLE)
     add_subdirectory(rhi_metal)
 endif()

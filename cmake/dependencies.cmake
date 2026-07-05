@@ -26,6 +26,16 @@ FetchContent_Declare(imgui
     GIT_TAG 4be08b1ecf7709f15e4274fb2ddac37e121d7d9a # docking branch
 )
 
+FetchContent_Declare(glslang
+    GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+    GIT_TAG 8a85691a0740d390761a1008b4696f57facd02c4 # 15.4.0
+)
+
+FetchContent_Declare(spirv_cross
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+    GIT_TAG 1a6169566c73d3da552748fc372fe2bbb856e46e # vulkan-sdk-1.4.350.1
+)
+
 FetchContent_MakeAvailable(glm doctest glfw imgui)
 
 add_library(imgui_lib STATIC
@@ -58,3 +68,34 @@ if(APPLE)
     target_compile_definitions(imgui_lib PUBLIC IMGUI_IMPL_METAL_CPP)
     target_link_libraries(imgui_lib PUBLIC metal_cpp)
 endif()
+
+# Shader cross-compilation toolchain (kumo_shaderc): GLSL -> SPIR-V -> MSL.
+set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
+set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+
+set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_SHARED OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_GLSL ON CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_MSL ON CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(glslang spirv_cross)
+
+# Treat third-party headers as system headers so -Wall/-Werror do not fire on them.
+foreach(_kumo_thirdparty
+        glslang glslang-default-resource-limits SPIRV MachineIndependent GenericCodeGen
+        OSDependent SPIRV-Tools SPIRV-Tools-opt
+        spirv-cross-core spirv-cross-glsl spirv-cross-msl)
+    if(TARGET ${_kumo_thirdparty})
+        set_target_properties(${_kumo_thirdparty} PROPERTIES SYSTEM ON)
+    endif()
+endforeach()

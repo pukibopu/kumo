@@ -4,7 +4,7 @@
 #include <string_view>
 
 #if defined(__APPLE__)
-int runMetalApp(int maxFrames);
+int runApp(int maxFrames);
 #endif
 
 int main(int argc, char** argv) {
@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
     kumo::logInfo("kumo viewer {}", KUMO_VERSION_STRING);
 
 #if defined(__APPLE__)
-    return runMetalApp(maxFrames);
+    return runApp(maxFrames);
 #else
     (void)maxFrames;
     kumo::logInfo("no rendering backend for this platform yet");

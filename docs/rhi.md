@@ -1,15 +1,27 @@
 # RHI
 
-（实现自 M2 开始，本文当前为设计概要。）
+（M2 起 Metal 后端已实现；compute、MSAA resolve 与 Vulkan 后端随后续里程碑落地。）
 
-WebGPU 风格的图形 API 抽象层。核心类型：
+WebGPU 风格的图形 API 抽象层，接口聚合在 `kumo/rhi/rhi.h`（枚举在 `types.h`）。核心类型：
 
-`Device / Queue / CommandEncoder / RenderPassEncoder / ComputePassEncoder / Buffer / Texture / Sampler / ShaderModule / BindGroupLayout / BindGroup / RenderPipeline / ComputePipeline / Surface`
+`Device / Queue / CommandEncoder / RenderPassEncoder / Buffer / Texture / Sampler / ShaderModule / BindGroupLayout / BindGroup / RenderPipeline / Surface`
 
-- 资源创建统一走 POD 描述结构（`BufferDesc` 等），返回共享指针；创建失败返回空（详见 architecture.md 错误约定）。
-- 双帧 in-flight；每帧独立命令分配；帧级 uniform 走环形缓冲。
-- Per-draw 小数据（≤128 字节）走 push constants：Vulkan 原生，Metal 映射为 `setVertexBytes` / `setFragmentBytes`。
-- MSAA：`TextureDesc` / `RenderPipelineDesc` 带 `sampleCount`，pass 内 resolve。
+- 资源创建统一走 POD 描述结构（`BufferDesc` 等，designated initializers），返回共享指针；创建失败返回空（详见 architecture.md 错误约定）；
+- 双帧 in-flight：`Queue::createCommandEncoder()` 按 in-flight 数节流（信号量），每帧一个 encoder，`finishAndSubmit(surface)` 提交并呈现；
+- `RenderPipelineDesc::bindGroupLayouts` 按 set 序号索引，空 set 用 `nullptr` 占位；
+- Per-draw 小数据（≤128 字节）走 `setPushConstants`：Vulkan 原生 push constants，Metal 映射为 `setVertexBytes` / `setFragmentBytes`（buffer index 24）；
+- MSAA：`TextureDesc` / `RenderPipelineDesc` 带 `sampleCount`，pass 内 resolve（M4 启用）；
+- Native 逃生口（仅供 ImGui 等调试集成）：`Device::nativeHandles()`、`CommandEncoder::nativeCommandBufferHandle()`、`RenderPassEncoder::nativeEncoderHandle()` / `nativePassDescriptorHandle()`。
+
+## Metal 绑定映射
+
+Metal 参数表布局（与 M3 的 SPIRV-Cross 重映射共用，常量在 `kumo/rhi_metal/binding_map.h`，有快照单测）：
+
+| 区间 | 用途 |
+|---|---|
+| buffer/texture/sampler index `set*8+binding`（0–23） | set 0–2 的资源绑定 |
+| buffer index 24 | push constants |
+| buffer index 30 向下（30–26） | 顶点流 slot 0–4 |
 
 ## 后端映射
 

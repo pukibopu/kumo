@@ -1,6 +1,6 @@
 # 架构
 
-（随里程碑推进持续补充，当前对应 M1。）
+（随里程碑推进持续补充，当前对应 M2。）
 
 ## 应用与平台层（macOS）
 
@@ -34,6 +34,10 @@ math ← scene ← asset
 
 - `engine/core`——日志、断言等基础设施
 - `engine/math`——基于 glm 的数学类型封装（`kumo::math`）
+- `engine/rhi`——RHI 纯虚接口与描述结构（见 rhi.md）
+- `engine/rhi_metal`——Metal 后端（metal-cpp，单翻译单元）
+
+viewer 自 M2 起完全跑在 RHI 上：贴图三角形 + Dear ImGui 覆盖层（经 RHI native 逃生口使用官方 Metal/GLFW backend），M1 的直写 Metal 代码已删除。
 
 ## 全局约定
 

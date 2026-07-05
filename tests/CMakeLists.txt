@@ -1,7 +1,13 @@
 add_executable(kumo_tests
+    test_core_file.cpp
     test_math.cpp
+    test_shaderc.cpp
+    test_shader_snapshots.cpp
 )
-target_link_libraries(kumo_tests PRIVATE doctest::doctest kumo_core kumo_math)
+target_link_libraries(kumo_tests PRIVATE doctest::doctest kumo_core kumo_math kumo_shaderc)
+target_compile_definitions(kumo_tests PRIVATE
+    KUMO_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders"
+    KUMO_SNAPSHOT_DIR="${CMAKE_SOURCE_DIR}/tests/snapshots")
 kumo_target_warnings(kumo_tests)
 if(MSVC)
     # doctest 2.4.12 specializes std::tuple, which recent MSVC flags as C5285.

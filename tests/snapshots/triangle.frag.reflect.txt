@@ -1,0 +1,4 @@
+binding set=1 binding=0 type=sampled_texture name=baseColor
+binding set=1 binding=1 type=sampler name=baseSampler
+push_constant_size=0
+vertex_input_locations=

@@ -10,6 +10,7 @@ WebGPU 风格的图形 API 抽象层，接口聚合在 `kumo/rhi/rhi.h`（枚举
 - 双帧 in-flight：`Queue::createCommandEncoder()` 按 in-flight 数节流（信号量），每帧一个 encoder，`finishAndSubmit(surface)` 提交并呈现；
 - `RenderPipelineDesc::bindGroupLayouts` 按 set 序号索引，空 set 用 `nullptr` 占位；
 - Per-draw 小数据（≤128 字节）走 `setPushConstants`：Vulkan 原生 push constants，Metal 映射为 `setVertexBytes` / `setFragmentBytes`（buffer index 24）；
+- `Queue::writeBuffer` / `writeTexture` 面向**装载期上传**，不做多帧版本化——逐帧变化的数据用 push constants 或环形缓冲（M4 的帧 uniform 方案），对在飞帧仍在读的 buffer 直接 writeBuffer 属数据竞争；
 - MSAA：`TextureDesc` / `RenderPipelineDesc` 带 `sampleCount`，pass 内 resolve（M4 启用）；
 - Native 逃生口（仅供 ImGui 等调试集成）：`Device::nativeHandles()`、`CommandEncoder::nativeCommandBufferHandle()`、`RenderPassEncoder::nativeEncoderHandle()` / `nativePassDescriptorHandle()`。
 

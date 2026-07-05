@@ -135,6 +135,16 @@ NS::String* nsString(const std::string& text) {
     return NS::String::string(text.c_str(), NS::UTF8StringEncoding);
 }
 
+// Resource creation runs outside the per-frame pool; autoreleased temporaries
+// (NS::String, descriptors, NS::Error) would otherwise leak on repeated use.
+struct AutoreleasePoolGuard {
+    AutoreleasePoolGuard() : pool(NS::AutoreleasePool::alloc()->init()) {}
+    ~AutoreleasePoolGuard() { pool->release(); }
+    AutoreleasePoolGuard(const AutoreleasePoolGuard&) = delete;
+    AutoreleasePoolGuard& operator=(const AutoreleasePoolGuard&) = delete;
+    NS::AutoreleasePool* pool;
+};
+
 class MetalBuffer final : public Buffer {
 public:
     MetalBuffer(NS::SharedPtr<MTL::Buffer> buffer, std::uint64_t size)
@@ -175,7 +185,8 @@ private:
 
 class MetalSampler final : public Sampler {
 public:
-    explicit MetalSampler(NS::SharedPtr<MTL::SamplerState> sampler) : sampler_(std::move(sampler)) {}
+    explicit MetalSampler(NS::SharedPtr<MTL::SamplerState> sampler)
+        : sampler_(std::move(sampler)) {}
     MTL::SamplerState* handle() const { return sampler_.get(); }
 
 private:
@@ -205,8 +216,8 @@ private:
 
 class MetalBindGroup final : public BindGroup {
 public:
-    MetalBindGroup(BindGroupDesc desc, const MetalBindGroupLayout& layout) : desc_(std::move(desc)) {
-        for (const BindGroupEntry& entry : desc_.entries) {
+    MetalBindGroup(const BindGroupDesc& desc, const MetalBindGroupLayout& layout) {
+        for (const BindGroupEntry& entry : desc.entries) {
             const BindGroupLayoutEntry* match = nullptr;
             for (const BindGroupLayoutEntry& layoutEntry : layout.desc().entries) {
                 if (layoutEntry.binding == entry.binding) {
@@ -216,14 +227,14 @@ public:
             }
             KUMO_ASSERT(match != nullptr);
             if (match != nullptr) {
-                resolved_.push_back({&entry, match->visibility, match->type});
+                resolved_.push_back({entry, match->visibility, match->type});
             }
         }
     }
 
     void apply(MTL::RenderCommandEncoder* encoder, std::uint32_t set) const {
         for (const ResolvedEntry& resolved : resolved_) {
-            const BindGroupEntry& entry = *resolved.entry;
+            const BindGroupEntry& entry = resolved.entry;
             const std::uint32_t index = resourceIndex(set, entry.binding);
             const bool vertex = hasFlag(resolved.visibility, ShaderStage::Vertex);
             const bool fragment = hasFlag(resolved.visibility, ShaderStage::Fragment);
@@ -269,12 +280,11 @@ public:
 
 private:
     struct ResolvedEntry {
-        const BindGroupEntry* entry;
+        BindGroupEntry entry;
         ShaderStage visibility;
         BindingType type;
     };
 
-    BindGroupDesc desc_;
     std::vector<ResolvedEntry> resolved_;
 };
 
@@ -315,8 +325,8 @@ public:
     void configure(const SurfaceConfig& config) override {
         format_ = config.format;
         layer_->setPixelFormat(toMtl(config.format));
-        layer_->setDrawableSize(
-            CGSizeMake(static_cast<double>(config.size.width), static_cast<double>(config.size.height)));
+        layer_->setDrawableSize(CGSizeMake(static_cast<double>(config.size.width),
+                                           static_cast<double>(config.size.height)));
         extent_ = config.size;
     }
 
@@ -355,14 +365,15 @@ public:
             color->setTexture(target->handle());
             color->setLoadAction(toMtl(attachment.loadOp));
             color->setStoreAction(toMtl(attachment.storeOp));
-            color->setClearColor(MTL::ClearColor::Make(attachment.clearColor.r,
-                                                       attachment.clearColor.g,
-                                                       attachment.clearColor.b,
-                                                       attachment.clearColor.a));
+            color->setClearColor(
+                MTL::ClearColor::Make(attachment.clearColor.r, attachment.clearColor.g,
+                                      attachment.clearColor.b, attachment.clearColor.a));
             if (attachment.resolveTarget != nullptr) {
                 auto* resolve = static_cast<MetalTexture*>(attachment.resolveTarget);
                 color->setResolveTexture(resolve->handle());
-                color->setStoreAction(MTL::StoreActionMultisampleResolve);
+                color->setStoreAction(attachment.storeOp == StoreOp::Store
+                                          ? MTL::StoreActionStoreAndMultisampleResolve
+                                          : MTL::StoreActionMultisampleResolve);
             }
         }
         if (desc.depthAttachment.texture != nullptr) {
@@ -428,8 +439,8 @@ public:
                      std::uint32_t firstIndex) override {
         KUMO_ASSERT(indexBuffer_ != nullptr);
         const std::uint64_t offset =
-            indexOffset_ + static_cast<std::uint64_t>(firstIndex) *
-                               (indexType_ == MTL::IndexTypeUInt16 ? 2u : 4u);
+            indexOffset_ +
+            static_cast<std::uint64_t>(firstIndex) * (indexType_ == MTL::IndexTypeUInt16 ? 2u : 4u);
         encoder_->drawIndexedPrimitives(primitive_, static_cast<NS::UInteger>(indexCount),
                                         indexType_, indexBuffer_, offset,
                                         static_cast<NS::UInteger>(instanceCount));
@@ -518,9 +529,24 @@ public:
     explicit MetalQueue(NS::SharedPtr<MTL::CommandQueue> queue)
         : queue_(std::move(queue)), frameSemaphore_(dispatch_semaphore_create(kFramesInFlight)) {}
 
+    ~MetalQueue() override {
+        // Drain so no completion handler can signal the semaphore after release.
+        waitIdle();
+        dispatch_release(frameSemaphore_);
+    }
+
     Ptr<CommandEncoder> createCommandEncoder() override {
         dispatch_semaphore_wait(frameSemaphore_, DISPATCH_TIME_FOREVER);
         return std::make_shared<MetalCommandEncoder>(queue_.get(), frameSemaphore_);
+    }
+
+    void waitIdle() override {
+        for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
+            dispatch_semaphore_wait(frameSemaphore_, DISPATCH_TIME_FOREVER);
+        }
+        for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
+            dispatch_semaphore_signal(frameSemaphore_);
+        }
     }
 
     void writeBuffer(Buffer& buffer, std::uint64_t offset, const void* data,
@@ -562,9 +588,8 @@ public:
         KUMO_ASSERT(desc.size.width > 0 && desc.size.height > 0);
         KUMO_ASSERT(desc.sampleCount == 1); // MSAA arrives with M4.
         MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
-        descriptor->setTextureType(desc.dimension == TextureDimension::Cube
-                                       ? MTL::TextureTypeCube
-                                       : MTL::TextureType2D);
+        descriptor->setTextureType(desc.dimension == TextureDimension::Cube ? MTL::TextureTypeCube
+                                                                            : MTL::TextureType2D);
         descriptor->setPixelFormat(toMtl(desc.format));
         descriptor->setWidth(desc.size.width);
         descriptor->setHeight(desc.size.height);
@@ -578,7 +603,11 @@ public:
         }
         if (hasFlag(desc.usage, TextureUsage::RenderTarget)) {
             usage |= MTL::TextureUsageRenderTarget;
-            descriptor->setStorageMode(MTL::StorageModePrivate);
+            // writeTexture uses replaceRegion, which needs CPU-accessible storage.
+            if (!hasFlag(desc.usage, TextureUsage::CopyDst) &&
+                !hasFlag(desc.usage, TextureUsage::CopySrc)) {
+                descriptor->setStorageMode(MTL::StorageModePrivate);
+            }
         }
         if (hasFlag(desc.usage, TextureUsage::Storage)) {
             usage |= MTL::TextureUsageShaderWrite;
@@ -618,6 +647,7 @@ public:
     Ptr<ShaderModule> createShaderModule(const ShaderModuleDesc& desc) override {
         KUMO_ASSERT(desc.language == ShaderSourceLanguage::MSL);
         KUMO_ASSERT(!desc.entryPoint.empty());
+        AutoreleasePoolGuard pool;
         NS::Error* error = nullptr;
         NS::SharedPtr<MTL::Library> library =
             NS::TransferPtr(device_->newLibrary(nsString(desc.source), nullptr, &error));
@@ -649,10 +679,15 @@ public:
     }
 
     Ptr<RenderPipeline> createRenderPipeline(const RenderPipelineDesc& desc) override {
-        KUMO_ASSERT(desc.vertexShader && desc.fragmentShader);
         KUMO_ASSERT(desc.vertexBuffers.size() <= kMaxVertexBufferSlots);
         KUMO_ASSERT(desc.bindGroupLayouts.size() <= kMaxBindGroups);
         KUMO_ASSERT(desc.pushConstantSize <= 128);
+        KUMO_ASSERT(desc.sampleCount == 1); // MSAA arrives with M4.
+        if (!desc.vertexShader || !desc.fragmentShader) {
+            logError("createRenderPipeline requires vertex and fragment shaders");
+            return nullptr;
+        }
+        AutoreleasePoolGuard pool;
 
         MTL::RenderPipelineDescriptor* descriptor = MTL::RenderPipelineDescriptor::alloc()->init();
         descriptor->setVertexFunction(
@@ -664,7 +699,8 @@ public:
             MTL::VertexDescriptor* vertexDescriptor = MTL::VertexDescriptor::vertexDescriptor();
             for (std::size_t slot = 0; slot < desc.vertexBuffers.size(); ++slot) {
                 const VertexBufferLayout& layout = desc.vertexBuffers[slot];
-                const std::uint32_t bufferIndex = vertexBufferIndex(static_cast<std::uint32_t>(slot));
+                const std::uint32_t bufferIndex =
+                    vertexBufferIndex(static_cast<std::uint32_t>(slot));
                 MTL::VertexBufferLayoutDescriptor* layoutDescriptor =
                     vertexDescriptor->layouts()->object(bufferIndex);
                 layoutDescriptor->setStride(layout.stride);
@@ -722,27 +758,20 @@ public:
                                               device_.get());
     }
 
-    Queue& queue() override { return queue_impl_(); }
+    Queue& queue() override { return queue_; }
 
     NativeHandles nativeHandles() override { return {.device = device_.get()}; }
 
 private:
-    MetalQueue& queue_impl_() {
-        if (!queueWrapper_) {
-            queueWrapper_ = std::make_unique<MetalQueue>(queue_);
-        }
-        return *queueWrapper_;
-    }
-
     NS::SharedPtr<MTL::Device> device_;
-    NS::SharedPtr<MTL::CommandQueue> queue_;
-    std::unique_ptr<MetalQueue> queueWrapper_;
+    MetalQueue queue_;
 };
 
 } // namespace
 
 Ptr<Device> createDevice(const DeviceDesc& desc) {
     (void)desc; // Metal validation is enabled via environment (MTL_DEBUG_LAYER).
+    AutoreleasePoolGuard pool;
     NS::SharedPtr<MTL::Device> device = NS::TransferPtr(MTL::CreateSystemDefaultDevice());
     if (!device) {
         logError("no Metal device available");

@@ -9,8 +9,7 @@
 
 namespace kumo::rhi {
 
-template <typename T>
-using Ptr = std::shared_ptr<T>;
+template <typename T> using Ptr = std::shared_ptr<T>;
 
 #define KUMO_RHI_RESOURCE(T)                                                                       \
 public:                                                                                            \
@@ -218,6 +217,8 @@ class Queue {
 public:
     // One command encoder per frame; creation throttles to the frames in flight.
     virtual Ptr<CommandEncoder> createCommandEncoder() = 0;
+    // Blocks until all submitted work completes; call before tearing down surfaces.
+    virtual void waitIdle() = 0;
     virtual void writeBuffer(Buffer& buffer, std::uint64_t offset, const void* data,
                              std::uint64_t size) = 0;
     virtual void writeTexture(Texture& texture, const void* data, std::uint64_t bytesPerRow,

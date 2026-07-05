@@ -66,7 +66,16 @@ KUMO_RHI_ENUM_FLAGS(ShaderStage)
 enum class LoadOp { Load, Clear, DontCare };
 enum class StoreOp { Store, DontCare };
 
-enum class CompareFunction { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always };
+enum class CompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always
+};
 
 enum class FilterMode { Nearest, Linear };
 enum class AddressMode { Repeat, MirrorRepeat, ClampToEdge };

@@ -65,7 +65,8 @@ class Sampler {
 struct ShaderModuleDesc {
     ShaderStage stage = ShaderStage::None;
     ShaderSourceLanguage language = ShaderSourceLanguage::MSL;
-    std::string source;
+    std::string source;               // used when language == MSL
+    std::vector<std::uint32_t> spirv; // used when language == SPIRV
     std::string entryPoint;
 };
 
@@ -186,6 +187,8 @@ public:
 struct SurfaceDesc {
     // CAMetalLayer* on Apple platforms.
     void* nativeLayer = nullptr;
+    // VkSurfaceKHR on Vulkan.
+    void* nativeSurface = nullptr;
 };
 
 struct SurfaceConfig {
@@ -200,6 +203,8 @@ public:
     // Transient texture, valid until the frame is submitted. Null when no
     // drawable is available (e.g. window minimized).
     virtual Texture* acquireNextTexture() = 0;
+    // Backbuffer count; sizes the ImGui backend. Metal keeps 3 drawables.
+    virtual std::uint32_t imageCount() const { return 3; }
 };
 
 class CommandEncoder {
@@ -232,6 +237,12 @@ struct DeviceDesc {
 struct NativeHandles {
     // MTLDevice* on Metal.
     void* device = nullptr;
+    // Vulkan handles for the ImGui backend; null/0 on Metal.
+    void* vkInstance = nullptr;
+    void* vkPhysicalDevice = nullptr;
+    void* vkDevice = nullptr;
+    void* vkQueue = nullptr;
+    std::uint32_t vkQueueFamily = 0;
 };
 
 class Device {

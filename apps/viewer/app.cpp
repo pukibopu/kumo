@@ -2,17 +2,31 @@
 #include <kumo/core/file_watcher.h>
 #include <kumo/core/log.h>
 #include <kumo/rhi/rhi.h>
-#include <kumo/rhi_metal/rhi_metal.h>
 #include <kumo/shaderc/compiler.h>
 
+#if defined(KUMO_HAS_VULKAN)
+#include <vulkan/vulkan.h>
+
+#include <kumo/rhi_vulkan/rhi_vulkan.h>
+#endif
+
+#if defined(__APPLE__)
+#include <kumo/rhi_metal/rhi_metal.h>
+
 #include <Metal/Metal.hpp>
+#endif
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
 #include <backends/imgui_impl_glfw.h>
-#include <backends/imgui_impl_metal.h>
 #include <imgui.h>
+#if defined(KUMO_HAS_VULKAN)
+#include <backends/imgui_impl_vulkan.h>
+#endif
+#if defined(__APPLE__)
+#include <backends/imgui_impl_metal.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -22,7 +36,9 @@
 #include <string_view>
 #include <vector>
 
+#if defined(__APPLE__)
 void* attachMetalLayer(GLFWwindow* window);
+#endif
 
 namespace {
 
@@ -102,7 +118,8 @@ bool validateReflection(std::string_view sourceName, shaderc::Stage stage,
     return ok;
 }
 
-rhi::Ptr<rhi::ShaderModule> loadShaderModule(rhi::Device& device, const ShaderStageInfo& info) {
+rhi::Ptr<rhi::ShaderModule> loadShaderModule(rhi::Device& device, rhi::Backend backend,
+                                             const ShaderStageInfo& info) {
     const std::filesystem::path path = std::filesystem::path(KUMO_SHADER_DIR) / info.sourceName;
     auto source = readTextFile(path);
     if (!source) {
@@ -118,6 +135,14 @@ rhi::Ptr<rhi::ShaderModule> loadShaderModule(rhi::Device& device, const ShaderSt
     }
     if (!validateReflection(info.sourceName, info.stage, compiled->reflection)) {
         return nullptr;
+    }
+    if (backend == rhi::Backend::Vulkan) {
+        return device.createShaderModule({
+            .stage = info.rhiStage,
+            .language = rhi::ShaderSourceLanguage::SPIRV,
+            .spirv = compiled->spirv,
+            .entryPoint = "main",
+        });
     }
     return device.createShaderModule({
         .stage = info.rhiStage,
@@ -162,9 +187,132 @@ rhi::Ptr<rhi::Texture> makeCheckerTexture(rhi::Device& device) {
     return texture;
 }
 
+rhi::Ptr<rhi::Device> createDevice(rhi::Backend backend) {
+    if (backend == rhi::Backend::Vulkan) {
+#if defined(KUMO_HAS_VULKAN)
+        return rhi::vulkan::createDevice({});
+#else
+        logError("Vulkan backend not built");
+        return nullptr;
+#endif
+    }
+#if defined(__APPLE__)
+    return rhi::metal::createDevice({});
+#else
+    logError("Metal backend not available");
+    return nullptr;
+#endif
+}
+
+rhi::Ptr<rhi::Surface> createSurface(rhi::Device& device, rhi::Backend backend,
+                                     GLFWwindow* window) {
+    if (backend == rhi::Backend::Vulkan) {
+#if defined(KUMO_HAS_VULKAN)
+        const rhi::NativeHandles handles = device.nativeHandles();
+        VkSurfaceKHR vkSurface = VK_NULL_HANDLE;
+        if (glfwCreateWindowSurface(reinterpret_cast<VkInstance>(handles.vkInstance), window,
+                                    nullptr, &vkSurface) != VK_SUCCESS) {
+            logError("glfwCreateWindowSurface failed");
+            return nullptr;
+        }
+        return device.createSurface({.nativeSurface = vkSurface});
+#else
+        (void)window;
+        return nullptr;
+#endif
+    }
+#if defined(__APPLE__)
+    return device.createSurface({.nativeLayer = attachMetalLayer(window)});
+#else
+    (void)window;
+    return nullptr;
+#endif
+}
+
+void imguiInit(rhi::Device& device, rhi::Backend backend, GLFWwindow* window,
+               rhi::Surface& surface) {
+    if (backend == rhi::Backend::Vulkan) {
+#if defined(KUMO_HAS_VULKAN)
+        const rhi::NativeHandles handles = device.nativeHandles();
+        static const VkFormat kColorFormat = VK_FORMAT_B8G8R8A8_UNORM;
+        ImGui_ImplGlfw_InitForVulkan(window, true);
+        ImGui_ImplVulkan_InitInfo init{};
+        init.ApiVersion = VK_API_VERSION_1_3;
+        init.Instance = reinterpret_cast<VkInstance>(handles.vkInstance);
+        init.PhysicalDevice = reinterpret_cast<VkPhysicalDevice>(handles.vkPhysicalDevice);
+        init.Device = reinterpret_cast<VkDevice>(handles.vkDevice);
+        init.QueueFamily = handles.vkQueueFamily;
+        init.Queue = reinterpret_cast<VkQueue>(handles.vkQueue);
+        init.DescriptorPoolSize = 16;
+        init.MinImageCount = 2;
+        init.ImageCount = surface.imageCount();
+        init.UseDynamicRendering = true;
+        init.PipelineInfoMain.PipelineRenderingCreateInfo.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+        init.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+        init.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &kColorFormat;
+        ImGui_ImplVulkan_Init(&init);
+        return;
+#endif
+    }
+#if defined(__APPLE__)
+    (void)surface;
+    ImGui_ImplGlfw_InitForOther(window, true);
+    ImGui_ImplMetal_Init(static_cast<MTL::Device*>(device.nativeHandles().device));
+#endif
+}
+
+void imguiNewFrame(rhi::Backend backend, rhi::RenderPassEncoder& pass) {
+    if (backend == rhi::Backend::Vulkan) {
+#if defined(KUMO_HAS_VULKAN)
+        (void)pass;
+        ImGui_ImplVulkan_NewFrame();
+#endif
+    } else {
+#if defined(__APPLE__)
+        ImGui_ImplMetal_NewFrame(
+            static_cast<MTL::RenderPassDescriptor*>(pass.nativePassDescriptorHandle()));
+#endif
+    }
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+}
+
+void imguiRender(rhi::Backend backend, rhi::CommandEncoder& encoder, rhi::RenderPassEncoder& pass) {
+    ImGui::Render();
+    if (backend == rhi::Backend::Vulkan) {
+#if defined(KUMO_HAS_VULKAN)
+        (void)encoder;
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
+                                        static_cast<VkCommandBuffer>(pass.nativeEncoderHandle()));
+#endif
+    } else {
+#if defined(__APPLE__)
+        ImGui_ImplMetal_RenderDrawData(
+            ImGui::GetDrawData(),
+            static_cast<MTL::CommandBuffer*>(encoder.nativeCommandBufferHandle()),
+            static_cast<MTL::RenderCommandEncoder*>(pass.nativeEncoderHandle()));
+#endif
+    }
+}
+
+void imguiShutdown(rhi::Backend backend) {
+    if (backend == rhi::Backend::Vulkan) {
+#if defined(KUMO_HAS_VULKAN)
+        ImGui_ImplVulkan_Shutdown();
+#endif
+    } else {
+#if defined(__APPLE__)
+        ImGui_ImplMetal_Shutdown();
+#endif
+    }
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+}
+
 } // namespace
 
-int runApp(int maxFrames) {
+int runApp(rhi::Backend backend, int maxFrames) {
     if (!glfwInit()) {
         kumo::logError("glfwInit failed");
         return 1;
@@ -177,15 +325,19 @@ int runApp(int maxFrames) {
         return 1;
     }
 
-    rhi::Ptr<rhi::Device> device = rhi::metal::createDevice({});
+    rhi::Ptr<rhi::Device> device = createDevice(backend);
     if (!device) {
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
     }
 
-    rhi::Ptr<rhi::Surface> surface =
-        device->createSurface({.nativeLayer = attachMetalLayer(window)});
+    rhi::Ptr<rhi::Surface> surface = createSurface(*device, backend, window);
+    if (!surface) {
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 1;
+    }
     int fbWidth = 0;
     int fbHeight = 0;
     glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
@@ -217,8 +369,9 @@ int runApp(int maxFrames) {
         .entries = {{.binding = 0, .texture = texture}, {.binding = 1, .sampler = sampler}},
     });
 
-    rhi::Ptr<rhi::ShaderModule> vertexShader = loadShaderModule(*device, kShaderStages[0]);
-    rhi::Ptr<rhi::ShaderModule> fragmentShader = loadShaderModule(*device, kShaderStages[1]);
+    rhi::Ptr<rhi::ShaderModule> vertexShader = loadShaderModule(*device, backend, kShaderStages[0]);
+    rhi::Ptr<rhi::ShaderModule> fragmentShader =
+        loadShaderModule(*device, backend, kShaderStages[1]);
     if (!vertexShader || !fragmentShader) {
         glfwDestroyWindow(window);
         glfwTerminate();
@@ -249,8 +402,7 @@ int runApp(int maxFrames) {
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr; // no imgui.ini in the working directory
     ImGui::StyleColorsDark();
-    ImGui_ImplGlfw_InitForOther(window, true);
-    ImGui_ImplMetal_Init(static_cast<MTL::Device*>(device->nativeHandles().device));
+    imguiInit(*device, backend, window, *surface);
 
     int frame = 0;
     while (!glfwWindowShouldClose(window)) {
@@ -259,8 +411,10 @@ int runApp(int maxFrames) {
         shaderWatcher.poll();
         if (reloadPending) {
             reloadPending = false;
-            rhi::Ptr<rhi::ShaderModule> newVertex = loadShaderModule(*device, kShaderStages[0]);
-            rhi::Ptr<rhi::ShaderModule> newFragment = loadShaderModule(*device, kShaderStages[1]);
+            rhi::Ptr<rhi::ShaderModule> newVertex =
+                loadShaderModule(*device, backend, kShaderStages[0]);
+            rhi::Ptr<rhi::ShaderModule> newFragment =
+                loadShaderModule(*device, backend, kShaderStages[1]);
             if (newVertex && newFragment) {
                 rhi::Ptr<rhi::RenderPipeline> newPipeline =
                     buildPipeline(*device, newVertex, newFragment, materialLayout);
@@ -293,20 +447,13 @@ int runApp(int maxFrames) {
             pass.setBindGroup(1, *materialGroup);
             pass.draw(3);
 
-            ImGui_ImplMetal_NewFrame(
-                static_cast<MTL::RenderPassDescriptor*>(pass.nativePassDescriptorHandle()));
-            ImGui_ImplGlfw_NewFrame();
-            ImGui::NewFrame();
+            imguiNewFrame(backend, pass);
             ImGui::Begin("stats");
             ImGui::Text("%.1f fps (%.2f ms)", ImGui::GetIO().Framerate,
                         1000.0f / ImGui::GetIO().Framerate);
             ImGui::Text("drawable %dx%d", fbWidth, fbHeight);
             ImGui::End();
-            ImGui::Render();
-            ImGui_ImplMetal_RenderDrawData(
-                ImGui::GetDrawData(),
-                static_cast<MTL::CommandBuffer*>(encoder->nativeCommandBufferHandle()),
-                static_cast<MTL::RenderCommandEncoder*>(pass.nativeEncoderHandle()));
+            imguiRender(backend, *encoder, pass);
 
             pass.end();
         }
@@ -319,9 +466,7 @@ int runApp(int maxFrames) {
     }
 
     device->queue().waitIdle();
-    ImGui_ImplMetal_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    imguiShutdown(backend);
 
     kumo::logInfo("rendered {} frames", frame);
     glfwDestroyWindow(window);

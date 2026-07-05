@@ -21,4 +21,11 @@ if(APPLE)
     target_include_directories(kumo_tests PRIVATE ${CMAKE_SOURCE_DIR}/engine/rhi_metal/include)
 endif()
 
+if(TARGET kumo_rhi_vulkan)
+    # layout_tracker.h is a pure header (no Vulkan includes), so the test needs
+    # only the include path, not the backend library.
+    target_sources(kumo_tests PRIVATE test_layout_tracker.cpp)
+    target_include_directories(kumo_tests PRIVATE ${CMAKE_SOURCE_DIR}/engine/rhi_vulkan/include)
+endif()
+
 add_test(NAME kumo_tests COMMAND kumo_tests)

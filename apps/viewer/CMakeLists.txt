@@ -1,6 +1,9 @@
 set(VIEWER_SOURCES main.cpp)
+if(APPLE OR Vulkan_FOUND)
+    list(APPEND VIEWER_SOURCES app.cpp)
+endif()
 if(APPLE)
-    list(APPEND VIEWER_SOURCES app.cpp metal_layer_glue.mm)
+    list(APPEND VIEWER_SOURCES metal_layer_glue.mm)
 endif()
 
 add_executable(viewer ${VIEWER_SOURCES})
@@ -9,7 +12,20 @@ target_compile_definitions(viewer PRIVATE KUMO_VERSION_STRING="${PROJECT_VERSION
 target_compile_definitions(viewer PRIVATE KUMO_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders")
 kumo_target_warnings(viewer)
 
+if(APPLE OR Vulkan_FOUND)
+    target_link_libraries(viewer PRIVATE kumo_rhi kumo_shaderc imgui_lib)
+endif()
+
 if(APPLE)
     set_source_files_properties(metal_layer_glue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(viewer PRIVATE kumo_rhi kumo_rhi_metal kumo_shaderc imgui_lib "-framework Cocoa")
+    target_link_libraries(viewer PRIVATE kumo_rhi_metal "-framework Cocoa")
+endif()
+
+if(Vulkan_FOUND)
+    target_compile_definitions(viewer PRIVATE KUMO_HAS_VULKAN)
+    target_link_libraries(viewer PRIVATE kumo_rhi_vulkan Vulkan::Vulkan)
+    if(APPLE)
+        get_filename_component(_kumo_vulkan_libdir "${Vulkan_LIBRARY}" DIRECTORY)
+        set_target_properties(viewer PROPERTIES BUILD_RPATH "${_kumo_vulkan_libdir}")
+    endif()
 endif()

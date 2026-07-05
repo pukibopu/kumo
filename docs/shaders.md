@@ -29,6 +29,8 @@ descriptor set 语义固定：
 
 viewer 以 `FileWatcher`（500ms 轮询）监听 `shaders/` 源文件：变化即重编译两个 stage，全部成功才替换 pipeline；编译失败输出带行号的结构化错误并保留旧 pipeline，画面不中断。
 
+`KUMO_SHADER_DIR` 把 shader 源码目录的绝对路径烘进开发期二进制，故构建产物不可重定位；可重定位打包推迟到 M7。
+
 ## 测试
 
 CI 对 `shaders/` 全量执行完整交叉编译链（纯 CPU），并将反射出的 set/binding 布局、push constant 大小、顶点输入位置与入库快照（`tests/snapshots/*.reflect.txt`）比对，任何绑定布局变化都会在提交粒度暴露。快照更新：`KUMO_UPDATE_SNAPSHOTS=1 ./build/<preset>/tests/kumo_tests` 后人工确认 diff。

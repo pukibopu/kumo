@@ -7,6 +7,7 @@ WebGPU 风格的图形 API 抽象层，接口聚合在 `kumo/rhi/rhi.h`（枚举
 `Device / Queue / CommandEncoder / RenderPassEncoder / Buffer / Texture / Sampler / ShaderModule / BindGroupLayout / BindGroup / RenderPipeline / Surface`
 
 - 资源创建统一走 POD 描述结构（`BufferDesc` 等，designated initializers），返回共享指针；创建失败返回空（详见 architecture.md 错误约定）；
+- 后端须保证 pipeline / 资源对象存活至使用它们的 GPU 工作完成——Metal 由 command buffer 自动 retain，Vulkan 后端须相应延迟销毁；
 - 双帧 in-flight：`Queue::createCommandEncoder()` 按 in-flight 数节流（信号量），每帧一个 encoder，`finishAndSubmit(surface)` 提交并呈现；
 - `RenderPipelineDesc::bindGroupLayouts` 按 set 序号索引，空 set 用 `nullptr` 占位；
 - Per-draw 小数据（≤128 字节）走 `setPushConstants`：Vulkan 原生 push constants，Metal 映射为 `setVertexBytes` / `setFragmentBytes`（buffer index 24）；

@@ -6,7 +6,7 @@
 |---|---|---|---|
 | v0.1.0 | M0 | 工程脚手架：构建系统、核心模块、单测、CI | 完成 |
 | v0.2.0 | M1 | macOS Metal 清屏窗口 | 完成 |
-| v0.3.0 | M2 | RHI 抽象 + Metal 后端，贴图三角形 + ImGui | — |
+| v0.3.0 | M2 | RHI 抽象 + Metal 后端，贴图三角形 + ImGui | 完成 |
 | v0.4.0 | M3 | GLSL 交叉编译工具链 + Vulkan 后端 + 热重载 | — |
 | v0.5.0 | M4 | PBR、glTF 静态场景、IBL、HDR / MSAA / ACES | — |
 | v0.6.0 | M4.5 | 平行光阴影（PCF shadow map） | — |

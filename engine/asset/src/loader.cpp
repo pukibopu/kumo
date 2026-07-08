@@ -5,9 +5,13 @@
 #include <cgltf.h>
 #include <stb_image.h>
 
+#include <climits>
 #include <cstring>
 #include <format>
 #include <memory>
+#include <optional>
+#include <unordered_map>
+#include <vector>
 
 namespace kumo::asset {
 namespace {
@@ -42,6 +46,13 @@ std::expected<TextureData, std::string> decodeImage(const cgltf_image& image,
         const cgltf_buffer_view& view = *image.buffer_view;
         if (view.buffer == nullptr || view.buffer->data == nullptr) {
             return std::unexpected(std::format("glTF image buffer not loaded in {}", pathStr));
+        }
+        if (view.offset + view.size > view.buffer->size) {
+            return std::unexpected(
+                std::format("glTF image buffer view out of range in {}", pathStr));
+        }
+        if (view.size > static_cast<cgltf_size>(INT_MAX)) {
+            return std::unexpected(std::format("glTF image too large to decode in {}", pathStr));
         }
         const auto* base = static_cast<const std::uint8_t*>(view.buffer->data);
         const std::uint8_t* bytes = base + view.offset;
@@ -188,6 +199,37 @@ std::expected<SceneAsset, std::string> loadGltf(const std::filesystem::path& pat
         out.textures.push_back(std::move(*decoded));
     }
 
+    // A glTF image may feed an sRGB slot (baseColor/emissive) in one material and a
+    // linear slot (normal/MR/occlusion) in another; a single srgb flag decodes one
+    // use wrong. Track the color space each reference claims and, on conflict,
+    // duplicate the texel data for the second color space and remap that reference.
+    std::vector<std::optional<bool>> claimed(out.textures.size());
+    std::unordered_map<std::int64_t, std::int32_t> duplicates;
+    auto resolveColorSpace = [&](std::int32_t index, bool srgb) -> std::int32_t {
+        if (index < 0) {
+            return index;
+        }
+        const auto i = static_cast<std::size_t>(index);
+        if (!claimed[i].has_value()) {
+            claimed[i] = srgb;
+            out.textures[i].srgb = srgb;
+            return index;
+        }
+        if (*claimed[i] == srgb) {
+            return index;
+        }
+        const std::int64_t key = (static_cast<std::int64_t>(index) << 1) | (srgb ? 1 : 0);
+        if (auto it = duplicates.find(key); it != duplicates.end()) {
+            return it->second;
+        }
+        TextureData copy = out.textures[i];
+        copy.srgb = srgb;
+        const auto dup = static_cast<std::int32_t>(out.textures.size());
+        out.textures.push_back(std::move(copy));
+        duplicates.emplace(key, dup);
+        return dup;
+    };
+
     out.materials.reserve(data->materials_count);
     for (cgltf_size i = 0; i < data->materials_count; ++i) {
         const cgltf_material& src = data->materials[i];
@@ -210,12 +252,11 @@ std::expected<SceneAsset, std::string> loadGltf(const std::filesystem::path& pat
         mat.occlusionTexture = textureIndex(data.get(), src.occlusion_texture.texture);
         mat.emissiveTexture = textureIndex(data.get(), src.emissive_texture.texture);
 
-        if (mat.baseColorTexture >= 0) {
-            out.textures[static_cast<std::size_t>(mat.baseColorTexture)].srgb = true;
-        }
-        if (mat.emissiveTexture >= 0) {
-            out.textures[static_cast<std::size_t>(mat.emissiveTexture)].srgb = true;
-        }
+        mat.baseColorTexture = resolveColorSpace(mat.baseColorTexture, true);
+        mat.emissiveTexture = resolveColorSpace(mat.emissiveTexture, true);
+        mat.normalTexture = resolveColorSpace(mat.normalTexture, false);
+        mat.metallicRoughnessTexture = resolveColorSpace(mat.metallicRoughnessTexture, false);
+        mat.occlusionTexture = resolveColorSpace(mat.occlusionTexture, false);
         out.materials.push_back(mat);
     }
 

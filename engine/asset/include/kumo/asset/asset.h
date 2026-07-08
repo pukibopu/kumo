@@ -2,6 +2,7 @@
 
 #include <kumo/math/math.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -17,6 +18,12 @@ struct Vertex {
     float tx, ty, tz, tw;
     float u, v;
 };
+
+// GPU vertex buffers upload this struct verbatim; the layout must stay fixed.
+static_assert(sizeof(Vertex) == 48);
+static_assert(offsetof(Vertex, nx) == 12);
+static_assert(offsetof(Vertex, tx) == 24);
+static_assert(offsetof(Vertex, u) == 40);
 
 struct MeshData {
     std::vector<Vertex> vertices;

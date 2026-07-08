@@ -347,8 +347,8 @@ public:
         : device_(device), allocator_(allocator), image_(image), view_(view),
           allocation_(allocation), extent_(desc.size), format_(desc.format),
           mipLevels_(desc.mipLevelCount),
-          arrayLayers_(desc.dimension == TextureDimension::Cube ? 6u : 1u), ownsImage_(true),
-          ownsView_(true) {}
+          arrayLayers_(desc.dimension == TextureDimension::Cube ? 6u : 1u),
+          sampleCount_(desc.sampleCount), ownsImage_(true), ownsView_(true) {}
 
     // View over a parent image: owns only the view, retains the parent alive, and
     // keys layout tracking on the parent VkImage so transitions stay coherent.
@@ -380,6 +380,7 @@ public:
 
     Extent2D extent() const override { return extent_; }
     TextureFormat format() const override { return format_; }
+    std::uint32_t sampleCount() const override { return sampleCount_; }
     VkImage image() const { return image_; }
     VkImageView view() const { return view_; }
     std::uint32_t mipLevels() const { return mipLevels_; }
@@ -398,6 +399,7 @@ private:
     TextureFormat format_ = TextureFormat::Undefined;
     std::uint32_t mipLevels_ = 1;
     std::uint32_t arrayLayers_ = 1;
+    std::uint32_t sampleCount_ = 1;
     bool ownsImage_ = false;
     bool ownsView_ = false;
     Ptr<Texture> parent_;
@@ -470,8 +472,9 @@ private:
 
 class VulkanRenderPipeline final : public RenderPipeline {
 public:
-    VulkanRenderPipeline(VkDevice device, VkPipeline pipeline, VkPipelineLayout layout)
-        : device_(device), pipeline_(pipeline), layout_(layout) {}
+    VulkanRenderPipeline(VkDevice device, VkPipeline pipeline, VkPipelineLayout layout,
+                         std::uint32_t sampleCount)
+        : device_(device), pipeline_(pipeline), layout_(layout), sampleCount_(sampleCount) {}
     ~VulkanRenderPipeline() override {
         if (pipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, pipeline_, nullptr);
@@ -482,11 +485,13 @@ public:
     }
     VkPipeline handle() const { return pipeline_; }
     VkPipelineLayout layout() const { return layout_; }
+    std::uint32_t sampleCount() const { return sampleCount_; }
 
 private:
     VkDevice device_;
     VkPipeline pipeline_;
     VkPipelineLayout layout_;
+    std::uint32_t sampleCount_;
 };
 
 class VulkanComputePipeline final : public ComputePipeline {
@@ -717,6 +722,9 @@ public:
             auto* target = static_cast<VulkanTexture*>(attachment.texture);
             KUMO_ASSERT(target != nullptr);
             renderExtent = target->extent();
+            if (colorCount == 0) {
+                passSampleCount_ = target->sampleCount();
+            }
 
             const auto id = reinterpret_cast<std::uint64_t>(target->image());
             if (auto transition = tracker.request(id, ImageLayoutState::ColorAttachment)) {
@@ -764,6 +772,9 @@ public:
         if (desc.depthAttachment.texture != nullptr) {
             auto* target = static_cast<VulkanTexture*>(desc.depthAttachment.texture);
             renderExtent = target->extent();
+            if (colorCount == 0) {
+                passSampleCount_ = target->sampleCount();
+            }
             const auto id = reinterpret_cast<std::uint64_t>(target->image());
             if (auto transition = tracker.request(id, ImageLayoutState::DepthAttachment)) {
                 barriers[barrierCount++] =
@@ -817,6 +828,7 @@ public:
 
     void setPipeline(RenderPipeline& pipeline) override {
         auto& vkPipeline = static_cast<VulkanRenderPipeline&>(pipeline);
+        KUMO_ASSERT(vkPipeline.sampleCount() == passSampleCount_);
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, vkPipeline.handle());
         currentLayout_ = vkPipeline.layout();
     }
@@ -872,6 +884,7 @@ public:
 private:
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     VkPipelineLayout currentLayout_ = VK_NULL_HANDLE;
+    std::uint32_t passSampleCount_ = 1;
     bool open_ = false;
 };
 
@@ -881,6 +894,7 @@ public:
         cmd_ = cmd;
         tracker_ = &tracker;
         open_ = true;
+        dispatched_ = false;
         touched_.clear();
     }
 
@@ -911,7 +925,24 @@ public:
     }
 
     void dispatch(std::uint32_t groupsX, std::uint32_t groupsY, std::uint32_t groupsZ) override {
+        if (dispatched_) {
+            // Coarse inter-dispatch barrier, per the implicit sync model: successive
+            // dispatches on the same storage image have no auto RAW/WAW sync here.
+            VkMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            barrier.dstAccessMask =
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency.memoryBarrierCount = 1;
+            dependency.pMemoryBarriers = &barrier;
+            vkCmdPipelineBarrier2(cmd_, &dependency);
+        }
         vkCmdDispatch(cmd_, groupsX, groupsY, groupsZ);
+        dispatched_ = true;
     }
 
     void end() override {
@@ -930,6 +961,7 @@ public:
     void reset() {
         cmd_ = VK_NULL_HANDLE;
         open_ = false;
+        dispatched_ = false;
         touched_.clear();
     }
     bool open() const { return open_; }
@@ -939,13 +971,15 @@ private:
     LayoutTracker* tracker_ = nullptr;
     VkPipelineLayout currentLayout_ = VK_NULL_HANDLE;
     std::vector<VkImage> touched_;
+    bool dispatched_ = false;
     bool open_ = false;
 };
 
 class VulkanCommandEncoder final : public CommandEncoder {
 public:
-    VulkanCommandEncoder(VkQueue queue, FrameSlot* slot, LayoutTracker* tracker)
-        : queue_(queue), slot_(slot), tracker_(tracker) {}
+    VulkanCommandEncoder(VkPhysicalDevice physical, VkQueue queue, FrameSlot* slot,
+                         LayoutTracker* tracker)
+        : physical_(physical), queue_(queue), slot_(slot), tracker_(tracker) {}
 
     ~VulkanCommandEncoder() override {
         if (submitted_) {
@@ -1000,6 +1034,16 @@ public:
         auto& tex = static_cast<VulkanTexture&>(texture);
         const std::uint32_t mipCount = tex.mipLevels();
         if (mipCount <= 1) {
+            return;
+        }
+        // Linear-filter blits need a filterable format; HDR mip chains should use
+        // RGBA16Float (RGBA32Float is not filterable on most GPUs).
+        VkFormatProperties formatProps{};
+        vkGetPhysicalDeviceFormatProperties(physical_, toVk(tex.format()), &formatProps);
+        if ((formatProps.optimalTilingFeatures &
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) == 0) {
+            logError("generateMipmaps: format is not linear-filterable "
+                     "(HDR mip chains should use RGBA16Float)");
             return;
         }
         const std::uint32_t layerCount = tex.arrayLayers();
@@ -1161,6 +1205,7 @@ public:
     void* nativeCommandBufferHandle() override { return slot_->cmd; }
 
 private:
+    VkPhysicalDevice physical_;
     VkQueue queue_;
     FrameSlot* slot_;
     LayoutTracker* tracker_;
@@ -1171,8 +1216,9 @@ private:
 
 class VulkanQueue final : public Queue {
 public:
-    bool init(VkDevice device, VkQueue queue, std::uint32_t family, VmaAllocator allocator,
-              VkCommandPool uploadPool, LayoutTracker* tracker) {
+    bool init(VkPhysicalDevice physical, VkDevice device, VkQueue queue, std::uint32_t family,
+              VmaAllocator allocator, VkCommandPool uploadPool, LayoutTracker* tracker) {
+        physical_ = physical;
         device_ = device;
         queue_ = queue;
         allocator_ = allocator;
@@ -1243,7 +1289,7 @@ public:
 
         activeSlot_ = &slot;
         frameIndex_ = (frameIndex_ + 1) % kFramesInFlight;
-        return std::make_shared<VulkanCommandEncoder>(queue_, &slot, tracker_);
+        return std::make_shared<VulkanCommandEncoder>(physical_, queue_, &slot, tracker_);
     }
 
     void waitIdle() override { vkDeviceWaitIdle(device_); }
@@ -1338,6 +1384,7 @@ public:
     }
 
 private:
+    VkPhysicalDevice physical_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
@@ -1394,8 +1441,8 @@ public:
             return;
         }
 
-        ok_ = queue_.init(device_, graphicsQueue_, graphicsFamily_, allocator_, uploadPool_,
-                          &tracker_);
+        ok_ = queue_.init(physical_, device_, graphicsQueue_, graphicsFamily_, allocator_,
+                          uploadPool_, &tracker_);
     }
 
     ~VulkanDevice() override {
@@ -1449,6 +1496,7 @@ public:
 
     Ptr<Texture> createTexture(const TextureDesc& desc) override {
         KUMO_ASSERT(desc.size.width > 0 && desc.size.height > 0);
+        KUMO_ASSERT(desc.sampleCount == 1 || desc.sampleCount == 4);
 
         VkImageUsageFlags usage = 0;
         if (hasFlag(desc.usage, TextureUsage::Sampled)) {
@@ -1681,6 +1729,7 @@ public:
 
     Ptr<RenderPipeline> createRenderPipeline(const RenderPipelineDesc& desc) override {
         KUMO_ASSERT(desc.pushConstantSize <= 128);
+        KUMO_ASSERT(desc.sampleCount == 1 || desc.sampleCount == 4);
         if (!desc.vertexShader || !desc.fragmentShader) {
             logError("createRenderPipeline requires vertex and fragment shaders");
             return nullptr;
@@ -1841,11 +1890,14 @@ public:
             vkDestroyPipelineLayout(device_, pipelineLayout, nullptr);
             return nullptr;
         }
-        return std::make_shared<VulkanRenderPipeline>(device_, pipeline, pipelineLayout);
+        return std::make_shared<VulkanRenderPipeline>(device_, pipeline, pipelineLayout,
+                                                      desc.sampleCount);
     }
 
     Ptr<ComputePipeline> createComputePipeline(const ComputePipelineDesc& desc) override {
         KUMO_ASSERT(desc.pushConstantSize <= 128);
+        // Zero threadgroup dimensions hang the GPU on backends that dispatch with them.
+        KUMO_ASSERT(desc.workgroupSizeX > 0 && desc.workgroupSizeY > 0 && desc.workgroupSizeZ > 0);
         if (!desc.shader) {
             logError("createComputePipeline requires a compute shader");
             return nullptr;

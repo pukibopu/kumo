@@ -47,6 +47,7 @@ class Texture {
 public:
     virtual Extent2D extent() const = 0;
     virtual TextureFormat format() const = 0;
+    virtual std::uint32_t sampleCount() const = 0;
 };
 
 // A view IS-A Texture over a subrange of a parent texture (mips/array layers),

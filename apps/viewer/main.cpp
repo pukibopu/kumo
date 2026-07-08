@@ -1,50 +1,48 @@
 #include <kumo/core/log.h>
-#include <kumo/rhi/types.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <string_view>
 
-#if defined(__APPLE__) || defined(KUMO_HAS_VULKAN)
+#if defined(__APPLE__)
 #define KUMO_HAS_RUNAPP 1
-int runApp(kumo::rhi::Backend backend, int maxFrames);
+int runApp(int maxFrames, const std::filesystem::path& modelPath,
+           const std::filesystem::path& envPath);
 #endif
 
 int main(int argc, char** argv) {
     int maxFrames = -1;
-#if defined(__APPLE__)
-    kumo::rhi::Backend backend = kumo::rhi::Backend::Metal;
-#else
-    kumo::rhi::Backend backend = kumo::rhi::Backend::Vulkan;
-#endif
+    std::filesystem::path modelPath =
+        std::filesystem::path(KUMO_ASSET_DIR) / "models" / "DamagedHelmet.glb";
+    std::filesystem::path envPath =
+        std::filesystem::path(KUMO_ASSET_DIR) / "env" / "studio_small_09_2k.hdr";
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg(argv[i]);
         if (arg == "--frames" && i + 1 < argc) {
             maxFrames = std::atoi(argv[++i]);
-        } else if (arg == "--rhi") {
+        } else if (arg == "--env") {
             if (i + 1 >= argc) {
-                kumo::logError("--rhi requires a value: metal|vulkan");
+                kumo::logError("--env requires a path to an .hdr file");
                 return 1;
             }
-            const std::string_view value(argv[++i]);
-            if (value == "metal") {
-                backend = kumo::rhi::Backend::Metal;
-            } else if (value == "vulkan") {
-                backend = kumo::rhi::Backend::Vulkan;
-            } else {
-                kumo::logError("unknown --rhi '{}' (expected metal|vulkan)", value);
-                return 1;
-            }
+            envPath = argv[++i];
+        } else if (!arg.starts_with("--")) {
+            modelPath = arg;
+        } else {
+            kumo::logError(
+                "unknown option '{}' (usage: viewer [model.glb] [--env path.hdr] [--frames N])",
+                arg);
+            return 1;
         }
     }
 
     kumo::logInfo("kumo viewer {}", KUMO_VERSION_STRING);
 
 #if defined(KUMO_HAS_RUNAPP)
-    return runApp(backend, maxFrames);
+    return runApp(maxFrames, modelPath, envPath);
 #else
     (void)maxFrames;
-    (void)backend;
     kumo::logInfo("no rendering backend for this platform yet");
     return 0;
 #endif

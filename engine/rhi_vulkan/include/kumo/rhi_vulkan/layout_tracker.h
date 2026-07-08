@@ -11,7 +11,9 @@ enum class ImageLayoutState {
     ColorAttachment,
     DepthAttachment,
     ShaderReadOnly,
+    TransferSrc,
     TransferDst,
+    General,
     PresentSrc,
 };
 
@@ -36,6 +38,15 @@ public:
         states_[imageId] = desired;
         return LayoutTransition{current, desired};
     }
+
+    ImageLayoutState current(std::uint64_t imageId) const {
+        auto it = states_.find(imageId);
+        return it != states_.end() ? it->second : ImageLayoutState::Undefined;
+    }
+
+    // Records a layout reached by manually emitted barriers (e.g. the mip-chain
+    // blit in generateMipmaps), so later request() calls stay coherent.
+    void set(std::uint64_t imageId, ImageLayoutState state) { states_[imageId] = state; }
 
     void forget(std::uint64_t imageId) { states_.erase(imageId); }
     void reset() { states_.clear(); }

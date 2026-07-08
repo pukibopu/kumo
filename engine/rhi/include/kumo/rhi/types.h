@@ -4,8 +4,6 @@
 
 namespace kumo::rhi {
 
-enum class Backend { Metal, Vulkan };
-
 enum class TextureFormat {
     Undefined,
     RGBA8Unorm,

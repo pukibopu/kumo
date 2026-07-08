@@ -1,2 +1,0 @@
-push_constant_size=0
-vertex_input_locations=0,1

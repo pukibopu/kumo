@@ -72,3 +72,22 @@ TEST_CASE("trs composes as T*R*S") {
     CHECK(std::abs(got.z - expected.z) < 1e-5f);
     CHECK(std::abs(got.w - 1.0f) < 1e-5f);
 }
+
+TEST_CASE("decomposeTrs round-trips a TRS matrix") {
+    math::float3 t{1.0f, -2.0f, 0.5f};
+    math::quat r = math::quatLookAt({0.3f, -0.4f, -1.0f}, {0.0f, 1.0f, 0.0f});
+    math::float3 s{2.0f, 0.5f, 3.0f};
+
+    math::Trs out = math::decomposeTrs(math::trs(t, r, s));
+
+    CHECK(std::abs(out.translation.x - t.x) < 1e-5f);
+    CHECK(std::abs(out.translation.y - t.y) < 1e-5f);
+    CHECK(std::abs(out.translation.z - t.z) < 1e-5f);
+    CHECK(std::abs(out.scale.x - s.x) < 1e-5f);
+    CHECK(std::abs(out.scale.y - s.y) < 1e-5f);
+    CHECK(std::abs(out.scale.z - s.z) < 1e-5f);
+    // q and -q encode the same rotation.
+    const float dot = std::abs(out.rotation.w * r.w + out.rotation.x * r.x + out.rotation.y * r.y +
+                               out.rotation.z * r.z);
+    CHECK(std::abs(dot - 1.0f) < 1e-5f);
+}

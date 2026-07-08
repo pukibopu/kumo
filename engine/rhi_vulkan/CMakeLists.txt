@@ -1,4 +1,9 @@
-add_library(kumo_rhi_vulkan STATIC src/rhi_vulkan.cpp)
+add_library(kumo_rhi_vulkan STATIC
+    src/device.cpp
+    src/resources.cpp
+    src/pipeline.cpp
+    src/frame.cpp
+)
 target_include_directories(kumo_rhi_vulkan PUBLIC include)
 target_link_libraries(kumo_rhi_vulkan
     PUBLIC kumo_rhi

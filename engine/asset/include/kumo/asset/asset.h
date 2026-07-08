@@ -78,4 +78,9 @@ struct HdrImage {
 
 std::expected<HdrImage, std::string> loadHdr(const std::filesystem::path& path);
 
+// RGBA8 image IO used by screenshots and golden-image tests.
+std::expected<TextureData, std::string> loadImage(const std::filesystem::path& path);
+bool writePng(const std::filesystem::path& path, std::uint32_t width, std::uint32_t height,
+              const std::uint8_t* rgba);
+
 } // namespace kumo::asset

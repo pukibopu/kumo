@@ -47,6 +47,18 @@ class Texture {
 public:
     virtual Extent2D extent() const = 0;
     virtual TextureFormat format() const = 0;
+    virtual std::uint32_t sampleCount() const = 0;
+};
+
+// A view IS-A Texture over a subrange of a parent texture (mips/array layers),
+// usable anywhere a Texture is. Cube view for sampling; per-face 2D views
+// (arrayLayerCount = 1) for storage writes.
+struct TextureViewDesc {
+    std::uint32_t baseMipLevel = 0;
+    std::uint32_t mipLevelCount = 1;
+    std::uint32_t baseArrayLayer = 0;
+    std::uint32_t arrayLayerCount = 1;
+    TextureDimension dimension = TextureDimension::Tex2D;
 };
 
 struct SamplerDesc {
@@ -56,6 +68,9 @@ struct SamplerDesc {
     AddressMode addressModeU = AddressMode::Repeat;
     AddressMode addressModeV = AddressMode::Repeat;
     AddressMode addressModeW = AddressMode::Repeat;
+    // Prefiltered-env sampling needs the full mip range.
+    float lodMaxClamp = 1000.0f;
+    std::uint32_t maxAnisotropy = 1;
 };
 
 class Sampler {
@@ -184,6 +199,33 @@ public:
     virtual void* nativePassDescriptorHandle() = 0;
 };
 
+struct ComputePipelineDesc {
+    Ptr<ShaderModule> shader;
+    std::vector<Ptr<BindGroupLayout>> bindGroupLayouts;
+    std::uint32_t pushConstantSize = 0;
+    // Metal needs the threadgroup size explicitly; Vulkan bakes local_size into
+    // SPIR-V and ignores these. Set to match the shader's local_size_{x,y,z}.
+    std::uint32_t workgroupSizeX = 1;
+    std::uint32_t workgroupSizeY = 1;
+    std::uint32_t workgroupSizeZ = 1;
+};
+
+class ComputePipeline {
+    KUMO_RHI_RESOURCE(ComputePipeline)
+};
+
+class ComputePassEncoder {
+    KUMO_RHI_RESOURCE(ComputePassEncoder)
+public:
+    virtual void setPipeline(ComputePipeline& pipeline) = 0;
+    virtual void setBindGroup(std::uint32_t set, BindGroup& group) = 0;
+    virtual void setPushConstants(const void* data, std::uint32_t size) = 0;
+    // Workgroup counts, matching vkCmdDispatch semantics.
+    virtual void dispatch(std::uint32_t groupsX, std::uint32_t groupsY = 1,
+                          std::uint32_t groupsZ = 1) = 0;
+    virtual void end() = 0;
+};
+
 struct SurfaceDesc {
     // CAMetalLayer* on Apple platforms.
     void* nativeLayer = nullptr;
@@ -213,7 +255,11 @@ class CommandEncoder {
     KUMO_RHI_RESOURCE(CommandEncoder)
 public:
     // The returned encoder is owned by this command encoder and valid until end().
+    // Compute and render passes may be interleaved within one command encoder.
     virtual RenderPassEncoder& beginRenderPass(const RenderPassDesc& desc) = 0;
+    virtual ComputePassEncoder& beginComputePass() = 0;
+    // Must not be called while a render or compute pass is open.
+    virtual void generateMipmaps(Texture& texture) = 0;
     virtual void finishAndSubmit(Surface* presentTo = nullptr) = 0;
     // MTLCommandBuffer* on Metal.
     virtual void* nativeCommandBufferHandle() = 0;
@@ -252,11 +298,16 @@ class Device {
 public:
     virtual Ptr<Buffer> createBuffer(const BufferDesc& desc) = 0;
     virtual Ptr<Texture> createTexture(const TextureDesc& desc) = 0;
+    // The view retains the parent; it IS-A Texture usable as a bind group entry or
+    // render pass attachment.
+    virtual Ptr<Texture> createTextureView(const Ptr<Texture>& texture,
+                                           const TextureViewDesc& desc) = 0;
     virtual Ptr<Sampler> createSampler(const SamplerDesc& desc) = 0;
     virtual Ptr<ShaderModule> createShaderModule(const ShaderModuleDesc& desc) = 0;
     virtual Ptr<BindGroupLayout> createBindGroupLayout(const BindGroupLayoutDesc& desc) = 0;
     virtual Ptr<BindGroup> createBindGroup(const BindGroupDesc& desc) = 0;
     virtual Ptr<RenderPipeline> createRenderPipeline(const RenderPipelineDesc& desc) = 0;
+    virtual Ptr<ComputePipeline> createComputePipeline(const ComputePipelineDesc& desc) = 0;
     virtual Ptr<Surface> createSurface(const SurfaceDesc& desc) = 0;
     virtual Queue& queue() = 0;
     virtual NativeHandles nativeHandles() = 0;

@@ -15,6 +15,20 @@ FetchContent_Declare(doctest
     GIT_TAG 1da23a3e8119ec5cce4f9388e91b065e20bf06f5 # v2.4.12
 )
 
+# Header-only asset loaders. SOURCE_SUBDIR points at a path with no CMakeLists so
+# MakeAvailable only populates the sources; we wrap them as INTERFACE targets below.
+FetchContent_Declare(cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG 360db1a95480fe102ae9c69b27c5d101167ff5ba # v1.15
+    SOURCE_SUBDIR do-not-add
+)
+
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4 # master 2026-07
+    SOURCE_SUBDIR do-not-add
+)
+
 FetchContent_Declare(glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
     GIT_TAG 7b6aead9fb88b3623e3b3725ebb42670cbe4c579 # 3.4
@@ -40,6 +54,12 @@ FetchContent_Declare(spirv_cross
 )
 
 FetchContent_MakeAvailable(glm doctest glfw imgui)
+
+FetchContent_MakeAvailable(cgltf stb)
+add_library(cgltf INTERFACE)
+target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
+add_library(stb INTERFACE)
+target_include_directories(stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
 
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp

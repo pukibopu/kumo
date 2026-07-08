@@ -15,6 +15,7 @@ enum class TextureFormat {
     RGBA16Float,
     RG16Float,
     R32Float,
+    RGBA32Float,
     Depth32Float,
 };
 
@@ -88,7 +89,7 @@ enum class IndexFormat { Uint16, Uint32 };
 enum class VertexFormat { Float32, Float32x2, Float32x3, Float32x4, Uint32, Unorm8x4 };
 enum class VertexStepMode { Vertex, Instance };
 
-enum class BindingType { UniformBuffer, StorageBuffer, Texture, Sampler };
+enum class BindingType { UniformBuffer, StorageBuffer, Texture, StorageTexture, Sampler };
 
 enum class ShaderSourceLanguage { MSL, SPIRV };
 

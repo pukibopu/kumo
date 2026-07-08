@@ -13,6 +13,7 @@
 
 #include <dispatch/dispatch.h>
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -40,6 +41,8 @@ MTL::PixelFormat toMtl(TextureFormat format) {
         return MTL::PixelFormatRG16Float;
     case TextureFormat::R32Float:
         return MTL::PixelFormatR32Float;
+    case TextureFormat::RGBA32Float:
+        return MTL::PixelFormatRGBA32Float;
     case TextureFormat::Depth32Float:
         return MTL::PixelFormatDepth32Float;
     }
@@ -135,6 +138,17 @@ NS::String* nsString(const std::string& text) {
     return NS::String::string(text.c_str(), NS::UTF8StringEncoding);
 }
 
+// Linear-filter mip generation needs a filterable format; RGBA32Float is not
+// filterable on most GPUs, so HDR mip chains should use RGBA16Float instead.
+bool isFilterable(TextureFormat format) {
+    switch (format) {
+    case TextureFormat::RGBA32Float:
+        return false;
+    default:
+        return true;
+    }
+}
+
 // Resource creation runs outside the per-frame pool; autoreleased temporaries
 // (NS::String, descriptors, NS::Error) would otherwise leak on repeated use.
 struct AutoreleasePoolGuard {
@@ -161,7 +175,13 @@ private:
 class MetalTexture final : public Texture {
 public:
     MetalTexture(NS::SharedPtr<MTL::Texture> texture, const TextureDesc& desc)
-        : owned_(std::move(texture)), extent_(desc.size), format_(desc.format) {}
+        : owned_(std::move(texture)), extent_(desc.size), format_(desc.format),
+          sampleCount_(desc.sampleCount) {}
+
+    // View over a parent texture; retains the parent to keep it alive.
+    MetalTexture(NS::SharedPtr<MTL::Texture> view, Ptr<Texture> parent, Extent2D extent,
+                 TextureFormat format)
+        : owned_(std::move(view)), parent_(std::move(parent)), extent_(extent), format_(format) {}
 
     // Transient wrapper around a surface drawable's texture.
     MetalTexture() = default;
@@ -170,17 +190,21 @@ public:
         borrowed_ = borrowed;
         extent_ = extent;
         format_ = format;
+        sampleCount_ = 1;
     }
 
     Extent2D extent() const override { return extent_; }
     TextureFormat format() const override { return format_; }
+    std::uint32_t sampleCount() const override { return sampleCount_; }
     MTL::Texture* handle() const { return borrowed_ ? borrowed_ : owned_.get(); }
 
 private:
     NS::SharedPtr<MTL::Texture> owned_;
     MTL::Texture* borrowed_ = nullptr;
+    Ptr<Texture> parent_;
     Extent2D extent_;
     TextureFormat format_ = TextureFormat::Undefined;
+    std::uint32_t sampleCount_ = 1;
 };
 
 class MetalSampler final : public Sampler {
@@ -252,7 +276,8 @@ public:
                 }
                 break;
             }
-            case BindingType::Texture: {
+            case BindingType::Texture:
+            case BindingType::StorageTexture: {
                 auto* texture = static_cast<MetalTexture*>(entry.texture.get());
                 KUMO_ASSERT(texture != nullptr);
                 if (vertex) {
@@ -272,6 +297,35 @@ public:
                 if (fragment) {
                     encoder->setFragmentSamplerState(sampler->handle(), index);
                 }
+                break;
+            }
+            }
+        }
+    }
+
+    void applyCompute(MTL::ComputeCommandEncoder* encoder, std::uint32_t set) const {
+        for (const ResolvedEntry& resolved : resolved_) {
+            const BindGroupEntry& entry = resolved.entry;
+            const std::uint32_t index = resourceIndex(set, entry.binding);
+            switch (resolved.type) {
+            case BindingType::UniformBuffer:
+            case BindingType::StorageBuffer: {
+                auto* buffer = static_cast<MetalBuffer*>(entry.buffer.get());
+                KUMO_ASSERT(buffer != nullptr);
+                encoder->setBuffer(buffer->handle(), entry.bufferOffset, index);
+                break;
+            }
+            case BindingType::Texture:
+            case BindingType::StorageTexture: {
+                auto* texture = static_cast<MetalTexture*>(entry.texture.get());
+                KUMO_ASSERT(texture != nullptr);
+                encoder->setTexture(texture->handle(), index);
+                break;
+            }
+            case BindingType::Sampler: {
+                auto* sampler = static_cast<MetalSampler*>(entry.sampler.get());
+                KUMO_ASSERT(sampler != nullptr);
+                encoder->setSamplerState(sampler->handle(), index);
                 break;
             }
             }
@@ -299,13 +353,15 @@ public:
                     : desc.cullMode == CullMode::Front ? MTL::CullModeFront
                                                        : MTL::CullModeBack),
           winding_(desc.frontFace == FrontFace::CCW ? MTL::WindingCounterClockwise
-                                                    : MTL::WindingClockwise) {}
+                                                    : MTL::WindingClockwise),
+          sampleCount_(desc.sampleCount) {}
 
     MTL::RenderPipelineState* state() const { return state_.get(); }
     MTL::DepthStencilState* depthStencil() const { return depthStencil_.get(); }
     MTL::PrimitiveType primitive() const { return primitive_; }
     MTL::CullMode cullMode() const { return cullMode_; }
     MTL::Winding winding() const { return winding_; }
+    std::uint32_t sampleCount() const { return sampleCount_; }
 
 private:
     NS::SharedPtr<MTL::RenderPipelineState> state_;
@@ -313,6 +369,20 @@ private:
     MTL::PrimitiveType primitive_;
     MTL::CullMode cullMode_;
     MTL::Winding winding_;
+    std::uint32_t sampleCount_;
+};
+
+class MetalComputePipeline final : public ComputePipeline {
+public:
+    MetalComputePipeline(NS::SharedPtr<MTL::ComputePipelineState> state, MTL::Size threadsPerGroup)
+        : state_(std::move(state)), threadsPerGroup_(threadsPerGroup) {}
+
+    MTL::ComputePipelineState* state() const { return state_.get(); }
+    MTL::Size threadsPerThreadgroup() const { return threadsPerGroup_; }
+
+private:
+    NS::SharedPtr<MTL::ComputePipelineState> state_;
+    MTL::Size threadsPerGroup_;
 };
 
 class MetalSurface final : public Surface {
@@ -365,6 +435,9 @@ public:
             MTL::RenderPassColorAttachmentDescriptor* color =
                 pass->colorAttachments()->object(static_cast<NS::UInteger>(i));
             color->setTexture(target->handle());
+            if (i == 0) {
+                passSampleCount_ = target->sampleCount();
+            }
             color->setLoadAction(toMtl(attachment.loadOp));
             color->setStoreAction(toMtl(attachment.storeOp));
             color->setClearColor(
@@ -380,6 +453,9 @@ public:
         }
         if (desc.depthAttachment.texture != nullptr) {
             auto* depthTarget = static_cast<MetalTexture*>(desc.depthAttachment.texture);
+            if (desc.colorAttachments.empty()) {
+                passSampleCount_ = depthTarget->sampleCount();
+            }
             MTL::RenderPassDepthAttachmentDescriptor* depth = pass->depthAttachment();
             depth->setTexture(depthTarget->handle());
             depth->setLoadAction(toMtl(desc.depthAttachment.loadOp));
@@ -390,10 +466,12 @@ public:
         passDescriptor_ = NS::RetainPtr(pass);
         encoder_ = NS::RetainPtr(commands->renderCommandEncoder(pass));
         KUMO_ASSERT(encoder_);
+        open_ = true;
     }
 
     void setPipeline(RenderPipeline& pipeline) override {
         auto& metalPipeline = static_cast<MetalRenderPipeline&>(pipeline);
+        KUMO_ASSERT(metalPipeline.sampleCount() == passSampleCount_);
         encoder_->setRenderPipelineState(metalPipeline.state());
         if (metalPipeline.depthStencil() != nullptr) {
             encoder_->setDepthStencilState(metalPipeline.depthStencil());
@@ -449,9 +527,10 @@ public:
     }
 
     void end() override {
-        if (encoder_) {
+        if (encoder_ && open_) {
             encoder_->endEncoding();
         }
+        open_ = false;
     }
 
     void* nativeEncoderHandle() override { return encoder_.get(); }
@@ -461,7 +540,9 @@ public:
         encoder_.reset();
         passDescriptor_.reset();
         indexBuffer_ = nullptr;
+        open_ = false;
     }
+    bool open() const { return open_; }
 
 private:
     NS::SharedPtr<MTL::RenderCommandEncoder> encoder_;
@@ -470,6 +551,56 @@ private:
     MTL::Buffer* indexBuffer_ = nullptr;
     MTL::IndexType indexType_ = MTL::IndexTypeUInt16;
     std::uint64_t indexOffset_ = 0;
+    std::uint32_t passSampleCount_ = 1;
+    bool open_ = false;
+};
+
+class MetalComputePassEncoder final : public ComputePassEncoder {
+public:
+    void begin(MTL::CommandBuffer* commands) {
+        encoder_ = NS::RetainPtr(commands->computeCommandEncoder());
+        KUMO_ASSERT(encoder_);
+        open_ = true;
+    }
+
+    void setPipeline(ComputePipeline& pipeline) override {
+        auto& metalPipeline = static_cast<MetalComputePipeline&>(pipeline);
+        encoder_->setComputePipelineState(metalPipeline.state());
+        threadsPerGroup_ = metalPipeline.threadsPerThreadgroup();
+    }
+
+    void setBindGroup(std::uint32_t set, BindGroup& group) override {
+        KUMO_ASSERT(set < kMaxBindGroups);
+        static_cast<MetalBindGroup&>(group).applyCompute(encoder_.get(), set);
+    }
+
+    void setPushConstants(const void* data, std::uint32_t size) override {
+        KUMO_ASSERT(size <= 128);
+        encoder_->setBytes(data, size, kPushConstantBufferIndex);
+    }
+
+    void dispatch(std::uint32_t groupsX, std::uint32_t groupsY, std::uint32_t groupsZ) override {
+        encoder_->dispatchThreadgroups(MTL::Size::Make(groupsX, groupsY, groupsZ),
+                                       threadsPerGroup_);
+    }
+
+    void end() override {
+        if (encoder_ && open_) {
+            encoder_->endEncoding();
+        }
+        open_ = false;
+    }
+
+    void reset() {
+        encoder_.reset();
+        open_ = false;
+    }
+    bool open() const { return open_; }
+
+private:
+    NS::SharedPtr<MTL::ComputeCommandEncoder> encoder_;
+    MTL::Size threadsPerGroup_ = MTL::Size::Make(1, 1, 1);
+    bool open_ = false;
 };
 
 class MetalCommandEncoder final : public CommandEncoder {
@@ -491,9 +622,38 @@ public:
     }
 
     RenderPassEncoder& beginRenderPass(const RenderPassDesc& desc) override {
+        // rhi.h allows interleaving passes; Metal permits only one open encoder, so
+        // end any compute encoder still recording before starting this one.
+        if (computeEncoder_.open()) {
+            computeEncoder_.end();
+            computeEncoder_.reset();
+        }
         passEncoder_.reset();
         passEncoder_.begin(commands_.get(), desc);
         return passEncoder_;
+    }
+
+    ComputePassEncoder& beginComputePass() override {
+        if (passEncoder_.open()) {
+            passEncoder_.end();
+            passEncoder_.reset();
+        }
+        computeEncoder_.reset();
+        computeEncoder_.begin(commands_.get());
+        return computeEncoder_;
+    }
+
+    void generateMipmaps(Texture& texture) override {
+        KUMO_ASSERT(!passEncoder_.open() && !computeEncoder_.open());
+        auto& metalTexture = static_cast<MetalTexture&>(texture);
+        if (!isFilterable(metalTexture.format())) {
+            logError("generateMipmaps: format is not linear-filterable "
+                     "(HDR mip chains should use RGBA16Float)");
+            return;
+        }
+        MTL::BlitCommandEncoder* blit = commands_->blitCommandEncoder();
+        blit->generateMipmaps(metalTexture.handle());
+        blit->endEncoding();
     }
 
     void finishAndSubmit(Surface* presentTo) override {
@@ -511,6 +671,7 @@ public:
             surface->releaseDrawable();
         }
         passEncoder_.reset();
+        computeEncoder_.reset();
         commands_.reset();
         pool_->release();
         pool_ = nullptr;
@@ -522,6 +683,7 @@ private:
     NS::AutoreleasePool* pool_ = nullptr;
     NS::SharedPtr<MTL::CommandBuffer> commands_;
     MetalRenderPassEncoder passEncoder_;
+    MetalComputePassEncoder computeEncoder_;
     dispatch_semaphore_t frameSemaphore_;
     bool submitted_ = false;
 };
@@ -588,10 +750,12 @@ public:
 
     Ptr<Texture> createTexture(const TextureDesc& desc) override {
         KUMO_ASSERT(desc.size.width > 0 && desc.size.height > 0);
-        KUMO_ASSERT(desc.sampleCount == 1); // MSAA arrives with M4.
+        KUMO_ASSERT(desc.sampleCount == 1 || desc.sampleCount == 4);
+        const bool multisample = desc.sampleCount > 1;
         MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
         descriptor->setTextureType(desc.dimension == TextureDimension::Cube ? MTL::TextureTypeCube
-                                                                            : MTL::TextureType2D);
+                                   : multisample ? MTL::TextureType2DMultisample
+                                                 : MTL::TextureType2D);
         descriptor->setPixelFormat(toMtl(desc.format));
         descriptor->setWidth(desc.size.width);
         descriptor->setHeight(desc.size.height);
@@ -614,6 +778,10 @@ public:
         if (hasFlag(desc.usage, TextureUsage::Storage)) {
             usage |= MTL::TextureUsageShaderWrite;
         }
+        // MSAA targets are transient device-private attachments.
+        if (multisample) {
+            descriptor->setStorageMode(MTL::StorageModePrivate);
+        }
         descriptor->setUsage(usage);
 
         NS::SharedPtr<MTL::Texture> texture = NS::TransferPtr(device_->newTexture(descriptor));
@@ -623,6 +791,26 @@ public:
             return nullptr;
         }
         return std::make_shared<MetalTexture>(std::move(texture), desc);
+    }
+
+    Ptr<Texture> createTextureView(const Ptr<Texture>& texture,
+                                   const TextureViewDesc& desc) override {
+        KUMO_ASSERT(texture != nullptr);
+        auto* parent = static_cast<MetalTexture*>(texture.get());
+        const MTL::TextureType type =
+            desc.dimension == TextureDimension::Cube ? MTL::TextureTypeCube : MTL::TextureType2D;
+        NS::SharedPtr<MTL::Texture> view = NS::TransferPtr(parent->handle()->newTextureView(
+            parent->handle()->pixelFormat(), type,
+            NS::Range::Make(desc.baseMipLevel, desc.mipLevelCount),
+            NS::Range::Make(desc.baseArrayLayer, desc.arrayLayerCount)));
+        if (!view) {
+            logError("createTextureView failed");
+            return nullptr;
+        }
+        const Extent2D base = parent->extent();
+        const Extent2D extent{std::max(1u, base.width >> desc.baseMipLevel),
+                              std::max(1u, base.height >> desc.baseMipLevel)};
+        return std::make_shared<MetalTexture>(std::move(view), texture, extent, parent->format());
     }
 
     Ptr<Sampler> createSampler(const SamplerDesc& desc) override {
@@ -635,6 +823,8 @@ public:
         descriptor->setSAddressMode(toMtl(desc.addressModeU));
         descriptor->setTAddressMode(toMtl(desc.addressModeV));
         descriptor->setRAddressMode(toMtl(desc.addressModeW));
+        descriptor->setLodMaxClamp(desc.lodMaxClamp);
+        descriptor->setMaxAnisotropy(desc.maxAnisotropy);
 
         NS::SharedPtr<MTL::SamplerState> sampler =
             NS::TransferPtr(device_->newSamplerState(descriptor));
@@ -684,7 +874,7 @@ public:
         KUMO_ASSERT(desc.vertexBuffers.size() <= kMaxVertexBufferSlots);
         KUMO_ASSERT(desc.bindGroupLayouts.size() <= kMaxBindGroups);
         KUMO_ASSERT(desc.pushConstantSize <= 128);
-        KUMO_ASSERT(desc.sampleCount == 1); // MSAA arrives with M4.
+        KUMO_ASSERT(desc.sampleCount == 1 || desc.sampleCount == 4);
         if (!desc.vertexShader || !desc.fragmentShader) {
             logError("createRenderPipeline requires vertex and fragment shaders");
             return nullptr;
@@ -752,6 +942,30 @@ public:
 
         return std::make_shared<MetalRenderPipeline>(std::move(state), std::move(depthStencil),
                                                      desc);
+    }
+
+    Ptr<ComputePipeline> createComputePipeline(const ComputePipelineDesc& desc) override {
+        KUMO_ASSERT(desc.bindGroupLayouts.size() <= kMaxBindGroups);
+        KUMO_ASSERT(desc.pushConstantSize <= 128);
+        // Threadgroup dimensions feed dispatchThreadgroups; a zero dimension hangs.
+        KUMO_ASSERT(desc.workgroupSizeX > 0 && desc.workgroupSizeY > 0 && desc.workgroupSizeZ > 0);
+        if (!desc.shader) {
+            logError("createComputePipeline requires a compute shader");
+            return nullptr;
+        }
+        AutoreleasePoolGuard pool;
+        NS::Error* error = nullptr;
+        NS::SharedPtr<MTL::ComputePipelineState> state =
+            NS::TransferPtr(device_->newComputePipelineState(
+                static_cast<MetalShaderModule*>(desc.shader.get())->function(), &error));
+        if (!state) {
+            logError("createComputePipeline failed: {}",
+                     error != nullptr ? error->localizedDescription()->utf8String() : "unknown");
+            return nullptr;
+        }
+        return std::make_shared<MetalComputePipeline>(
+            std::move(state),
+            MTL::Size::Make(desc.workgroupSizeX, desc.workgroupSizeY, desc.workgroupSizeZ));
     }
 
     Ptr<Surface> createSurface(const SurfaceDesc& desc) override {

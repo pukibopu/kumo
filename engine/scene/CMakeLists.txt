@@ -1,0 +1,3 @@
+add_library(kumo_scene INTERFACE)
+target_include_directories(kumo_scene INTERFACE include)
+target_link_libraries(kumo_scene INTERFACE kumo_math kumo_core)

@@ -42,6 +42,9 @@ TEST_CASE("loadGltf loads DamagedHelmet.glb") {
 
     CHECK(s.textures[static_cast<std::size_t>(mat.baseColorTexture)].srgb == true);
     CHECK(s.textures[static_cast<std::size_t>(mat.normalTexture)].srgb == false);
+
+    // Helmet has no dual-use texture, so color-space resolution must not duplicate.
+    CHECK(s.textures.size() == 5);
 }
 
 TEST_CASE("loadHdr loads the studio environment") {

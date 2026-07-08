@@ -42,9 +42,15 @@ TEST_CASE("Scene::addLight caps at 16") {
     for (int i = 0; i < 16; ++i) {
         CHECK(s.addLight(scene::Light{}));
     }
-    CHECK(s.lights.size() == scene::Scene::kMaxLights);
+    CHECK(s.lights().size() == scene::Scene::kMaxLights);
     CHECK_FALSE(s.addLight(scene::Light{}));
-    CHECK(s.lights.size() == 16);
+    CHECK(s.lights().size() == 16);
+
+    REQUIRE(s.light(0) != nullptr);
+    CHECK(s.light(16) == nullptr);
+
+    s.clearLights();
+    CHECK(s.lights().empty());
 }
 
 TEST_CASE("Camera lookAt yields a view that puts the eye at the origin") {

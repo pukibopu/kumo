@@ -98,6 +98,30 @@ void main() { color = data.v; }
     CHECK(contains(result.error().front().message, "set=3"));
 }
 
+TEST_CASE("compute kernel reflects workgroup size and remaps a storage image") {
+    constexpr const char* source = R"(#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D outImage;
+void main() { imageStore(outImage, ivec2(gl_GlobalInvocationID.xy), vec4(1.0)); }
+)";
+    const auto result = shaderc::compileGlsl(source, shaderc::Stage::Compute);
+    REQUIRE(result.has_value());
+    CHECK(!result->spirv.empty());
+    CHECK(!result->msl.empty());
+
+    CHECK(result->reflection.workgroupSize[0] == 8);
+    CHECK(result->reflection.workgroupSize[1] == 8);
+    CHECK(result->reflection.workgroupSize[2] == 1);
+
+    REQUIRE(result->reflection.bindings.size() == 1);
+    CHECK(result->reflection.bindings[0].set == 0);
+    CHECK(result->reflection.bindings[0].binding == 1);
+    CHECK(result->reflection.bindings[0].type == "storage_texture");
+
+    // set 0 * 8 + binding 1 == flat index 1.
+    CHECK(contains(result->msl, "[[texture(1)]]"));
+}
+
 TEST_CASE("vertex stage reflects input locations") {
     constexpr const char* source = R"(#version 460
 layout(location = 0) in vec3 pos;

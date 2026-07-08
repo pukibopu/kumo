@@ -4,6 +4,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <cmath>
+
 namespace kumo::math {
 
 using float2 = glm::vec2;
@@ -15,6 +17,8 @@ using quat = glm::quat;
 
 using glm::cross;
 using glm::dot;
+using glm::inverse;
+using glm::length;
 using glm::normalize;
 using glm::radians;
 
@@ -26,6 +30,34 @@ inline float4x4 lookAt(const float3& eye, const float3& center, const float3& up
 // Reversed-Z: near plane maps to depth 1, far to 0, which evens out float precision.
 inline float4x4 perspective(float fovYRadians, float aspect, float nearZ, float farZ) {
     return glm::perspectiveRH_ZO(fovYRadians, aspect, farZ, nearZ);
+}
+
+// Reversed-Z with the far plane at infinity: near -> depth 1, z -> -inf -> depth 0.
+inline float4x4 perspectiveInfinite(float fovYRadians, float aspect, float nearZ) {
+    float f = 1.0f / std::tan(fovYRadians * 0.5f);
+    float4x4 m(0.0f);
+    m[0][0] = f / aspect;
+    m[1][1] = f;
+    m[2][3] = -1.0f;
+    m[3][2] = nearZ;
+    return m;
+}
+
+// Quaternion orienting -Z onto `forward`, right-handed (matches the camera convention).
+// Falls back to a stable up axis when `up` is parallel to `forward`.
+inline quat quatLookAt(const float3& forward, const float3& up) {
+    float len = length(forward);
+    float3 f = len > 1e-6f ? forward / len : float3(0.0f, 0.0f, -1.0f);
+    float3 u = normalize(up);
+    if (std::abs(dot(f, u)) > 0.9999f) {
+        u = std::abs(f.y) > 0.9999f ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+    }
+    return glm::quatLookAtRH(f, u);
+}
+
+inline float4x4 trs(const float3& translation, const quat& rotation, const float3& scale) {
+    return glm::translate(float4x4(1.0f), translation) * glm::mat4_cast(rotation) *
+           glm::scale(float4x4(1.0f), scale);
 }
 
 } // namespace kumo::math

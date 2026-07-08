@@ -31,6 +31,7 @@ struct Reflection {
     std::vector<ReflectionBinding> bindings; // sorted by (set, binding)
     std::uint32_t pushConstantSize = 0;
     std::vector<std::uint32_t> vertexInputLocations; // sorted, vertex stage only
+    std::uint32_t workgroupSize[3] = {0, 0, 0};      // compute stage only
 };
 
 struct CompiledShader {

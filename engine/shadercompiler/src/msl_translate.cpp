@@ -126,6 +126,16 @@ std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage) {
                 ? "main0"
                 : compiler.get_cleansed_entry_point_name(entryPoints.front().name,
                                                          entryPoints.front().execution_model);
+
+        if (stage == Stage::Compute && !entryPoints.empty()) {
+            const auto& wg =
+                compiler
+                    .get_entry_point(entryPoints.front().name, entryPoints.front().execution_model)
+                    .workgroup_size;
+            shader.reflection.workgroupSize[0] = wg.x;
+            shader.reflection.workgroupSize[1] = wg.y;
+            shader.reflection.workgroupSize[2] = wg.z;
+        }
         return {};
     } catch (const std::exception& e) {
         return {CompileError{.file = {}, .line = 0, .message = e.what(), .secondStage = true}};

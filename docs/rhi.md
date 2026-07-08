@@ -4,6 +4,8 @@
 
 Vulkan 后端要点：vk-bootstrap 初始化（Vulkan 1.3，dynamic rendering + synchronization2）、VMA 内存分配、直接链接 SDK loader（未用 volk——1.3 核心入口点由 loader 导出）、负高度 viewport 统一 NDC Y 方向、图像布局转换由 `layout_tracker.h`（纯逻辑，有单测）驱动、描述符按 bind group 创建期分配（增长式池）。运行需 LunarG Vulkan SDK。
 
+布局跟踪按整张图像（而非每个 subresource）记录，因此不支持对同一图像跨 mip 的同时读写；烘焙 mip 链必须使用独立的源/目标纹理。
+
 WebGPU 风格的图形 API 抽象层，接口聚合在 `kumo/rhi/rhi.h`（枚举在 `types.h`）。核心类型：
 
 `Device / Queue / CommandEncoder / RenderPassEncoder / Buffer / Texture / Sampler / ShaderModule / BindGroupLayout / BindGroup / RenderPipeline / Surface`

@@ -4,3 +4,5 @@
 |---|---|---|
 | `models/DamagedHelmet.glb` | [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/DamagedHelmet)，作者 theblueturtle_ / ctxwing | CC BY-NC 4.0 |
 | `env/studio_small_09_2k.hdr` | [Poly Haven](https://polyhaven.com/a/studio_small_09)，作者 Oliksiy Yakovlyev | CC0 |
+
+DamagedHelmet 的 CC BY-NC 4.0 为非商业许可，仅供演示与开发使用，不得纳入任何商业分发。

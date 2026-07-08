@@ -84,6 +84,7 @@ std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage) {
         collect(compiler, resources.storage_buffers, "storage_buffer", model, shader.reflection);
         collect(compiler, resources.separate_images, "sampled_texture", model, shader.reflection);
         collect(compiler, resources.separate_samplers, "sampler", model, shader.reflection);
+        collect(compiler, resources.storage_images, "storage_texture", model, shader.reflection);
 
         if (std::vector<CompileError> violations = validateBindingRanges(shader.reflection);
             !violations.empty()) {

@@ -153,25 +153,18 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
         return false;
     }
 
-    const std::uint32_t pushSize = std::max(pbrVert->reflection.pushConstantSize,
-                                            pbrFrag->reflection.pushConstantSize);
+    const std::uint32_t pushSize =
+        std::max(pbrVert->reflection.pushConstantSize, pbrFrag->reflection.pushConstantSize);
     rhi::Ptr<rhi::RenderPipeline> pbr = device_->createRenderPipeline({
         .vertexShader = pbrVert->module,
         .fragmentShader = pbrFrag->module,
-        .vertexBuffers = {{.stride = sizeof(asset::Vertex),
-                           .attributes =
-                               {{.format = rhi::VertexFormat::Float32x3,
-                                 .offset = 0,
-                                 .shaderLocation = 0},
-                                {.format = rhi::VertexFormat::Float32x3,
-                                 .offset = 12,
-                                 .shaderLocation = 1},
-                                {.format = rhi::VertexFormat::Float32x4,
-                                 .offset = 24,
-                                 .shaderLocation = 2},
-                                {.format = rhi::VertexFormat::Float32x2,
-                                 .offset = 40,
-                                 .shaderLocation = 3}}}},
+        .vertexBuffers =
+            {{.stride = sizeof(asset::Vertex),
+              .attributes =
+                  {{.format = rhi::VertexFormat::Float32x3, .offset = 0, .shaderLocation = 0},
+                   {.format = rhi::VertexFormat::Float32x3, .offset = 12, .shaderLocation = 1},
+                   {.format = rhi::VertexFormat::Float32x4, .offset = 24, .shaderLocation = 2},
+                   {.format = rhi::VertexFormat::Float32x2, .offset = 40, .shaderLocation = 3}}}},
         .bindGroupLayouts = {frameLayout_, materialLayout_, iblLayout_},
         .pushConstantSize = pushSize,
         .colorFormats = {kHdrFormat},
@@ -277,8 +270,8 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
     for (const asset::TextureData& tex : sceneAsset.textures) {
         rhi::Ptr<rhi::Texture> texture = device_->createTexture({
             .size = {tex.width, tex.height},
-            .format = tex.srgb ? rhi::TextureFormat::RGBA8UnormSrgb
-                               : rhi::TextureFormat::RGBA8Unorm,
+            .format =
+                tex.srgb ? rhi::TextureFormat::RGBA8UnormSrgb : rhi::TextureFormat::RGBA8Unorm,
             .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopySrc |
                      rhi::TextureUsage::CopyDst,
             .mipLevelCount = fullMipChain(tex.width, tex.height),
@@ -439,8 +432,7 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
     scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
     scenePass.setBindGroup(2, *iblGroup_);
     scene.entities.forEach([&](scene::EntityId, const scene::Entity& entity) {
-        if (entity.meshIndex < 0 ||
-            static_cast<std::size_t>(entity.meshIndex) >= meshes_.size()) {
+        if (entity.meshIndex < 0 || static_cast<std::size_t>(entity.meshIndex) >= meshes_.size()) {
             return;
         }
         const GpuMesh& mesh = meshes_[static_cast<std::size_t>(entity.meshIndex)];

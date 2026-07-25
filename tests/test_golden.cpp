@@ -25,11 +25,11 @@ constexpr int kChannelTolerance = 3;
 constexpr double kMaxDifferingRatio = 0.01;
 
 std::vector<std::uint8_t> renderHelmet(rhi::Device& device) {
-    auto sceneAsset = asset::loadGltf(std::filesystem::path(KUMO_ASSET_DIR) / "models" /
-                                      "DamagedHelmet.glb");
+    auto sceneAsset =
+        asset::loadGltf(std::filesystem::path(KUMO_ASSET_DIR) / "models" / "DamagedHelmet.glb");
     REQUIRE_MESSAGE(sceneAsset.has_value(), sceneAsset.error_or(""));
-    auto hdr = asset::loadHdr(std::filesystem::path(KUMO_ASSET_DIR) / "env" /
-                              "studio_small_09_2k.hdr");
+    auto hdr =
+        asset::loadHdr(std::filesystem::path(KUMO_ASSET_DIR) / "env" / "studio_small_09_2k.hdr");
     REQUIRE_MESSAGE(hdr.has_value(), hdr.error_or(""));
 
     renderer::ForwardRenderer forward;
@@ -101,9 +101,9 @@ void compareToBaseline(const std::vector<std::uint8_t>& actual, const char* back
     asset::writePng(actualPath, kSize, kSize, actual.data());
 
     auto baseline = asset::loadImage(baselinePath);
-    REQUIRE_MESSAGE(baseline.has_value(),
-                    "missing baseline (run with KUMO_UPDATE_GOLDEN=1 to create): ",
-                    baseline.error_or(""));
+    REQUIRE_MESSAGE(
+        baseline.has_value(),
+        "missing baseline (run with KUMO_UPDATE_GOLDEN=1 to create): ", baseline.error_or(""));
     REQUIRE(baseline->width == kSize);
     REQUIRE(baseline->height == kSize);
 
@@ -117,10 +117,9 @@ void compareToBaseline(const std::vector<std::uint8_t>& actual, const char* back
             }
         }
     }
-    const double ratio =
-        static_cast<double>(differing) / (static_cast<double>(kSize) * kSize);
-    CHECK_MESSAGE(ratio <= kMaxDifferingRatio, "differing pixel ratio ", ratio, "; actual saved to ",
-                  actualPath.string());
+    const double ratio = static_cast<double>(differing) / (static_cast<double>(kSize) * kSize);
+    CHECK_MESSAGE(ratio <= kMaxDifferingRatio, "differing pixel ratio ", ratio,
+                  "; actual saved to ", actualPath.string());
 }
 
 } // namespace

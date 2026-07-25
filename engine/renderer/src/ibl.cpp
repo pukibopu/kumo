@@ -30,8 +30,7 @@ std::optional<ComputeStep> buildStep(rhi::Device& device, const char* file) {
     if (!stage) {
         return std::nullopt;
     }
-    const detail::StageReflection reflections[] = {
-        {&stage->reflection, rhi::ShaderStage::Compute}};
+    const detail::StageReflection reflections[] = {{&stage->reflection, rhi::ShaderStage::Compute}};
     auto layouts = detail::layoutsFromReflection(device, reflections);
     if (layouts.empty() || !layouts[0]) {
         logError("{}: no set 0 bindings reflected", file);
@@ -53,9 +52,8 @@ std::optional<ComputeStep> buildStep(rhi::Device& device, const char* file) {
 
 // Per-face (and per-mip) 2D storage views; layout tracking is per image, so
 // every step reads one texture and writes a different one.
-std::vector<rhi::Ptr<rhi::Texture>> faceViews(rhi::Device& device,
-                                              const rhi::Ptr<rhi::Texture>& cube,
-                                              std::uint32_t mip) {
+std::vector<rhi::Ptr<rhi::Texture>>
+faceViews(rhi::Device& device, const rhi::Ptr<rhi::Texture>& cube, std::uint32_t mip) {
     std::vector<rhi::Ptr<rhi::Texture>> views(6);
     for (std::uint32_t face = 0; face < 6; ++face) {
         views[face] = device.createTextureView(cube, {.baseMipLevel = mip,
@@ -157,8 +155,7 @@ Environment bake(rhi::Device& device, const asset::HdrImage& hdr) {
     }
 
     auto makeGroup = [&](const rhi::Ptr<rhi::BindGroupLayout>& layout,
-                         const rhi::Ptr<rhi::Texture>& source,
-                         const rhi::Ptr<rhi::Texture>& dest) {
+                         const rhi::Ptr<rhi::Texture>& source, const rhi::Ptr<rhi::Texture>& dest) {
         return device.createBindGroup({.layout = layout,
                                        .entries = {{.binding = 0, .texture = source},
                                                    {.binding = 1, .sampler = sampler},

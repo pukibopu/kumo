@@ -17,9 +17,7 @@ struct Environment {
     Ptr<rhi::Texture> brdfLut;
     std::uint32_t prefilteredMips = 0;
 
-    bool valid() const {
-        return environment && irradiance && prefiltered && brdfLut;
-    }
+    bool valid() const { return environment && irradiance && prefiltered && brdfLut; }
 };
 
 // Bakes irradiance/prefiltered/BRDF-LUT textures from an equirectangular HDR

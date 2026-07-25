@@ -18,8 +18,7 @@ struct CompiledStage {
 // Compiles shaders/<file> from KUMO_SHADER_DIR (with shaders/include on the
 // include path) and creates the module for the device's backend. Errors are
 // logged with file/line; nullopt on failure.
-std::optional<CompiledStage> loadStage(rhi::Device& device, const char* file,
-                                       shaderc::Stage stage);
+std::optional<CompiledStage> loadStage(rhi::Device& device, const char* file, shaderc::Stage stage);
 
 struct StageReflection {
     const shaderc::Reflection* reflection = nullptr;

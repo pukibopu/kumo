@@ -7,11 +7,12 @@
 #if defined(__APPLE__)
 #define KUMO_HAS_RUNAPP 1
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
-           const std::filesystem::path& envPath);
+           const std::filesystem::path& envPath, bool demoPrimitives);
 #endif
 
 int main(int argc, char** argv) {
     int maxFrames = -1;
+    bool demoPrimitives = false;
     std::filesystem::path modelPath =
         std::filesystem::path(KUMO_ASSET_DIR) / "models" / "DamagedHelmet.glb";
     std::filesystem::path envPath =
@@ -21,6 +22,8 @@ int main(int argc, char** argv) {
         const std::string_view arg(argv[i]);
         if (arg == "--frames" && i + 1 < argc) {
             maxFrames = std::atoi(argv[++i]);
+        } else if (arg == "--demo-primitives") {
+            demoPrimitives = true;
         } else if (arg == "--env") {
             if (i + 1 >= argc) {
                 kumo::logError("--env requires a path to an .hdr file");
@@ -30,9 +33,9 @@ int main(int argc, char** argv) {
         } else if (!arg.starts_with("--")) {
             modelPath = arg;
         } else {
-            kumo::logError(
-                "unknown option '{}' (usage: viewer [model.glb] [--env path.hdr] [--frames N])",
-                arg);
+            kumo::logError("unknown option '{}' (usage: viewer [model.glb] [--env path.hdr] "
+                           "[--frames N] [--demo-primitives])",
+                           arg);
             return 1;
         }
     }
@@ -40,9 +43,10 @@ int main(int argc, char** argv) {
     kumo::logInfo("kumo viewer {}", KUMO_VERSION_STRING);
 
 #if defined(KUMO_HAS_RUNAPP)
-    return runApp(maxFrames, modelPath, envPath);
+    return runApp(maxFrames, modelPath, envPath, demoPrimitives);
 #else
     (void)maxFrames;
+    (void)demoPrimitives;
     kumo::logInfo("no rendering backend for this platform yet");
     return 0;
 #endif

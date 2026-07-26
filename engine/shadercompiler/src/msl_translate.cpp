@@ -15,6 +15,9 @@ namespace {
 constexpr std::uint32_t kMaxBindingsPerSet = 8;
 constexpr std::uint32_t kMaxSets = 3;
 constexpr std::uint32_t kPushConstantBufferIndex = 24;
+// Metal's sampler argument table has 16 entries; samplers use a stride-6 remap.
+constexpr std::uint32_t kSamplerTableStride = 6;
+constexpr std::uint32_t kMaxSamplerIndex = 15;
 
 spv::ExecutionModel toExecutionModel(Stage stage) {
     switch (stage) {
@@ -30,7 +33,7 @@ spv::ExecutionModel toExecutionModel(Stage stage) {
 
 void collect(spirv_cross::CompilerMSL& compiler,
              const spirv_cross::SmallVector<spirv_cross::Resource>& list, const char* type,
-             spv::ExecutionModel model, Reflection& reflection) {
+             spv::ExecutionModel model, Reflection& reflection, bool isSampler = false) {
     for (const spirv_cross::Resource& res : list) {
         const std::uint32_t set = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
         const std::uint32_t binding = compiler.get_decoration(res.id, spv::DecorationBinding);
@@ -44,7 +47,7 @@ void collect(spirv_cross::CompilerMSL& compiler,
         remap.binding = binding;
         remap.msl_buffer = flat;
         remap.msl_texture = flat;
-        remap.msl_sampler = flat;
+        remap.msl_sampler = isSampler ? set * kSamplerTableStride + binding : flat;
         compiler.add_msl_resource_binding(remap);
     }
 }
@@ -59,6 +62,16 @@ std::vector<CompileError> validateBindingRanges(const Reflection& reflection) {
                 .message = std::format("binding out of range: set={} binding={} (sets 0-{}, "
                                        "bindings 0-{})",
                                        b.set, b.binding, kMaxSets - 1, kMaxBindingsPerSet - 1),
+                .secondStage = true,
+            });
+        } else if (b.type == "sampler" &&
+                   b.set * kSamplerTableStride + b.binding > kMaxSamplerIndex) {
+            errors.push_back(CompileError{
+                .file = {},
+                .line = 0,
+                .message =
+                    std::format("sampler binding out of Metal's 16-slot table: set={} binding={}",
+                                b.set, b.binding),
                 .secondStage = true,
             });
         }
@@ -83,7 +96,7 @@ std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage) {
         collect(compiler, resources.uniform_buffers, "uniform_buffer", model, shader.reflection);
         collect(compiler, resources.storage_buffers, "storage_buffer", model, shader.reflection);
         collect(compiler, resources.separate_images, "sampled_texture", model, shader.reflection);
-        collect(compiler, resources.separate_samplers, "sampler", model, shader.reflection);
+        collect(compiler, resources.separate_samplers, "sampler", model, shader.reflection, true);
         collect(compiler, resources.storage_images, "storage_texture", model, shader.reflection);
 
         if (std::vector<CompileError> violations = validateBindingRanges(shader.reflection);

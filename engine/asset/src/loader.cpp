@@ -4,6 +4,7 @@
 
 #include <cgltf.h>
 #include <stb_image.h>
+#include <stb_image_write.h>
 
 #include <climits>
 #include <cstring>
@@ -319,6 +320,32 @@ std::expected<HdrImage, std::string> loadHdr(const std::filesystem::path& path) 
     img.rgba.assign(pixels, pixels + count);
     stbi_image_free(pixels);
     return img;
+}
+
+std::expected<TextureData, std::string> loadImage(const std::filesystem::path& path) {
+    const std::string pathStr = path.string();
+    int w = 0;
+    int h = 0;
+    int comp = 0;
+    stbi_uc* pixels = stbi_load(pathStr.c_str(), &w, &h, &comp, 4);
+    if (pixels == nullptr) {
+        const char* reason = stbi_failure_reason();
+        return std::unexpected(std::format("failed to load image: {} ({})", pathStr,
+                                           reason != nullptr ? reason : "unknown"));
+    }
+    TextureData tex;
+    tex.width = static_cast<std::uint32_t>(w);
+    tex.height = static_cast<std::uint32_t>(h);
+    const std::size_t byteCount = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4;
+    tex.rgba.assign(pixels, pixels + byteCount);
+    stbi_image_free(pixels);
+    return tex;
+}
+
+bool writePng(const std::filesystem::path& path, std::uint32_t width, std::uint32_t height,
+              const std::uint8_t* rgba) {
+    return stbi_write_png(path.string().c_str(), static_cast<int>(width), static_cast<int>(height),
+                          4, rgba, static_cast<int>(width) * 4) != 0;
 }
 
 } // namespace kumo::asset

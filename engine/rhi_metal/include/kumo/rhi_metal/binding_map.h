@@ -13,8 +13,17 @@ inline constexpr std::uint32_t kPushConstantBufferIndex = 24;
 inline constexpr std::uint32_t kVertexBufferBaseIndex = 30;
 inline constexpr std::uint32_t kMaxVertexBufferSlots = 5;
 
+// Metal's sampler argument table has only 16 entries, so samplers use a denser
+// stride-6 mapping; the shader compiler rejects sampler indices above 15.
+inline constexpr std::uint32_t kSamplerTableStride = 6;
+inline constexpr std::uint32_t kMaxSamplerIndex = 15;
+
 constexpr std::uint32_t resourceIndex(std::uint32_t set, std::uint32_t binding) {
     return set * kMaxBindingsPerSet + binding;
+}
+
+constexpr std::uint32_t samplerIndex(std::uint32_t set, std::uint32_t binding) {
+    return set * kSamplerTableStride + binding;
 }
 
 constexpr std::uint32_t vertexBufferIndex(std::uint32_t slot) {

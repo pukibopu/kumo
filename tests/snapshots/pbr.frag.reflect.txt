@@ -1,0 +1,14 @@
+binding set=0 binding=0 type=uniform_buffer name=FrameUniforms
+binding set=1 binding=0 type=sampled_texture name=baseColorTex
+binding set=1 binding=1 type=sampled_texture name=metallicRoughnessTex
+binding set=1 binding=2 type=sampled_texture name=normalTex
+binding set=1 binding=3 type=sampled_texture name=occlusionTex
+binding set=1 binding=4 type=sampled_texture name=emissiveTex
+binding set=1 binding=5 type=sampler name=materialSampler
+binding set=1 binding=6 type=uniform_buffer name=MaterialFactors
+binding set=2 binding=0 type=sampled_texture name=irradianceMap
+binding set=2 binding=1 type=sampled_texture name=prefilteredMap
+binding set=2 binding=2 type=sampled_texture name=brdfLut
+binding set=2 binding=3 type=sampler name=iblSampler
+push_constant_size=0
+vertex_input_locations=

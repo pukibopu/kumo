@@ -1,0 +1,32 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "cubemap.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform texture2D equirectMap;
+layout(set = 0, binding = 1) uniform sampler equirectSampler;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D dstFace;
+
+layout(push_constant) uniform Params {
+    int face;
+}
+params;
+
+const float PI = 3.14159265359;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dstFace);
+    if (coord.x >= size.x || coord.y >= size.y) {
+        return;
+    }
+    vec2 uv = (vec2(coord) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec3 dir = cubeFaceDirection(params.face, uv);
+
+    // HDR rows are stored top-first with +Y (up) on row 0.
+    vec2 equirectUv = vec2(atan(dir.z, dir.x) / (2.0 * PI) + 0.5, acos(clamp(dir.y, -1.0, 1.0)) / PI);
+    vec3 color = textureLod(sampler2D(equirectMap, equirectSampler), equirectUv, 0.0).rgb;
+    imageStore(dstFace, coord, vec4(color, 1.0));
+}

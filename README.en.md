@@ -2,11 +2,11 @@
 
 [中文](README.md)
 
-A cross-platform PBR renderer with an LLM-powered scene and shader assistant. Native Metal on macOS / iPad, Vulkan on Windows, with shaders written once in GLSL and cross-compiled to both backends.
+A native Metal PBR renderer for macOS / iPad with an LLM-powered scene and shader assistant. Shaders are written once in GLSL, cross-compiled to MSL through SPIR-V, and hot-reload at runtime.
 
 ## Planned features
 
-- Custom WebGPU-style RHI with Metal and Vulkan backends
+- Custom WebGPU-style RHI (the architecture was proven with dual Metal + Vulkan backends; now Metal-focused)
 - Cook-Torrance PBR, IBL, HDR + ACES, MSAA 4x, directional shadows
 - glTF 2.0 static scene loading
 - Single-source GLSL → SPIR-V / MSL cross-compilation with runtime hot reload
@@ -17,7 +17,7 @@ See [docs/milestones.md](docs/milestones.md) for progress.
 
 ## Building
 
-Requires CMake ≥ 3.24, Ninja, and a C++23 compiler (Apple Clang / MSVC 2022).
+Requires CMake ≥ 3.24, Ninja, and a C++23 compiler (Apple Clang).
 
 ```sh
 cmake --preset macos-debug
@@ -25,7 +25,19 @@ cmake --build --preset macos-debug
 ctest --preset macos-debug
 ```
 
-On Windows use the `windows` preset (Visual Studio 2022). From M3 onwards the [LunarG Vulkan SDK](https://vulkan.lunarg.com/) is required (the macOS version bundles MoltenVK).
+## Running
+
+```sh
+./build/macos-debug/apps/viewer/viewer                 # loads DamagedHelmet + studio HDR by default
+./build/macos-debug/apps/viewer/viewer path/to/model.glb --env path/to/env.hdr
+```
+
+The viewer renders glTF scenes with Cook-Torrance PBR and IBL (MSAA 4x, ACES tone mapping):
+
+- **Left-drag** rotates the camera, **scroll** zooms (orbit camera);
+- ImGui panels tweak the directional light (direction/intensity/color) and material metallic/roughness multipliers live;
+- **S** saves a screenshot as PNG in the working directory;
+- Editing the GLSL sources under `shaders/` hot-reloads them; compile errors keep the last good frame.
 
 ## Assistant configuration
 

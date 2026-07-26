@@ -291,11 +291,12 @@ public:
             case BindingType::Sampler: {
                 auto* sampler = static_cast<MetalSampler*>(entry.sampler.get());
                 KUMO_ASSERT(sampler != nullptr);
+                const std::uint32_t slot = samplerIndex(set, entry.binding);
                 if (vertex) {
-                    encoder->setVertexSamplerState(sampler->handle(), index);
+                    encoder->setVertexSamplerState(sampler->handle(), slot);
                 }
                 if (fragment) {
-                    encoder->setFragmentSamplerState(sampler->handle(), index);
+                    encoder->setFragmentSamplerState(sampler->handle(), slot);
                 }
                 break;
             }
@@ -325,7 +326,7 @@ public:
             case BindingType::Sampler: {
                 auto* sampler = static_cast<MetalSampler*>(entry.sampler.get());
                 KUMO_ASSERT(sampler != nullptr);
-                encoder->setSamplerState(sampler->handle(), index);
+                encoder->setSamplerState(sampler->handle(), samplerIndex(set, entry.binding));
                 break;
             }
             }
@@ -389,7 +390,9 @@ class MetalSurface final : public Surface {
 public:
     explicit MetalSurface(CA::MetalLayer* layer, MTL::Device* device) : layer_(layer) {
         layer_->setDevice(device);
-        layer_->setFramebufferOnly(true);
+        // false enables blitting from drawables (screenshots via readTexture) at
+        // the cost of disabling some framebuffer-only bandwidth optimizations.
+        layer_->setFramebufferOnly(false);
     }
 
     void configure(const SurfaceConfig& config) override {
@@ -725,6 +728,39 @@ public:
         auto& metalTexture = static_cast<MetalTexture&>(texture);
         metalTexture.handle()->replaceRegion(MTL::Region::Make2D(0, 0, size.width, size.height), 0,
                                              data, bytesPerRow);
+    }
+
+    bool readTexture(Texture& texture, void* out, std::uint64_t bytesPerRow,
+                     Extent2D size) override {
+        auto& metalTexture = static_cast<MetalTexture&>(texture);
+        AutoreleasePoolGuard pool;
+        const std::uint64_t dataSize = bytesPerRow * size.height;
+        NS::SharedPtr<MTL::Buffer> staging =
+            NS::TransferPtr(queue_->device()->newBuffer(dataSize, MTL::ResourceStorageModeShared));
+        if (!staging) {
+            logError("readTexture: staging buffer allocation failed ({} bytes)", dataSize);
+            return false;
+        }
+        // A raw command buffer, outside the frame-in-flight throttle: this call is
+        // synchronous, so it never overlaps enough frames to need the semaphore.
+        MTL::CommandBuffer* commands = queue_->commandBuffer();
+        if (commands == nullptr) {
+            logError("readTexture: command buffer creation failed");
+            return false;
+        }
+        MTL::BlitCommandEncoder* blit = commands->blitCommandEncoder();
+        blit->copyFromTexture(metalTexture.handle(), 0, 0, MTL::Origin::Make(0, 0, 0),
+                              MTL::Size::Make(size.width, size.height, 1), staging.get(), 0,
+                              bytesPerRow, 0);
+        blit->endEncoding();
+        commands->commit();
+        commands->waitUntilCompleted();
+        if (commands->status() == MTL::CommandBufferStatusError) {
+            logError("readTexture: blit command buffer failed");
+            return false;
+        }
+        std::memcpy(out, staging->contents(), dataSize);
+        return true;
     }
 
 private:

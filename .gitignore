@@ -3,6 +3,7 @@ build/
 cmake-build-*/
 .cache/
 compile_commands.json
+golden_actual_*.png
 
 # OS noise
 .DS_Store

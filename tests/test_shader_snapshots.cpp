@@ -16,7 +16,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::string serializeReflection(const shaderc::Reflection& reflection) {
+std::string serializeReflection(const shaderc::Reflection& reflection, shaderc::Stage stage) {
     std::string out;
     for (const shaderc::ReflectionBinding& binding : reflection.bindings) {
         out += "binding set=" + std::to_string(binding.set) +
@@ -32,6 +32,11 @@ std::string serializeReflection(const shaderc::Reflection& reflection) {
         out += std::to_string(reflection.vertexInputLocations[i]);
     }
     out += "\n";
+    if (stage == shaderc::Stage::Compute) {
+        out += "workgroup_size=" + std::to_string(reflection.workgroupSize[0]) + "," +
+               std::to_string(reflection.workgroupSize[1]) + "," +
+               std::to_string(reflection.workgroupSize[2]) + "\n";
+    }
     return out;
 }
 
@@ -55,7 +60,7 @@ TEST_CASE("shader reflection snapshots") {
             continue;
         }
         const std::string ext = entry.path().extension().string();
-        if (ext == ".vert" || ext == ".frag") {
+        if (ext == ".vert" || ext == ".frag" || ext == ".comp") {
             shaders.push_back(entry.path());
         }
     }
@@ -69,16 +74,21 @@ TEST_CASE("shader reflection snapshots") {
         auto source = readTextFile(shader);
         REQUIRE_MESSAGE(source.has_value(), source.error());
 
-        const shaderc::Stage stage =
-            shader.extension() == ".vert" ? shaderc::Stage::Vertex : shaderc::Stage::Fragment;
-        auto compiled = shaderc::compileGlsl(*source, stage, {.sourceName = name});
+        const std::string ext = shader.extension().string();
+        const shaderc::Stage stage = ext == ".vert"   ? shaderc::Stage::Vertex
+                                     : ext == ".comp" ? shaderc::Stage::Compute
+                                                      : shaderc::Stage::Fragment;
+        auto compiled = shaderc::compileGlsl(
+            *source, stage,
+            {.sourceName = name,
+             .includeDirs = {(fs::path(KUMO_SHADER_DIR) / "include").string()}});
         if (!compiled) {
             FAIL_CHECK("compile failed for " << name << ":\n"
                                              << formatErrors(name, compiled.error()));
             continue;
         }
 
-        const std::string actual = serializeReflection(compiled->reflection);
+        const std::string actual = serializeReflection(compiled->reflection, stage);
         const fs::path snapshot = fs::path(KUMO_SNAPSHOT_DIR) / (name + ".reflect.txt");
 
         if (update) {

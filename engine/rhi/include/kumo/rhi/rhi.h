@@ -203,8 +203,8 @@ struct ComputePipelineDesc {
     Ptr<ShaderModule> shader;
     std::vector<Ptr<BindGroupLayout>> bindGroupLayouts;
     std::uint32_t pushConstantSize = 0;
-    // Metal needs the threadgroup size explicitly; Vulkan bakes local_size into
-    // SPIR-V and ignores these. Set to match the shader's local_size_{x,y,z}.
+    // Metal dispatches with an explicit threadgroup size; set to the shader's
+    // local_size_{x,y,z} (available via shaderc reflection).
     std::uint32_t workgroupSizeX = 1;
     std::uint32_t workgroupSizeY = 1;
     std::uint32_t workgroupSizeZ = 1;
@@ -229,8 +229,6 @@ public:
 struct SurfaceDesc {
     // CAMetalLayer* on Apple platforms.
     void* nativeLayer = nullptr;
-    // VkSurfaceKHR on Vulkan.
-    void* nativeSurface = nullptr;
 };
 
 struct SurfaceConfig {
@@ -276,6 +274,10 @@ public:
                              std::uint64_t size) = 0;
     virtual void writeTexture(Texture& texture, const void* data, std::uint64_t bytesPerRow,
                               Extent2D size) = 0;
+    // Synchronous mip-0 readback; callers must have submitted the producing work
+    // first (same-queue ordering makes it visible). Returns false on failure.
+    virtual bool readTexture(Texture& texture, void* out, std::uint64_t bytesPerRow,
+                             Extent2D size) = 0;
 };
 
 struct DeviceDesc {
@@ -285,12 +287,6 @@ struct DeviceDesc {
 struct NativeHandles {
     // MTLDevice* on Metal.
     void* device = nullptr;
-    // Vulkan handles for the ImGui backend; null/0 on Metal.
-    void* vkInstance = nullptr;
-    void* vkPhysicalDevice = nullptr;
-    void* vkDevice = nullptr;
-    void* vkQueue = nullptr;
-    std::uint32_t vkQueueFamily = 0;
 };
 
 class Device {

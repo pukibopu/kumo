@@ -1,0 +1,4 @@
+binding set=0 binding=0 type=storage_texture name=dstLut
+push_constant_size=0
+vertex_input_locations=
+workgroup_size=8,8,1

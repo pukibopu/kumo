@@ -1,0 +1,90 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "cubemap.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform textureCube environmentMap;
+layout(set = 0, binding = 1) uniform sampler environmentSampler;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D dstFace;
+
+layout(push_constant) uniform Params {
+    int face;
+    float roughness;
+    float sourceResolution;
+}
+params;
+
+const float PI = 3.14159265359;
+const uint SAMPLE_COUNT = 512u;
+
+float radicalInverseVdC(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+vec2 hammersley(uint i, uint n) {
+    return vec2(float(i) / float(n), radicalInverseVdC(i));
+}
+
+vec3 importanceSampleGGX(vec2 xi, vec3 N, float roughness) {
+    float a = roughness * roughness;
+    float phi = 2.0 * PI * xi.x;
+    float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+    vec3 H = vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+    return normalize(tangent * H.x + bitangent * H.y + N * H.z);
+}
+
+float distributionGGX(float NdotH, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dstFace);
+    if (coord.x >= size.x || coord.y >= size.y) {
+        return;
+    }
+    vec2 uv = (vec2(coord) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec3 N = cubeFaceDirection(params.face, uv);
+    vec3 R = N;
+    vec3 V = N;
+
+    vec3 color = vec3(0.0);
+    float weight = 0.0;
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i) {
+        vec2 xi = hammersley(i, SAMPLE_COUNT);
+        vec3 H = importanceSampleGGX(xi, N, params.roughness);
+        vec3 L = normalize(2.0 * dot(V, H) * H - V);
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0) {
+            continue;
+        }
+        // Sample the mip whose solid angle matches the sample density (Karis).
+        float NdotH = max(dot(N, H), 0.0);
+        float pdf = distributionGGX(NdotH, params.roughness) * NdotH /
+                        (4.0 * max(dot(H, V), 1e-4)) +
+                    1e-4;
+        float saTexel = 4.0 * PI / (6.0 * params.sourceResolution * params.sourceResolution);
+        float saSample = 1.0 / (float(SAMPLE_COUNT) * pdf);
+        float mip = params.roughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel);
+        color +=
+            textureLod(samplerCube(environmentMap, environmentSampler), L, max(mip, 0.0)).rgb *
+            NdotL;
+        weight += NdotL;
+    }
+    imageStore(dstFace, coord, vec4(color / max(weight, 1e-4), 1.0));
+}

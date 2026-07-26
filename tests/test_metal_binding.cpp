@@ -15,3 +15,10 @@ TEST_CASE("metal binding map keeps argument table regions disjoint") {
     CHECK(vertexBufferIndex(0) == 30);
     CHECK(vertexBufferIndex(kMaxVertexBufferSlots - 1) > kPushConstantBufferIndex);
 }
+
+TEST_CASE("metal sampler table fits the 16-slot hardware limit") {
+    CHECK(samplerIndex(0, 1) == 1);
+    CHECK(samplerIndex(1, 5) == 11);
+    CHECK(samplerIndex(2, 3) == 15);
+    CHECK(samplerIndex(kMaxBindGroups - 1, kSamplerTableStride - 1) > kMaxSamplerIndex);
+}

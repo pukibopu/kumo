@@ -58,7 +58,8 @@ void main() { color = texture(sampler2D(t, s), vec2(0.0)); }
     CHECK(second.type == "sampler");
 
     CHECK(contains(result->msl, "[[texture(8)]]"));
-    CHECK(contains(result->msl, "[[sampler(9)]]"));
+    // Samplers use the denser stride-6 table (Metal has 16 sampler slots).
+    CHECK(contains(result->msl, "[[sampler(7)]]"));
 }
 
 TEST_CASE("push constant reflects size and remaps to buffer 24") {

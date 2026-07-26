@@ -2,9 +2,6 @@ include(FetchContent)
 
 # All third-party dependencies are declared here, pinned to exact commits.
 
-# The Vulkan backend is optional: it is built only when the SDK is present.
-find_package(Vulkan)
-
 FetchContent_Declare(glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
     GIT_TAG 0af55ccecd98d4e5a8d1fad7de25ba429d60e863 # 1.0.1
@@ -74,11 +71,6 @@ target_include_directories(imgui_lib SYSTEM PUBLIC
 )
 target_link_libraries(imgui_lib PUBLIC glfw)
 
-if(Vulkan_FOUND)
-    target_sources(imgui_lib PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
-    target_link_libraries(imgui_lib PUBLIC Vulkan::Vulkan)
-endif()
-
 if(APPLE)
     # Mirror of Apple's metal-cpp distribution (developer.apple.com/metal/cpp).
     FetchContent_Declare(metalcpp
@@ -127,23 +119,3 @@ foreach(_kumo_thirdparty
         set_target_properties(${_kumo_thirdparty} PROPERTIES SYSTEM ON)
     endif()
 endforeach()
-
-# Vulkan backend dependencies. We link the Vulkan loader directly (Vulkan::Vulkan)
-# rather than volk: the 1.3 core entry points we use are loader-exported.
-if(Vulkan_FOUND)
-    set(VK_BOOTSTRAP_TEST OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(vk_bootstrap
-        GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap.git
-        GIT_TAG b41d0c3efae19f4000df593df3cc3df66afc4c20 # v1.4.355
-    )
-    FetchContent_Declare(vma
-        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-        GIT_TAG 3aa921224c154a0d2c43912bc88e1c42ce1f7607 # v3.4.0
-    )
-    FetchContent_MakeAvailable(vk_bootstrap vma)
-    foreach(_kumo_vulkan_dep vk-bootstrap VulkanMemoryAllocator)
-        if(TARGET ${_kumo_vulkan_dep})
-            set_target_properties(${_kumo_vulkan_dep} PROPERTIES SYSTEM ON)
-        endif()
-    endforeach()
-endif()

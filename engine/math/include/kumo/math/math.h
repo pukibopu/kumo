@@ -21,6 +21,7 @@ using glm::inverse;
 using glm::length;
 using glm::normalize;
 using glm::radians;
+using glm::transpose;
 
 // World space is right-handed, +Y up, camera looking down -Z. Clip depth is [0, 1].
 inline float4x4 lookAt(const float3& eye, const float3& center, const float3& up) {
@@ -58,6 +59,28 @@ inline quat quatLookAt(const float3& forward, const float3& up) {
 inline float4x4 trs(const float3& translation, const quat& rotation, const float3& scale) {
     return glm::translate(float4x4(1.0f), translation) * glm::mat4_cast(rotation) *
            glm::scale(float4x4(1.0f), scale);
+}
+
+struct Trs {
+    float3 translation{0.0f};
+    quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    float3 scale{1.0f};
+};
+
+// Decomposes a TRS matrix (no shear or negative scale; glTF node transforms
+// flattened to world space satisfy this).
+inline Trs decomposeTrs(const float4x4& m) {
+    Trs out;
+    out.translation = float3(m[3]);
+    const float3 c0(m[0]);
+    const float3 c1(m[1]);
+    const float3 c2(m[2]);
+    out.scale = {length(c0), length(c1), length(c2)};
+    const float3 safe{out.scale.x > 1e-8f ? out.scale.x : 1.0f,
+                      out.scale.y > 1e-8f ? out.scale.y : 1.0f,
+                      out.scale.z > 1e-8f ? out.scale.z : 1.0f};
+    out.rotation = glm::quat_cast(float3x3(c0 / safe.x, c1 / safe.y, c2 / safe.z));
+    return out;
 }
 
 } // namespace kumo::math

@@ -26,6 +26,15 @@ FetchContent_Declare(stb
     SOURCE_SUBDIR do-not-add
 )
 
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG 55f93686c01528224f448c19128836e7df245f72 # v3.12.0
+)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+# Upstream knob that marks the interface include dir SYSTEM, so -Wall/-Werror stay
+# clean without depending on the CMake 3.25 SYSTEM target property.
+set(JSON_SystemInclude ON CACHE BOOL "" FORCE)
+
 FetchContent_Declare(glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
     GIT_TAG 7b6aead9fb88b3623e3b3725ebb42670cbe4c579 # 3.4
@@ -50,7 +59,7 @@ FetchContent_Declare(spirv_cross
     GIT_TAG 1a6169566c73d3da552748fc372fe2bbb856e46e # vulkan-sdk-1.4.350.1
 )
 
-FetchContent_MakeAvailable(glm doctest glfw imgui)
+FetchContent_MakeAvailable(glm doctest nlohmann_json glfw imgui)
 
 FetchContent_MakeAvailable(cgltf stb)
 add_library(cgltf INTERFACE)

@@ -1,5 +1,6 @@
 add_executable(kumo_tests
     test_core_file.cpp
+    test_main_thread_queue.cpp
     test_math.cpp
     test_math_m4.cpp
     test_scene.cpp

@@ -96,8 +96,8 @@ void compareToBaseline(const std::vector<std::uint8_t>& actual, const char* back
     }
 
     // Keep the actual around for inspection regardless of the outcome.
-    const std::filesystem::path actualPath =
-        std::filesystem::current_path() / ("golden_actual_" + std::string(backendName) + ".png");
+    const std::filesystem::path actualPath = std::filesystem::path(KUMO_GOLDEN_ACTUAL_DIR) /
+                                             ("golden_actual_" + std::string(backendName) + ".png");
     asset::writePng(actualPath, kSize, kSize, actual.data());
 
     auto baseline = asset::loadImage(baselinePath);

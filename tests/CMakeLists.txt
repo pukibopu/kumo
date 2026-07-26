@@ -36,7 +36,8 @@ if(APPLE)
         kumo_scene kumo_asset kumo_renderer kumo_rhi_metal)
     target_compile_definitions(kumo_golden PRIVATE
         KUMO_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
-        KUMO_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden")
+        KUMO_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden"
+        KUMO_GOLDEN_ACTUAL_DIR="${CMAKE_CURRENT_BINARY_DIR}")
     kumo_target_warnings(kumo_golden)
     add_test(NAME kumo_golden COMMAND kumo_golden)
     set_tests_properties(kumo_golden PROPERTIES LABELS golden)

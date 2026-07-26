@@ -29,6 +29,8 @@ struct MeshData {
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
     std::int32_t materialIndex = -1;
+    // Bounds in the mesh's own space, before any node transform.
+    math::Aabb localAabb;
 };
 
 // Decoded texel data is always RGBA8; `srgb` records the intended color space.

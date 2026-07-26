@@ -4,6 +4,7 @@ add_executable(kumo_tests
     test_math_m4.cpp
     test_scene.cpp
     test_asset.cpp
+    test_primitives.cpp
     test_shaderc.cpp
     test_shader_snapshots.cpp
 )

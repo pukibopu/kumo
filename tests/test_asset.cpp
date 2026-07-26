@@ -27,6 +27,19 @@ TEST_CASE("loadGltf loads DamagedHelmet.glb") {
     CHECK(mesh.indices.size() > 0);
     CHECK(mesh.indices.size() % 3 == 0);
 
+    CHECK(mesh.localAabb.min.x < mesh.localAabb.max.x);
+    CHECK(mesh.localAabb.min.y < mesh.localAabb.max.y);
+    CHECK(mesh.localAabb.min.z < mesh.localAabb.max.z);
+    bool insideAabb = true;
+    for (const asset::Vertex& v : mesh.vertices) {
+        if (v.px < mesh.localAabb.min.x || v.px > mesh.localAabb.max.x ||
+            v.py < mesh.localAabb.min.y || v.py > mesh.localAabb.max.y ||
+            v.pz < mesh.localAabb.min.z || v.pz > mesh.localAabb.max.z) {
+            insideAabb = false;
+        }
+    }
+    CHECK(insideAabb);
+
     REQUIRE(mesh.materialIndex >= 0);
     REQUIRE(static_cast<std::size_t>(mesh.materialIndex) < s.materials.size());
     const asset::MaterialData& mat = s.materials[static_cast<std::size_t>(mesh.materialIndex)];

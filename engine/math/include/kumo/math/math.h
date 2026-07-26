@@ -5,6 +5,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <cmath>
+#include <limits>
 
 namespace kumo::math {
 
@@ -16,6 +17,7 @@ using float4x4 = glm::mat4;
 using quat = glm::quat;
 
 using glm::cross;
+using glm::degrees;
 using glm::dot;
 using glm::inverse;
 using glm::length;
@@ -56,6 +58,16 @@ inline quat quatLookAt(const float3& forward, const float3& up) {
     return glm::quatLookAtRH(f, u);
 }
 
+// Euler angles in XYZ order; `eulerDegrees` is only single-valued away from the
+// yaw = +-90 degree singularity.
+inline float3 eulerDegrees(const quat& q) {
+    return degrees(glm::eulerAngles(q));
+}
+
+inline quat quatFromEulerDegrees(const float3& xyzDeg) {
+    return quat(radians(xyzDeg));
+}
+
 inline float4x4 trs(const float3& translation, const quat& rotation, const float3& scale) {
     return glm::translate(float4x4(1.0f), translation) * glm::mat4_cast(rotation) *
            glm::scale(float4x4(1.0f), scale);
@@ -80,6 +92,26 @@ inline Trs decomposeTrs(const float4x4& m) {
                       out.scale.y > 1e-8f ? out.scale.y : 1.0f,
                       out.scale.z > 1e-8f ? out.scale.z : 1.0f};
     out.rotation = glm::quat_cast(float3x3(c0 / safe.x, c1 / safe.y, c2 / safe.z));
+    return out;
+}
+
+struct Aabb {
+    float3 min{0.0f};
+    float3 max{0.0f};
+};
+
+// Bounds of the transformed corners, so a rotation grows the box rather than shearing it.
+inline Aabb transformAabb(const Aabb& box, const float4x4& m) {
+    Aabb out{float3(std::numeric_limits<float>::max()),
+             float3(std::numeric_limits<float>::lowest())};
+    for (int i = 0; i < 8; ++i) {
+        const float3 corner{(i & 1) != 0 ? box.max.x : box.min.x,
+                            (i & 2) != 0 ? box.max.y : box.min.y,
+                            (i & 4) != 0 ? box.max.z : box.min.z};
+        const float3 p(m * float4(corner, 1.0f));
+        out.min = glm::min(out.min, p);
+        out.max = glm::max(out.max, p);
+    }
     return out;
 }
 

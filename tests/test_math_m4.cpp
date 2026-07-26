@@ -91,3 +91,58 @@ TEST_CASE("decomposeTrs round-trips a TRS matrix") {
                                out.rotation.z * r.z);
     CHECK(std::abs(dot - 1.0f) < 1e-5f);
 }
+
+TEST_CASE("euler degrees round-trip through a quaternion") {
+    const math::float3 angles[] = {{0.0f, 0.0f, 0.0f},
+                                   {30.0f, -45.0f, 60.0f},
+                                   {-15.0f, 80.0f, 120.0f},
+                                   {170.0f, 10.0f, -170.0f}};
+    for (const math::float3& deg : angles) {
+        const math::float3 out = math::eulerDegrees(math::quatFromEulerDegrees(deg));
+        CHECK(std::abs(out.x - deg.x) < 1e-3f);
+        CHECK(std::abs(out.y - deg.y) < 1e-3f);
+        CHECK(std::abs(out.z - deg.z) < 1e-3f);
+    }
+}
+
+TEST_CASE("transformAabb translates a box") {
+    const math::Aabb box{{-1.0f, -2.0f, -3.0f}, {1.0f, 2.0f, 3.0f}};
+    const math::Aabb out =
+        math::transformAabb(box, math::trs({10.0f, 0.0f, -5.0f}, math::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                                           {1.0f, 1.0f, 1.0f}));
+
+    CHECK(std::abs(out.min.x - 9.0f) < 1e-5f);
+    CHECK(std::abs(out.max.x - 11.0f) < 1e-5f);
+    CHECK(std::abs(out.min.y + 2.0f) < 1e-5f);
+    CHECK(std::abs(out.max.y - 2.0f) < 1e-5f);
+    CHECK(std::abs(out.min.z + 8.0f) < 1e-5f);
+    CHECK(std::abs(out.max.z + 2.0f) < 1e-5f);
+}
+
+TEST_CASE("transformAabb swaps extents under a 90 degree rotation") {
+    const math::Aabb box{{-1.0f, -2.0f, -3.0f}, {1.0f, 2.0f, 3.0f}};
+    const math::quat yaw = math::quatFromEulerDegrees({0.0f, 90.0f, 0.0f});
+    const math::Aabb out =
+        math::transformAabb(box, math::trs({0.0f, 0.0f, 0.0f}, yaw, {1.0f, 1.0f, 1.0f}));
+
+    // Yaw by 90 degrees maps +X onto -Z, so the x and z extents trade places.
+    CHECK(std::abs(out.min.x + 3.0f) < 1e-5f);
+    CHECK(std::abs(out.max.x - 3.0f) < 1e-5f);
+    CHECK(std::abs(out.min.y + 2.0f) < 1e-5f);
+    CHECK(std::abs(out.max.y - 2.0f) < 1e-5f);
+    CHECK(std::abs(out.min.z + 1.0f) < 1e-5f);
+    CHECK(std::abs(out.max.z - 1.0f) < 1e-5f);
+}
+
+TEST_CASE("transformAabb scales a box about the origin") {
+    const math::Aabb box{{-1.0f, -2.0f, -3.0f}, {1.0f, 2.0f, 3.0f}};
+    const math::Aabb out = math::transformAabb(
+        box, math::trs({0.0f, 0.0f, 0.0f}, math::quat(1.0f, 0.0f, 0.0f, 0.0f), {2.0f, 0.5f, 3.0f}));
+
+    CHECK(std::abs(out.min.x + 2.0f) < 1e-5f);
+    CHECK(std::abs(out.max.x - 2.0f) < 1e-5f);
+    CHECK(std::abs(out.min.y + 1.0f) < 1e-5f);
+    CHECK(std::abs(out.max.y - 1.0f) < 1e-5f);
+    CHECK(std::abs(out.min.z + 9.0f) < 1e-5f);
+    CHECK(std::abs(out.max.z - 9.0f) < 1e-5f);
+}

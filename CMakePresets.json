@@ -19,24 +19,14 @@
             "generator": "Ninja",
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
             "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
-        },
-        {
-            "name": "windows",
-            "inherits": "base",
-            "generator": "Visual Studio 17 2022",
-            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
         }
     ],
     "buildPresets": [
         { "name": "macos-debug", "configurePreset": "macos-debug" },
-        { "name": "macos-release", "configurePreset": "macos-release" },
-        { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug" },
-        { "name": "windows-release", "configurePreset": "windows", "configuration": "Release" }
+        { "name": "macos-release", "configurePreset": "macos-release" }
     ],
     "testPresets": [
         { "name": "macos-debug", "configurePreset": "macos-debug", "output": { "outputOnFailure": true } },
-        { "name": "macos-release", "configurePreset": "macos-release", "output": { "outputOnFailure": true } },
-        { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug", "output": { "outputOnFailure": true } },
-        { "name": "windows-release", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true } }
+        { "name": "macos-release", "configurePreset": "macos-release", "output": { "outputOnFailure": true } }
     ]
 }

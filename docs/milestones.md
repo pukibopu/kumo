@@ -8,11 +8,14 @@
 | v0.2.0 | M1 | macOS Metal 清屏窗口 | 完成 |
 | v0.3.0 | M2 | RHI 抽象 + Metal 后端，贴图三角形 + ImGui | 完成 |
 | v0.4.0 | M3 | GLSL 交叉编译工具链 + Vulkan 后端 + 热重载 | 完成¹ |
-| v0.5.0 | M4 | PBR、glTF 静态场景、IBL、HDR / MSAA / ACES | — |
-| v0.6.0 | M4.5 | 平行光阴影（PCF shadow map） | — |
-| v0.7.0 | M5 | 助手框架 + 场景控制工具 + 聊天面板 | — |
-| v0.8.0 | M6 | Shader 助手：生成、自修正、热重载 | — |
-| v0.9.0 | M6.5 | MCP server：外部客户端操控 viewer + 截图工具 | — |
-| v0.10.0 | M7 | iPad 版 | — |
+| v0.5.0 | M4 | PBR、glTF 静态场景、IBL、HDR / MSAA / ACES | 完成 |
+| v0.6.0 | M5 | 场景助手：LLM 框架 + 场景控制工具 + 聊天面板 | — |
+| v0.7.0 | M6 | Shader 助手：生成、自修正、热重载 | — |
+| v0.8.0 | M6.5 | MCP server：外部客户端操控 viewer + 截图工具 | — |
+| v0.9.0 | M6.75 | SwiftUI 产品界面（场景树 / 视口 / 检查器 / 聊天），macOS 先行 | — |
+| v0.10.0 | M4.5 | 平行光阴影（PCF shadow map） | — |
+| v0.11.0 | M7 | iPad 版 | — |
 
-¹ Vulkan 后端已在 CI（Windows/MSVC 编译 + 全量测试）与本机 MoltenVK + validation layer 验证；Windows 真机 GPU 运行验证待有硬件时补做。
+¹ Vulkan 后端随 M4 移除，项目聚焦 Metal；完整双后端实现保留在 v0.4.0。
+
+² M4 之后路线以助手能力为先：阴影（M4.5）后置到产品界面之后、iPad 之前。

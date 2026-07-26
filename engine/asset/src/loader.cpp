@@ -6,6 +6,7 @@
 #include <stb_image.h>
 #include <stb_image_write.h>
 
+#include <algorithm>
 #include <climits>
 #include <cstring>
 #include <format>
@@ -79,6 +80,23 @@ std::expected<TextureData, std::string> decodeImage(const cgltf_image& image,
     tex.rgba.assign(pixels, pixels + byteCount);
     stbi_image_free(pixels);
     return tex;
+}
+
+// The POSITION accessor usually carries min/max; fall back to a sweep when it does not.
+math::Aabb positionBounds(const cgltf_accessor& pos, const std::vector<Vertex>& vertices) {
+    if (pos.has_min != 0 && pos.has_max != 0) {
+        return {{pos.min[0], pos.min[1], pos.min[2]}, {pos.max[0], pos.max[1], pos.max[2]}};
+    }
+    if (vertices.empty()) {
+        return {};
+    }
+    math::Aabb box{{vertices[0].px, vertices[0].py, vertices[0].pz},
+                   {vertices[0].px, vertices[0].py, vertices[0].pz}};
+    for (const Vertex& v : vertices) {
+        box.min = {std::min(box.min.x, v.px), std::min(box.min.y, v.py), std::min(box.min.z, v.pz)};
+        box.max = {std::max(box.max.x, v.px), std::max(box.max.y, v.py), std::max(box.max.z, v.pz)};
+    }
+    return box;
 }
 
 std::expected<MeshData, std::string> buildMesh(const cgltf_data* data, const cgltf_primitive& prim,
@@ -163,6 +181,7 @@ std::expected<MeshData, std::string> buildMesh(const cgltf_data* data, const cgl
         }
     }
 
+    mesh.localAabb = positionBounds(*pos, mesh.vertices);
     mesh.materialIndex =
         prim.material != nullptr ? static_cast<std::int32_t>(prim.material - data->materials) : -1;
     return mesh;

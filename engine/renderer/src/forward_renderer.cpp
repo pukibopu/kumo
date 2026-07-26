@@ -51,6 +51,28 @@ struct MaterialFactorsData {
     math::float4 emissive{0.0f};
 };
 
+MaterialFactorsData toFactors(const ForwardRenderer::MaterialParams& params) {
+    return {
+        .baseColor = {params.baseColor[0], params.baseColor[1], params.baseColor[2],
+                      params.baseColor[3]},
+        .metallicRoughness = {params.metallic, params.roughness, 0.0f, 0.0f},
+        .emissive = {params.emissive[0], params.emissive[1], params.emissive[2], 0.0f},
+    };
+}
+
+ForwardRenderer::MaterialParams toParams(const asset::MaterialData& mat) {
+    ForwardRenderer::MaterialParams params;
+    for (int c = 0; c < 4; ++c) {
+        params.baseColor[c] = mat.baseColor[c];
+    }
+    params.metallic = mat.metallic;
+    params.roughness = mat.roughness;
+    for (int c = 0; c < 3; ++c) {
+        params.emissive[c] = mat.emissive[c];
+    }
+    return params;
+}
+
 std::uint32_t fullMipChain(std::uint32_t width, std::uint32_t height) {
     std::uint32_t size = std::max(width, height);
     std::uint32_t mips = 1;
@@ -82,6 +104,12 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
         return false;
     }
 
+    defaultWhite_ = makeSolidTexture(255, 255, 255, 255);
+    defaultNormal_ = makeSolidTexture(128, 128, 255, 255);
+    if (!defaultWhite_ || !defaultNormal_) {
+        return false;
+    }
+
     if (!buildPipelines(true)) {
         return false;
     }
@@ -102,6 +130,126 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
             return false;
         }
     }
+    return true;
+}
+
+rhi::Ptr<rhi::Texture> ForwardRenderer::makeSolidTexture(std::uint8_t r, std::uint8_t g,
+                                                         std::uint8_t b, std::uint8_t a) {
+    KUMO_ASSERT(device_ != nullptr);
+    rhi::Ptr<rhi::Texture> texture = device_->createTexture({
+        .size = {1, 1},
+        .format = rhi::TextureFormat::RGBA8Unorm,
+        .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDst,
+    });
+    if (texture) {
+        const std::uint8_t pixel[4] = {r, g, b, a};
+        device_->queue().writeTexture(*texture, pixel, 4, {1, 1});
+    }
+    return texture;
+}
+
+bool ForwardRenderer::uploadMesh(const asset::MeshData& mesh, GpuMesh& out) {
+    KUMO_ASSERT(device_ != nullptr);
+    const std::uint64_t vertexBytes = mesh.vertices.size() * sizeof(asset::Vertex);
+    const std::uint64_t indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
+    out.vertexBuffer = device_->createBuffer(
+        {.size = vertexBytes, .usage = rhi::BufferUsage::Vertex | rhi::BufferUsage::CopyDst});
+    out.indexBuffer = device_->createBuffer(
+        {.size = indexBytes, .usage = rhi::BufferUsage::Index | rhi::BufferUsage::CopyDst});
+    if (!out.vertexBuffer || !out.indexBuffer) {
+        return false;
+    }
+    device_->queue().writeBuffer(*out.vertexBuffer, 0, mesh.vertices.data(), vertexBytes);
+    device_->queue().writeBuffer(*out.indexBuffer, 0, mesh.indices.data(), indexBytes);
+    out.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+    return true;
+}
+
+bool ForwardRenderer::appendMaterial(const MaterialParams& params,
+                                     const MaterialTextures& textures) {
+    KUMO_ASSERT(device_ != nullptr);
+    const MaterialFactorsData factors = toFactors(params);
+    rhi::Ptr<rhi::Buffer> buffer = device_->createBuffer({
+        .size = sizeof(MaterialFactorsData),
+        .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+    });
+    if (!buffer) {
+        return false;
+    }
+    device_->queue().writeBuffer(*buffer, 0, &factors, sizeof(factors));
+    rhi::Ptr<rhi::BindGroup> group = device_->createBindGroup({
+        .layout = materialLayout_,
+        .entries = {{.binding = 0, .texture = textures.baseColor},
+                    {.binding = 1, .texture = textures.metallicRoughness},
+                    {.binding = 2, .texture = textures.normal},
+                    {.binding = 3, .texture = textures.occlusion},
+                    {.binding = 4, .texture = textures.emissive},
+                    {.binding = 5, .sampler = materialSampler_},
+                    {.binding = 6, .buffer = buffer}},
+    });
+    if (!group) {
+        return false;
+    }
+    materialFactorBuffers_.push_back(std::move(buffer));
+    materialGroups_.push_back(std::move(group));
+    materialParams_.push_back(params);
+    return true;
+}
+
+std::int32_t ForwardRenderer::addMesh(const asset::MeshData& mesh) {
+    KUMO_ASSERT(device_ != nullptr);
+    if (mesh.vertices.empty() || mesh.indices.empty()) {
+        return -1;
+    }
+    GpuMesh gpu;
+    if (!uploadMesh(mesh, gpu)) {
+        return -1;
+    }
+    meshes_.push_back(std::move(gpu));
+    return static_cast<std::int32_t>(meshes_.size() - 1);
+}
+
+std::int32_t ForwardRenderer::addMaterial(const MaterialParams& params) {
+    KUMO_ASSERT(device_ != nullptr);
+    if (!materialLayout_ || !defaultWhite_ || !defaultNormal_) {
+        return -1;
+    }
+    if (!appendMaterial(params, {.baseColor = defaultWhite_,
+                                 .metallicRoughness = defaultWhite_,
+                                 .normal = defaultNormal_,
+                                 .occlusion = defaultWhite_,
+                                 .emissive = defaultWhite_})) {
+        return -1;
+    }
+    return static_cast<std::int32_t>(materialGroups_.size() - 1);
+}
+
+std::uint32_t ForwardRenderer::meshCount() const {
+    return static_cast<std::uint32_t>(meshes_.size());
+}
+
+std::uint32_t ForwardRenderer::materialCount() const {
+    return static_cast<std::uint32_t>(materialGroups_.size());
+}
+
+std::uint32_t ForwardRenderer::defaultMaterialIndex() const {
+    return static_cast<std::uint32_t>(defaultMaterialIndex_);
+}
+
+const ForwardRenderer::MaterialParams* ForwardRenderer::materialParams(std::uint32_t index) const {
+    return index < materialParams_.size() ? &materialParams_[index] : nullptr;
+}
+
+bool ForwardRenderer::setMaterialParams(std::uint32_t index, const MaterialParams& params) {
+    KUMO_ASSERT(device_ != nullptr);
+    if (index >= materialParams_.size()) {
+        return false;
+    }
+    materialParams_[index] = params;
+    const MaterialFactorsData factors = toFactors(params);
+    // Single-buffered material UBO: overwriting it can tear a frame still in
+    // flight, which at worst shows one frame of mixed factors.
+    device_->queue().writeBuffer(*materialFactorBuffers_[index], 0, &factors, sizeof(factors));
     return true;
 }
 
@@ -231,40 +379,13 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
     meshes_.clear();
     for (const asset::MeshData& mesh : sceneAsset.meshes) {
         GpuMesh gpu;
-        const std::uint64_t vertexBytes = mesh.vertices.size() * sizeof(asset::Vertex);
-        const std::uint64_t indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
-        gpu.vertexBuffer = device_->createBuffer(
-            {.size = vertexBytes, .usage = rhi::BufferUsage::Vertex | rhi::BufferUsage::CopyDst});
-        gpu.indexBuffer = device_->createBuffer(
-            {.size = indexBytes, .usage = rhi::BufferUsage::Index | rhi::BufferUsage::CopyDst});
-        if (!gpu.vertexBuffer || !gpu.indexBuffer) {
+        if (!uploadMesh(mesh, gpu)) {
             return false;
         }
-        device_->queue().writeBuffer(*gpu.vertexBuffer, 0, mesh.vertices.data(), vertexBytes);
-        device_->queue().writeBuffer(*gpu.indexBuffer, 0, mesh.indices.data(), indexBytes);
-        gpu.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
         meshes_.push_back(std::move(gpu));
     }
 
     rhi::Ptr<rhi::CommandEncoder> encoder = device_->queue().createCommandEncoder();
-
-    auto makeSolidTexture = [&](std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
-        rhi::Ptr<rhi::Texture> texture = device_->createTexture({
-            .size = {1, 1},
-            .format = rhi::TextureFormat::RGBA8Unorm,
-            .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDst,
-        });
-        if (texture) {
-            const std::uint8_t pixel[4] = {r, g, b, a};
-            device_->queue().writeTexture(*texture, pixel, 4, {1, 1});
-        }
-        return texture;
-    };
-    rhi::Ptr<rhi::Texture> defaultWhite = makeSolidTexture(255, 255, 255, 255);
-    rhi::Ptr<rhi::Texture> defaultNormal = makeSolidTexture(128, 128, 255, 255);
-    if (!defaultWhite || !defaultNormal) {
-        return false;
-    }
 
     textures_.clear();
     for (const asset::TextureData& tex : sceneAsset.textures) {
@@ -285,56 +406,29 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
         encoder->generateMipmaps(*texture);
         textures_.push_back(std::move(texture));
     }
-    textures_.push_back(defaultWhite);
-    textures_.push_back(defaultNormal);
 
     auto textureOr = [&](std::int32_t index, const rhi::Ptr<rhi::Texture>& fallback) {
-        return index >= 0 && static_cast<std::size_t>(index) < sceneAsset.textures.size()
+        return index >= 0 && static_cast<std::size_t>(index) < textures_.size()
                    ? textures_[static_cast<std::size_t>(index)]
                    : fallback;
     };
 
     materialFactorBuffers_.clear();
     materialGroups_.clear();
-    auto buildMaterial = [&](const asset::MaterialData& mat) -> bool {
-        MaterialFactorsData factors;
-        factors.baseColor = {mat.baseColor[0], mat.baseColor[1], mat.baseColor[2],
-                             mat.baseColor[3]};
-        factors.metallicRoughness = {mat.metallic, mat.roughness, 0.0f, 0.0f};
-        factors.emissive = {mat.emissive[0], mat.emissive[1], mat.emissive[2], 0.0f};
-        rhi::Ptr<rhi::Buffer> buffer = device_->createBuffer({
-            .size = sizeof(MaterialFactorsData),
-            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
-        });
-        if (!buffer) {
-            return false;
-        }
-        device_->queue().writeBuffer(*buffer, 0, &factors, sizeof(factors));
-        rhi::Ptr<rhi::BindGroup> group = device_->createBindGroup({
-            .layout = materialLayout_,
-            .entries = {{.binding = 0, .texture = textureOr(mat.baseColorTexture, defaultWhite)},
-                        {.binding = 1,
-                         .texture = textureOr(mat.metallicRoughnessTexture, defaultWhite)},
-                        {.binding = 2, .texture = textureOr(mat.normalTexture, defaultNormal)},
-                        {.binding = 3, .texture = textureOr(mat.occlusionTexture, defaultWhite)},
-                        {.binding = 4, .texture = textureOr(mat.emissiveTexture, defaultWhite)},
-                        {.binding = 5, .sampler = materialSampler_},
-                        {.binding = 6, .buffer = buffer}},
-        });
-        if (!group) {
-            return false;
-        }
-        materialFactorBuffers_.push_back(std::move(buffer));
-        materialGroups_.push_back(std::move(group));
-        return true;
-    };
+    materialParams_.clear();
     for (const asset::MaterialData& mat : sceneAsset.materials) {
-        if (!buildMaterial(mat)) {
+        const MaterialTextures textures{.baseColor = textureOr(mat.baseColorTexture, defaultWhite_),
+                                        .metallicRoughness =
+                                            textureOr(mat.metallicRoughnessTexture, defaultWhite_),
+                                        .normal = textureOr(mat.normalTexture, defaultNormal_),
+                                        .occlusion = textureOr(mat.occlusionTexture, defaultWhite_),
+                                        .emissive = textureOr(mat.emissiveTexture, defaultWhite_)};
+        if (!appendMaterial(toParams(mat), textures)) {
             return false;
         }
     }
-    // Trailing default material serves entities without a material index.
-    if (!buildMaterial(asset::MaterialData{})) {
+    defaultMaterialIndex_ = materialGroups_.size();
+    if (addMaterial(MaterialParams{}) < 0) {
         return false;
     }
 
@@ -409,7 +503,8 @@ void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene) {
 void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& scene,
                              rhi::Texture* output, const Overlay& overlay) {
     KUMO_ASSERT(device_ != nullptr);
-    if (output == nullptr || !pbrPipeline_ || !hdrMsaa_) {
+    if (output == nullptr || !pbrPipeline_ || !hdrMsaa_ ||
+        defaultMaterialIndex_ >= materialGroups_.size()) {
         return;
     }
     // Two uniform slots track the two frames in flight, so this write never
@@ -436,12 +531,11 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
             return;
         }
         const GpuMesh& mesh = meshes_[static_cast<std::size_t>(entity.meshIndex)];
-        const std::size_t materialCount = materialGroups_.size();
         const std::size_t materialIndex =
             entity.materialIndex >= 0 &&
-                    static_cast<std::size_t>(entity.materialIndex) + 1 < materialCount
+                    static_cast<std::size_t>(entity.materialIndex) < materialGroups_.size()
                 ? static_cast<std::size_t>(entity.materialIndex)
-                : materialCount - 1;
+                : defaultMaterialIndex_;
         scenePass.setBindGroup(1, *materialGroups_[materialIndex]);
 
         PerDrawData draw;

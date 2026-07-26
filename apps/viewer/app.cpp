@@ -1,4 +1,5 @@
 #include <kumo/asset/asset.h>
+#include <kumo/asset/primitives.h>
 #include <kumo/core/file_watcher.h>
 #include <kumo/core/log.h>
 #include <kumo/math/math.h>
@@ -142,6 +143,45 @@ void imguiShutdown() {
     ImGui::DestroyContext();
 }
 
+// Exercises the incremental upload path: meshes and materials created after
+// loadScene, with no glTF source behind them.
+void addDemoPrimitives(renderer::ForwardRenderer& renderer, scene::Scene& world) {
+    using MaterialParams = renderer::ForwardRenderer::MaterialParams;
+    const struct {
+        const char* name;
+        asset::MeshData mesh;
+        MaterialParams material;
+        math::float3 position;
+    } demos[] = {
+        {"demo_sphere",
+         asset::makeSphere(0.5f, 48, 24),
+         {.baseColor = {1.0f, 0.77f, 0.34f, 1.0f}, .metallic = 1.0f, .roughness = 0.25f},
+         {-1.5f, 0.0f, 0.0f}},
+        {"demo_cube",
+         asset::makeCube(0.4f),
+         {.baseColor = {0.8f, 0.16f, 0.12f, 1.0f}, .metallic = 0.0f, .roughness = 0.7f},
+         {1.5f, 0.0f, 0.0f}},
+        {"demo_plane",
+         asset::makePlane(2.0f, 4),
+         {.baseColor = {0.5f, 0.5f, 0.52f, 1.0f}, .metallic = 0.0f, .roughness = 0.8f},
+         {0.0f, -0.8f, 0.0f}},
+    };
+    for (const auto& demo : demos) {
+        const std::int32_t meshIndex = renderer.addMesh(demo.mesh);
+        const std::int32_t materialIndex = renderer.addMaterial(demo.material);
+        if (meshIndex < 0 || materialIndex < 0) {
+            logError("failed to upload demo primitive {}", demo.name);
+            continue;
+        }
+        scene::Entity entity;
+        entity.name = demo.name;
+        entity.transform.position = demo.position;
+        entity.meshIndex = meshIndex;
+        entity.materialIndex = materialIndex;
+        world.entities.insert(entity);
+    }
+}
+
 void saveScreenshot(rhi::Device& device, rhi::Texture& texture, int frame) {
     const rhi::Extent2D extent = texture.extent();
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(extent.width) * extent.height * 4);
@@ -165,7 +205,7 @@ void saveScreenshot(rhi::Device& device, rhi::Texture& texture, int frame) {
 } // namespace
 
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
-           const std::filesystem::path& envPath) {
+           const std::filesystem::path& envPath, bool demoPrimitives) {
     auto sceneAsset = asset::loadGltf(modelPath);
     if (!sceneAsset) {
         kumo::logError("{}", sceneAsset.error());
@@ -240,6 +280,9 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         world.entities.insert(entity);
     }
     world.addLight({.type = scene::LightType::Directional});
+    if (demoPrimitives) {
+        addDemoPrimitives(renderer, world);
+    }
 
     AppInput input;
     LightSettings lightSettings;

@@ -5,6 +5,7 @@
 #include <kumo/rhi/rhi.h>
 #include <kumo/scene/scene.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -19,9 +20,29 @@ class ForwardRenderer {
 public:
     using Overlay = std::function<void(rhi::RenderPassEncoder&)>;
 
+    // Mirrors the MaterialFactors uniform block in pbr.frag.
+    struct MaterialParams {
+        float baseColor[4]{1.0f, 1.0f, 1.0f, 1.0f};
+        float metallic = 1.0f;
+        float roughness = 1.0f;
+        float emissive[3]{0.0f, 0.0f, 0.0f};
+    };
+
     bool init(rhi::Device& device, rhi::TextureFormat outputFormat);
     bool loadScene(const asset::SceneAsset& sceneAsset, const ibl::Environment& environment);
     void resize(rhi::Extent2D size);
+
+    // Incremental uploads on top of a loaded scene; indices stay valid until the
+    // next loadScene. All return -1 / false instead of asserting on bad input.
+    std::int32_t addMesh(const asset::MeshData& mesh);
+    // Untextured: every texture slot binds the built-in fallback.
+    std::int32_t addMaterial(const MaterialParams& params);
+    std::uint32_t meshCount() const;
+    std::uint32_t materialCount() const;
+    std::uint32_t defaultMaterialIndex() const;
+    const MaterialParams* materialParams(std::uint32_t index) const;
+    bool setMaterialParams(std::uint32_t index, const MaterialParams& params);
+
     // Multipliers on top of the material metallic/roughness factors.
     void setMaterialOverride(float metallic, float roughness);
     // Recompiles every shader and swaps the pipelines; keeps the current ones on
@@ -38,8 +59,20 @@ private:
         std::uint32_t indexCount = 0;
     };
 
+    struct MaterialTextures {
+        rhi::Ptr<rhi::Texture> baseColor;
+        rhi::Ptr<rhi::Texture> metallicRoughness;
+        rhi::Ptr<rhi::Texture> normal;
+        rhi::Ptr<rhi::Texture> occlusion;
+        rhi::Ptr<rhi::Texture> emissive;
+    };
+
     bool buildPipelines(bool deriveLayouts);
     void updateFrameUniforms(const scene::Scene& scene);
+    rhi::Ptr<rhi::Texture> makeSolidTexture(std::uint8_t r, std::uint8_t g, std::uint8_t b,
+                                            std::uint8_t a);
+    bool uploadMesh(const asset::MeshData& mesh, GpuMesh& out);
+    bool appendMaterial(const MaterialParams& params, const MaterialTextures& textures);
 
     rhi::Device* device_ = nullptr;
     rhi::TextureFormat outputFormat_ = rhi::TextureFormat::BGRA8Unorm;
@@ -75,10 +108,17 @@ private:
     rhi::Ptr<rhi::BindGroup> iblGroup_;
     rhi::Ptr<rhi::BindGroup> skyboxGroup_;
 
+    rhi::Ptr<rhi::Texture> defaultWhite_;
+    rhi::Ptr<rhi::Texture> defaultNormal_;
+
     std::vector<GpuMesh> meshes_;
     std::vector<rhi::Ptr<rhi::Texture>> textures_;
     std::vector<rhi::Ptr<rhi::Buffer>> materialFactorBuffers_;
     std::vector<rhi::Ptr<rhi::BindGroup>> materialGroups_;
+    std::vector<MaterialParams> materialParams_;
+    // Sentinel material for entities without one; recorded explicitly so that
+    // appending materials cannot displace it.
+    std::size_t defaultMaterialIndex_ = 0;
 
     float overrideMetallic_ = 1.0f;
     float overrideRoughness_ = 1.0f;

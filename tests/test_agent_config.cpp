@@ -140,6 +140,15 @@ TEST_CASE("environment beats .env beats the config file") {
     REQUIRE(config.has_value());
     CHECK(config->apiKey == "sk-env");
     CHECK(config->sceneModel == "env-model");
+
+    // Tier beats name: a process-env KUMO_PROVIDER_API_KEY wins over the
+    // .env-sourced ANTHROPIC_API_KEY even though the latter is more specific.
+    unsetenv("ANTHROPIC_API_KEY");
+    setenv("KUMO_PROVIDER_API_KEY", "sk-generic-env", 1);
+    config = sandbox.load();
+    REQUIRE(config.has_value());
+    CHECK(config->apiKey == "sk-generic-env");
+    unsetenv("KUMO_PROVIDER_API_KEY");
 }
 
 TEST_CASE("KUMO_PROVIDER_TYPE switches the protocol and default base url") {

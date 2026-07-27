@@ -10,6 +10,7 @@
 #include <optional>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace kumo::agent {
 
@@ -45,15 +46,26 @@ std::unordered_map<std::string, std::string> parseDotEnv(const std::filesystem::
 struct EnvLookup {
     std::unordered_map<std::string, std::string> dotEnv;
 
-    std::optional<std::string> get(const char* name) const {
+    std::optional<std::string> fromProcess(const char* name) const {
         if (const char* value = std::getenv(name); value != nullptr && value[0] != '\0') {
             return std::string(value);
         }
+        return std::nullopt;
+    }
+
+    std::optional<std::string> fromDotEnv(const char* name) const {
         const auto it = dotEnv.find(name);
         if (it != dotEnv.end() && !it->second.empty()) {
             return it->second;
         }
         return std::nullopt;
+    }
+
+    std::optional<std::string> get(const char* name) const {
+        if (auto value = fromProcess(name)) {
+            return value;
+        }
+        return fromDotEnv(name);
     }
 };
 
@@ -176,9 +188,6 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
     if (const auto value = env.get("KUMO_PROVIDER_MODEL")) {
         providerModel = *value;
     }
-    if (const auto value = env.get("KUMO_PROVIDER_API_KEY")) {
-        config.apiKey = *value;
-    }
 
     if (!typeText.empty()) {
         const auto type = parseProviderType(typeText);
@@ -188,11 +197,24 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
         }
         config.providerType = *type;
     }
+
+    // The key resolves tier-first across its aliases: a process-env value beats
+    // anything from .env no matter which variable name carries it, and both beat
+    // the file. Within a tier KUMO_PROVIDER_API_KEY wins over ANTHROPIC_API_KEY.
+    std::vector<const char*> keyNames{"KUMO_PROVIDER_API_KEY"};
     if (config.providerType == ProviderType::Anthropic) {
-        if (const auto value = env.get("ANTHROPIC_API_KEY")) {
-            config.apiKey = *value;
-        }
+        keyNames.push_back("ANTHROPIC_API_KEY");
     }
+    [&] {
+        for (const auto lookup : {&EnvLookup::fromProcess, &EnvLookup::fromDotEnv}) {
+            for (const char* name : keyNames) {
+                if (const auto value = (env.*lookup)(name)) {
+                    config.apiKey = *value;
+                    return;
+                }
+            }
+        }
+    }();
     if (config.baseUrl.empty()) {
         config.baseUrl = config.providerType == ProviderType::Anthropic
                              ? "https://api.anthropic.com"

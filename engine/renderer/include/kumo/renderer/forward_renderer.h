@@ -38,6 +38,8 @@ public:
     // Untextured: every texture slot binds the built-in fallback.
     std::int32_t addMaterial(const MaterialParams& params);
     std::uint32_t meshCount() const;
+    // Local-space bounds recorded at upload; null when `index` is out of range.
+    const math::Aabb* meshLocalAabb(std::uint32_t index) const;
     std::uint32_t materialCount() const;
     std::uint32_t defaultMaterialIndex() const;
     const MaterialParams* materialParams(std::uint32_t index) const;
@@ -57,6 +59,7 @@ private:
         rhi::Ptr<rhi::Buffer> vertexBuffer;
         rhi::Ptr<rhi::Buffer> indexBuffer;
         std::uint32_t indexCount = 0;
+        math::Aabb localAabb;
     };
 
     struct MaterialTextures {

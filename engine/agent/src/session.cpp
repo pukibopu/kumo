@@ -24,6 +24,8 @@ AgentSession::~AgentSession() {
         stopping_ = true;
     }
     cv_.notify_all();
+    // Unblocks a worker sitting in a long provider round trip (HTTP retries).
+    provider_.abort();
     if (worker_.joinable()) {
         worker_.join();
     }

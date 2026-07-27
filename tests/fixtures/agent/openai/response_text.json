@@ -1,0 +1,14 @@
+{
+    "id": "chatcmpl-001",
+    "object": "chat.completion",
+    "created": 1753500000,
+    "model": "qwen2.5:14b",
+    "choices": [
+        {
+            "index": 0,
+            "message": { "role": "assistant", "content": "场景已经准备好了。" },
+            "finish_reason": "stop"
+        }
+    ],
+    "usage": { "prompt_tokens": 120, "completion_tokens": 9, "total_tokens": 129 }
+}

@@ -1,7 +1,9 @@
 #include "ui.h"
 
+#include <kumo/agent/config.h>
 #include <kumo/agent/confirmation_gate.h>
 #include <kumo/agent/fake_provider.h>
+#include <kumo/agent/http_provider.h>
 #include <kumo/agent/scene_tools.h>
 #include <kumo/agent/session.h>
 #include <kumo/agent/tool_registry.h>
@@ -40,6 +42,17 @@ namespace {
 using namespace kumo;
 
 constexpr rhi::TextureFormat kSwapchainFormat = rhi::TextureFormat::BGRA8Unorm;
+
+// English for tool-call stability; the closing instruction keeps replies in the
+// user's language (ADR 0028).
+constexpr const char* kSceneSystemPrompt =
+    "You are the scene assistant inside kumo, a physically based Metal renderer. "
+    "You can only affect the scene through the provided tools; never invent tool names or "
+    "entity ids. Coordinates are right-handed with Y up and the camera looking down -Z; "
+    "distances are in meters, angles in degrees, colors linear. "
+    "Call scene_list before spatial reasoning or edits that depend on current state. "
+    "Tool errors come back as JSON with status \"error\": read the message, correct the "
+    "call and retry. Keep replies short. Always reply in the user's language.";
 
 void configureSurface(rhi::Surface& surface, int width, int height) {
     surface.configure(
@@ -332,19 +345,53 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     kumo::MainThreadQueue mainQueue;
     agent::ToolRegistry toolRegistry;
     agent::registerSceneTools(toolRegistry, {.scene = &world, .renderer = &renderer});
+    ui::RetryNotice retryNotice;
     std::optional<agent::ConfirmationGate> confirmGate;
-    if (confirmDestructive) {
+    std::unique_ptr<agent::ILLMProvider> provider;
+    std::optional<agent::AgentSession> session;
+    agent::AgentSession::Desc sessionDesc;
+    bool wantConfirm = confirmDestructive;
+    if (offline) {
+        provider = std::make_unique<agent::FakeProvider>(makeOfflineScript(world),
+                                                         "离线演示脚本已播放完毕。");
+        sessionDesc.model = "offline";
+        kumo::logInfo("offline agent script ready");
+    } else if (auto config = agent::loadAgentConfig("kumo.config.json", ".env");
+               !config.has_value()) {
+        kumo::logError("agent config: {}", config.error());
+    } else if (!config->agentAvailable()) {
+        // Rendering stays fully functional; the panel shows a Chinese hint.
+        kumo::logInfo("agent disabled: {}", config->unavailableReason());
+    } else {
+        wantConfirm = wantConfirm || config->confirmDestructive;
+        agent::HttpLLMProvider::Options options;
+        options.requestTimeout = config->requestTimeout;
+        options.onRetry = [&retryNotice](int attempt, int maxRetries) {
+            retryNotice.set(std::format("网络波动，重试中 ({}/{})…", attempt, maxRetries));
+        };
+        const bool openAi = config->providerType == agent::ProviderType::OpenAi;
+        if (openAi) {
+            provider = std::make_unique<agent::OpenAiProvider>(config->baseUrl, config->apiKey,
+                                                               agent::makeUrlSessionTransport(),
+                                                               std::move(options));
+        } else {
+            provider = std::make_unique<agent::ClaudeProvider>(config->baseUrl, config->apiKey,
+                                                               agent::makeUrlSessionTransport(),
+                                                               std::move(options));
+        }
+        sessionDesc.model = config->sceneModel;
+        sessionDesc.systemPrompt = kSceneSystemPrompt;
+        sessionDesc.maxTokens = config->maxTokens;
+        // The key never reaches the log (ADR 0012).
+        kumo::logInfo("agent provider ready: {} {} at {}", openAi ? "openai" : "anthropic",
+                      config->sceneModel, config->baseUrl);
+    }
+    if (wantConfirm) {
         confirmGate.emplace();
     }
-    std::unique_ptr<agent::FakeProvider> offlineProvider;
-    std::optional<agent::AgentSession> session;
-    if (offline) {
-        offlineProvider = std::make_unique<agent::FakeProvider>(makeOfflineScript(world),
-                                                                "离线演示脚本已播放完毕。");
-        session.emplace(*offlineProvider, toolRegistry, mainQueue,
-                        confirmGate.has_value() ? &*confirmGate : nullptr,
-                        agent::AgentSession::Desc{.model = "offline"});
-        kumo::logInfo("offline agent script ready");
+    if (provider != nullptr) {
+        session.emplace(*provider, toolRegistry, mainQueue,
+                        confirmGate.has_value() ? &*confirmGate : nullptr, sessionDesc);
     }
 
     AppInput input;
@@ -427,7 +474,8 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
                 ui::drawStatsPanel(fbWidth, fbHeight);
                 ui::drawLightPanel(lightSettings, world.light(0));
                 ui::drawMaterialPanel(overrideMetallic, overrideRoughness);
-                ui::drawChatPanel(chatPanel, session.has_value() ? &*session : nullptr);
+                ui::drawChatPanel(chatPanel, session.has_value() ? &*session : nullptr,
+                                  &retryNotice);
                 ui::drawConfirmDialog(confirmGate.has_value() ? &*confirmGate : nullptr);
                 ui::endFrame(*encoder, pass);
             });

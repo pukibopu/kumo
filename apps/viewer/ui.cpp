@@ -132,7 +132,22 @@ void drawMaterialPanel(float& metallic, float& roughness) {
     ImGui::End();
 }
 
-void drawChatPanel(ChatPanel& panel, AgentSession* session) {
+void RetryNotice::set(std::string text) {
+    std::lock_guard lock(mutex_);
+    text_ = std::move(text);
+}
+
+void RetryNotice::clear() {
+    std::lock_guard lock(mutex_);
+    text_.clear();
+}
+
+std::string RetryNotice::get() const {
+    std::lock_guard lock(mutex_);
+    return text_;
+}
+
+void drawChatPanel(ChatPanel& panel, AgentSession* session, RetryNotice* notice) {
     using Entry = AgentSession::TranscriptEntry;
     if (session != nullptr) {
         for (Entry& entry : session->drainTranscript()) {
@@ -181,9 +196,21 @@ void drawChatPanel(ChatPanel& panel, AgentSession* session) {
     ImGui::EndChild();
 
     if (session == nullptr) {
-        ImGui::TextWrapped("未配置模型；用 --offline 运行离线演示脚本。");
+        ImGui::TextWrapped("未配置模型：在 kumo.config.json 填写 provider（参考 "
+                           "kumo.config.example.json），或用 --offline 运行离线演示脚本。");
     } else {
-        ImGui::TextUnformatted(statusText(session->status()));
+        const AgentSession::Status status = session->status();
+        std::string statusLine = statusText(status);
+        if (notice != nullptr) {
+            if (status == AgentSession::Status::WaitingForModel) {
+                if (const std::string retry = notice->get(); !retry.empty()) {
+                    statusLine = retry;
+                }
+            } else {
+                notice->clear();
+            }
+        }
+        ImGui::TextUnformatted(statusLine.c_str());
         const bool canSend = !session->busy();
         ImGui::BeginDisabled(!canSend);
         ImGui::SetNextItemWidth(-60.0f);

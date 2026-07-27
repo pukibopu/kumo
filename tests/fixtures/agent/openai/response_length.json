@@ -1,0 +1,14 @@
+{
+    "id": "chatcmpl-004",
+    "object": "chat.completion",
+    "created": 1753500003,
+    "model": "qwen2.5:14b",
+    "choices": [
+        {
+            "index": 0,
+            "message": { "role": "assistant", "content": "这个场景的搭建步骤是" },
+            "finish_reason": "length"
+        }
+    ],
+    "usage": { "prompt_tokens": 160, "completion_tokens": 256, "total_tokens": 416 }
+}

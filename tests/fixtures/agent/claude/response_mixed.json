@@ -1,0 +1,13 @@
+{
+    "id": "msg_003",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-5",
+    "content": [
+        { "type": "text", "text": "我先看一下场景。" },
+        { "type": "tool_use", "id": "toolu_def456", "name": "scene_list", "input": {} }
+    ],
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "usage": { "input_tokens": 150, "output_tokens": 30 }
+}

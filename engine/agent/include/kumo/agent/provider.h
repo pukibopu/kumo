@@ -16,6 +16,10 @@ public:
 
     virtual CompleteResult complete(const ChatRequest& request) = 0;
 
+    // Asks an in-flight complete() to return early with Kind::Cancelled; safe
+    // from any thread. Providers without long waits keep the no-op default.
+    virtual void abort() noexcept {}
+
 protected:
     ILLMProvider() = default;
 };

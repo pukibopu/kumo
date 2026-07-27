@@ -1,0 +1,42 @@
+{
+    "model": "test-model",
+    "max_tokens": 256,
+    "messages": [
+        { "role": "system", "content": "You are a test." },
+        { "role": "user", "content": "add a sphere" },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "scene_add_entity",
+                        "arguments": "{\"primitive\":\"sphere\"}"
+                    }
+                }
+            ]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "{\"status\":\"ok\",\"entity_id\":\"0:0\"}"
+        },
+        { "role": "user", "content": "make it red" }
+    ],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "scene_add_entity",
+                "description": "Add an entity.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "primitive": { "type": "string" } },
+                    "required": ["primitive"]
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,27 @@
+{
+    "id": "chatcmpl-002",
+    "object": "chat.completion",
+    "created": 1753500001,
+    "model": "qwen2.5:14b",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "scene_add_entity",
+                            "arguments": "{\"primitive\":\"sphere\",\"size\":1.0}"
+                        }
+                    }
+                ]
+            },
+            "finish_reason": "tool_calls"
+        }
+    ],
+    "usage": { "prompt_tokens": 140, "completion_tokens": 25, "total_tokens": 165 }
+}

@@ -64,6 +64,7 @@ TEST_CASE("agent config defaults when no file exists") {
     CHECK(config->maxTokens == 4096);
     CHECK(config->requestTimeout == std::chrono::seconds(120));
     CHECK(!config->confirmDestructive);
+    CHECK(config->summaryThresholdTokens == 8000);
     CHECK(!config->agentAvailable());
     CHECK(config->unavailableReason().find("model") != std::string::npos);
 }
@@ -151,6 +152,16 @@ TEST_CASE("environment beats .env beats the config file") {
     unsetenv("KUMO_PROVIDER_API_KEY");
 }
 
+TEST_CASE("agents.summary_threshold_tokens overrides the default") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "agents": { "summary_threshold_tokens": 2500 }
+    })");
+    const auto config = sandbox.load();
+    REQUIRE(config.has_value());
+    CHECK(config->summaryThresholdTokens == 2500);
+}
+
 TEST_CASE("KUMO_PROVIDER_TYPE switches the protocol and default base url") {
     ConfigSandbox sandbox;
     setenv("KUMO_PROVIDER_TYPE", "openai", 1);
@@ -176,4 +187,9 @@ TEST_CASE("agent config rejects malformed input with a pointed message") {
     const auto badType = sandbox.load();
     REQUIRE(!badType.has_value());
     CHECK(badType.error().find("grpc") != std::string::npos);
+
+    sandbox.writeConfig(R"({ "agents": { "summary_threshold_tokens": "many" } })");
+    const auto badThreshold = sandbox.load();
+    REQUIRE(!badThreshold.has_value());
+    CHECK(badThreshold.error().find("summary_threshold_tokens") != std::string::npos);
 }

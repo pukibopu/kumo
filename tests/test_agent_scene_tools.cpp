@@ -67,6 +67,8 @@ TEST_CASE("scene_add_entity inserts an entity and returns its id") {
     CHECK(euler.y == doctest::Approx(45.0f).epsilon(0.01));
     // Without a renderer there is nothing to upload.
     CHECK(entity->meshIndex == -1);
+    CHECK(entity->primitive == "sphere");
+    CHECK(entity->primitiveSize == doctest::Approx(1.0f));
 }
 
 TEST_CASE("scene_add_entity validates primitive and field types") {
@@ -243,6 +245,7 @@ TEST_CASE("scene_list reports entities, camera and lights as compact JSON") {
     CHECK(entity["id"] == "0:0");
     CHECK(entity["name"] == "a");
     CHECK(entity["position"][2] == doctest::Approx(-2.0));
+    CHECK(entity["primitive"] == "cube");
     // No renderer, so no AABB or material report.
     CHECK(!entity.contains("aabb_world"));
     CHECK(!entity.contains("material"));

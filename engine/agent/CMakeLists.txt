@@ -7,6 +7,7 @@ add_library(kumo_agent STATIC
     src/openai_codec.cpp
     src/scene_tools.cpp
     src/session.cpp
+    src/summary.cpp
     src/tool_registry.cpp
 )
 if(APPLE)

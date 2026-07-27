@@ -4,6 +4,7 @@ add_executable(kumo_tests
     test_math.cpp
     test_math_m4.cpp
     test_scene.cpp
+    test_scene_persistence.cpp
     test_asset.cpp
     test_primitives.cpp
     test_shaderc.cpp
@@ -11,6 +12,7 @@ add_executable(kumo_tests
     test_agent_tool_registry.cpp
     test_agent_scene_tools.cpp
     test_agent_session.cpp
+    test_agent_summary.cpp
     test_agent_openai_codec.cpp
     test_agent_claude_codec.cpp
     test_agent_http_provider.cpp

@@ -222,6 +222,9 @@ std::string sceneList(const SceneToolContext& context) {
             // Exposed so the model can see when entities share one material.
             e["material_index"] = entity.materialIndex;
         }
+        if (!entity.primitive.empty()) {
+            e["primitive"] = entity.primitive;
+        }
         if (context.renderer != nullptr && entity.meshIndex >= 0) {
             const math::Aabb* local =
                 context.renderer->meshLocalAabb(static_cast<std::uint32_t>(entity.meshIndex));
@@ -289,6 +292,8 @@ std::string sceneAddEntity(const SceneToolContext& context, const json& args) {
     if (!readTransform(args, entity.transform, error)) {
         return errorJson(error);
     }
+    entity.primitive = primitive;
+    entity.primitiveSize = size;
     ForwardRenderer::MaterialParams material;
     if (args.contains("material")) {
         if (!args["material"].is_object()) {

@@ -170,6 +170,10 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
             if (!readField(agents, "confirm_destructive", config.confirmDestructive, error2)) {
                 return std::unexpected("agents." + error2);
             }
+            if (!readField(agents, "summary_threshold_tokens", config.summaryThresholdTokens,
+                           error2)) {
+                return std::unexpected("agents." + error2);
+            }
             if (agents.contains("scene") && agents["scene"].is_object()) {
                 if (!readField(agents["scene"], "model", config.sceneModel, error2)) {
                     return std::unexpected("agents.scene." + error2);

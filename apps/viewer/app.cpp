@@ -329,8 +329,12 @@ void loadSceneFile(scene::Scene& world, renderer::ForwardRenderer& renderer,
 
     world.entities.clear();
     world.clearLights();
-    for (const scene::Light& light : saved.lights) {
-        world.addLight(light);
+    for (std::size_t i = 0; i < saved.lights.size(); ++i) {
+        if (!world.addLight(saved.lights[i])) {
+            logError("scene load: light budget exhausted; dropping {} of {} lights",
+                     saved.lights.size() - i, saved.lights.size());
+            break;
+        }
     }
     world.camera = saved.camera;
 

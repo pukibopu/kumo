@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <utility>
 
 namespace ui {
@@ -46,6 +47,15 @@ const char* statusText(AgentSession::Status status) {
         break;
     }
     return "输入消息，回车发送";
+}
+
+// Chat transcript entries and the tool log can exceed ImGui::TextWrapped's
+// ~3KB internal format buffer (long tool JSON, summaries); building the
+// string ourselves and printing it unformatted avoids the truncation.
+void wrappedLine(const std::string& line) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(line.c_str());
+    ImGui::PopTextWrapPos();
 }
 
 } // namespace
@@ -86,6 +96,7 @@ void drawStatsPanel(int fbWidth, int fbHeight) {
     ImGui::Text("%.1f fps (%.2f ms)", ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
     ImGui::Text("drawable %dx%d", fbWidth, fbHeight);
     ImGui::Text("S: save screenshot");
+    ImGui::Text("K/L: save/load scene");
     ImGui::End();
 }
 
@@ -165,26 +176,31 @@ void drawChatPanel(ChatPanel& panel, AgentSession* session, RetryNotice* notice)
     for (const Entry& entry : panel.entries) {
         switch (entry.kind) {
         case Entry::Kind::User:
-            ImGui::TextWrapped("你: %s", entry.text.c_str());
+            wrappedLine(std::format("你: {}", entry.text));
             break;
         case Entry::Kind::Assistant:
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 210, 255, 255));
-            ImGui::TextWrapped("助手: %s", entry.text.c_str());
+            wrappedLine(std::format("助手: {}", entry.text));
             ImGui::PopStyleColor();
             break;
         case Entry::Kind::ToolCall:
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255));
-            ImGui::TextWrapped("→ %s %s", entry.toolName.c_str(), entry.json.c_str());
+            wrappedLine(std::format("→ {} {}", entry.toolName, entry.json));
             ImGui::PopStyleColor();
             break;
         case Entry::Kind::ToolResult:
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 170, 120, 255));
-            ImGui::TextWrapped("← %s %s", entry.toolName.c_str(), entry.json.c_str());
+            wrappedLine(std::format("← {} {}", entry.toolName, entry.json));
             ImGui::PopStyleColor();
             break;
         case Entry::Kind::Error:
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(240, 110, 110, 255));
-            ImGui::TextWrapped("错误: %s", entry.text.c_str());
+            wrappedLine(std::format("错误: {}", entry.text));
+            ImGui::PopStyleColor();
+            break;
+        case Entry::Kind::Info:
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255));
+            wrappedLine(std::format("· {}", entry.text));
             ImGui::PopStyleColor();
             break;
         }
@@ -228,6 +244,21 @@ void drawChatPanel(ChatPanel& panel, AgentSession* session, RetryNotice* notice)
             if (session->submit(panel.input.data())) {
                 panel.input[0] = '\0';
             }
+        }
+    }
+    ImGui::End();
+}
+
+void drawToolLogPanel(const ChatPanel& panel) {
+    using Entry = AgentSession::TranscriptEntry;
+    ImGui::SetNextWindowPos({960.0f, 520.0f}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({310.0f, 190.0f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("工具日志");
+    for (const Entry& entry : panel.entries) {
+        if (entry.kind == Entry::Kind::ToolCall) {
+            wrappedLine(std::format("→ {} {}", entry.toolName, entry.json));
+        } else if (entry.kind == Entry::Kind::ToolResult) {
+            wrappedLine(std::format("← {} {}", entry.toolName, entry.json));
         }
     }
     ImGui::End();

@@ -36,17 +36,23 @@ The viewer renders glTF scenes with Cook-Torrance PBR and IBL (MSAA 4x, ACES ton
 
 - **Left-drag** rotates the camera, **scroll** zooms (orbit camera);
 - ImGui panels tweak the directional light (direction/intensity/color) and material metallic/roughness multipliers live;
-- **S** saves a screenshot as PNG in the working directory;
+- The chat panel drives the scene in natural language (see below); the tool log panel records every tool call in full;
+- **S** saves a screenshot; **K** / **L** save / load the scene (`kumo_scene.json`, including agent-built entities and material tweaks);
 - Editing the GLSL sources under `shaders/` hot-reloads them; compile errors keep the last good frame.
 
-## Assistant configuration
+## Scene assistant
 
-The scene / shader assistant needs an Anthropic Messages API compatible endpoint:
+Add/remove entities and tweak transforms, materials, lights and the camera in natural language. Two wire protocols (`provider.type`):
 
-1. Copy `kumo.config.example.json` to `kumo.config.json` and fill in `base_url` and `model`;
-2. Put your API key in the `ANTHROPIC_API_KEY` environment variable, or in a `.env` file (see `.env.example`).
+- **Local models (OpenAI-compatible, the easiest start)**: Ollama / LM Studio / llama.cpp; local endpoints need no key:
 
-Rendering works fine without any assistant configuration.
+  ```sh
+  KUMO_PROVIDER_TYPE=openai KUMO_PROVIDER_MODEL=qwen2.5:14b ./build/macos-debug/apps/viewer/viewer
+  ```
+
+- **Anthropic Messages API** (official or a compatible relay): copy `kumo.config.example.json` to `kumo.config.json`, fill in `model`, and put your API key in the `ANTHROPIC_API_KEY` environment variable or a `.env` file (see `.env.example`).
+
+`viewer --offline` replays a built-in scripted demo with zero network. Rendering works fine without any assistant configuration. Details (tool set, history compression, confirmation dialog) live in [docs/agents.md](docs/agents.md).
 
 ## License
 

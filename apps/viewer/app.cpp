@@ -62,7 +62,10 @@ struct OrbitController {
     }
 
     void zoom(float scroll) {
-        distance = std::clamp(distance * std::exp(-scroll * 0.12f), 0.5f, 20.0f);
+        // The ceiling follows an agent-imported distance so one scroll notch
+        // narrows the range smoothly instead of teleporting back to 20.
+        distance =
+            std::clamp(distance * std::exp(-scroll * 0.12f), 0.5f, std::max(20.0f, distance));
     }
 
     void apply(scene::Camera& camera) const {
@@ -72,16 +75,19 @@ struct OrbitController {
         camera.lookAt(target);
     }
 
-    // Keeps the current target: the next drag orbits the moved camera around it.
+    // Adopts the camera's aim as the new pivot: the target moves onto the view
+    // ray at the previous pivot distance, so the next drag orbits the agent's
+    // framing instead of snapping back to the old target. Imported pitch is
+    // clamped into the range rotate() allows.
     void syncFrom(const scene::Camera& camera) {
-        const math::float3 offset = camera.position - target;
-        const float len = length(offset);
-        if (len < 1e-4f) {
-            return;
+        const float len = length(camera.position - target);
+        if (len > 1e-4f) {
+            distance = len;
         }
-        distance = len;
-        const math::float3 dir = offset / len;
-        pitch = std::asin(std::clamp(dir.y, -1.0f, 1.0f));
+        const math::float3 forward = camera.rotation * math::float3(0.0f, 0.0f, -1.0f);
+        target = camera.position + forward * distance;
+        const math::float3 dir = -forward;
+        pitch = std::clamp(std::asin(std::clamp(dir.y, -1.0f, 1.0f)), -1.5f, 1.5f);
         yaw = std::atan2(dir.x, dir.z);
     }
 };
@@ -344,7 +350,6 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     AppInput input;
     ui::LightSettings lightSettings;
     ui::ChatPanel chatPanel;
-    bool lightPanelChanged = true; // apply the slider defaults once at startup
     float overrideMetallic = 1.0f;
     float overrideRoughness = 1.0f;
 
@@ -364,6 +369,11 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
 
     ui::init(*device, window);
     input.orbit.apply(world.camera);
+    if (scene::Light* light = world.light(0)) {
+        // The slider defaults define the startup look; from here on the panel
+        // applies its own edits and syncFrom mirrors everything else.
+        lightSettings.apply(*light);
+    }
 
     int frame = 0;
     while (!glfwWindowShouldClose(window)) {
@@ -397,12 +407,10 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         } else {
             input.orbit.syncFrom(world.camera);
         }
+        // Sliders mirror the light; the panel applies user edits itself in the
+        // same frame, so agent light_set changes are never overwritten here.
         if (scene::Light* light = world.light(0)) {
-            if (lightPanelChanged) {
-                lightSettings.apply(*light);
-            } else {
-                lightSettings.syncFrom(*light);
-            }
+            lightSettings.syncFrom(*light);
         }
         renderer.setMaterialOverride(overrideMetallic, overrideRoughness);
 
@@ -417,7 +425,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
             renderer.render(*encoder, world, target, [&](rhi::RenderPassEncoder& pass) {
                 ui::beginFrame(pass);
                 ui::drawStatsPanel(fbWidth, fbHeight);
-                lightPanelChanged = ui::drawLightPanel(lightSettings);
+                ui::drawLightPanel(lightSettings, world.light(0));
                 ui::drawMaterialPanel(overrideMetallic, overrideRoughness);
                 ui::drawChatPanel(chatPanel, session.has_value() ? &*session : nullptr);
                 ui::drawConfirmDialog(confirmGate.has_value() ? &*confirmGate : nullptr);

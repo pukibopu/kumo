@@ -111,7 +111,7 @@ void LightSettings::syncFrom(const kumo::scene::Light& light) {
     color = {light.color.x, light.color.y, light.color.z};
 }
 
-bool drawLightPanel(LightSettings& settings) {
+void drawLightPanel(LightSettings& settings, kumo::scene::Light* light) {
     ImGui::SetNextWindowPos({10.0f, 110.0f}, ImGuiCond_FirstUseEver);
     ImGui::Begin("light");
     bool changed = ImGui::SliderFloat("azimuth", &settings.azimuthDeg, -180.0f, 180.0f);
@@ -119,7 +119,9 @@ bool drawLightPanel(LightSettings& settings) {
     changed = ImGui::SliderFloat("intensity", &settings.intensity, 0.0f, 10.0f) || changed;
     changed = ImGui::ColorEdit3("color", settings.color.data()) || changed;
     ImGui::End();
-    return changed;
+    if (changed && light != nullptr) {
+        settings.apply(*light);
+    }
 }
 
 void drawMaterialPanel(float& metallic, float& roughness) {
@@ -187,6 +189,11 @@ void drawChatPanel(ChatPanel& panel, AgentSession* session) {
         ImGui::SetNextItemWidth(-60.0f);
         bool send = ImGui::InputText("##input", panel.input.data(), panel.input.size(),
                                      ImGuiInputTextFlags_EnterReturnsTrue);
+        if (send) {
+            // EnterReturnsTrue clears the active id; without this every message
+            // would need a mouse re-click on the input box.
+            ImGui::SetKeyboardFocusHere(-1);
+        }
         ImGui::SameLine();
         send = ImGui::Button("发送") || send;
         ImGui::EndDisabled();
@@ -216,12 +223,12 @@ void drawConfirmDialog(kumo::agent::ConfirmationGate* gate) {
         ImGui::TextWrapped("%s", prompt->argumentsJson.c_str());
         ImGui::PopStyleColor();
         if (ImGui::Button("允许", {100.0f, 0.0f})) {
-            gate->resolve(true);
+            gate->resolve(prompt->id, true);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("拒绝", {100.0f, 0.0f})) {
-            gate->resolve(false);
+            gate->resolve(prompt->id, false);
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();

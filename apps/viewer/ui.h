@@ -34,8 +34,10 @@ struct LightSettings {
     void syncFrom(const kumo::scene::Light& light);
 };
 
-// Returns true when the user changed a slider this frame.
-bool drawLightPanel(LightSettings& settings);
+// Applies slider edits to `light` in the same frame they happen, so the caller
+// never has to arbitrate between stale panel state and agent changes. `light`
+// may be null.
+void drawLightPanel(LightSettings& settings, kumo::scene::Light* light);
 void drawMaterialPanel(float& metallic, float& roughness);
 
 struct ChatPanel {

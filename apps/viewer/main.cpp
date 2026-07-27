@@ -7,12 +7,15 @@
 #if defined(__APPLE__)
 #define KUMO_HAS_RUNAPP 1
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
-           const std::filesystem::path& envPath, bool demoPrimitives);
+           const std::filesystem::path& envPath, bool demoPrimitives, bool offline,
+           bool confirmDestructive);
 #endif
 
 int main(int argc, char** argv) {
     int maxFrames = -1;
     bool demoPrimitives = false;
+    bool offline = false;
+    bool confirmDestructive = false;
     std::filesystem::path modelPath =
         std::filesystem::path(KUMO_ASSET_DIR) / "models" / "DamagedHelmet.glb";
     std::filesystem::path envPath =
@@ -24,6 +27,10 @@ int main(int argc, char** argv) {
             maxFrames = std::atoi(argv[++i]);
         } else if (arg == "--demo-primitives") {
             demoPrimitives = true;
+        } else if (arg == "--offline") {
+            offline = true;
+        } else if (arg == "--confirm-destructive") {
+            confirmDestructive = true;
         } else if (arg == "--env") {
             if (i + 1 >= argc) {
                 kumo::logError("--env requires a path to an .hdr file");
@@ -34,7 +41,7 @@ int main(int argc, char** argv) {
             modelPath = arg;
         } else {
             kumo::logError("unknown option '{}' (usage: viewer [model.glb] [--env path.hdr] "
-                           "[--frames N] [--demo-primitives])",
+                           "[--frames N] [--demo-primitives] [--offline] [--confirm-destructive])",
                            arg);
             return 1;
         }
@@ -43,10 +50,12 @@ int main(int argc, char** argv) {
     kumo::logInfo("kumo viewer {}", KUMO_VERSION_STRING);
 
 #if defined(KUMO_HAS_RUNAPP)
-    return runApp(maxFrames, modelPath, envPath, demoPrimitives);
+    return runApp(maxFrames, modelPath, envPath, demoPrimitives, offline, confirmDestructive);
 #else
     (void)maxFrames;
     (void)demoPrimitives;
+    (void)offline;
+    (void)confirmDestructive;
     kumo::logInfo("no rendering backend for this platform yet");
     return 0;
 #endif

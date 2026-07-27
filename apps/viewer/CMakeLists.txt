@@ -1,6 +1,6 @@
 set(VIEWER_SOURCES main.cpp)
 if(APPLE)
-    list(APPEND VIEWER_SOURCES app.cpp metal_layer_glue.mm)
+    list(APPEND VIEWER_SOURCES app.cpp ui.cpp metal_layer_glue.mm)
 endif()
 
 add_executable(viewer ${VIEWER_SOURCES})
@@ -13,5 +13,5 @@ kumo_target_warnings(viewer)
 if(APPLE)
     set_source_files_properties(metal_layer_glue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(viewer PRIVATE kumo_rhi kumo_shaderc kumo_scene kumo_asset
-        kumo_renderer imgui_lib kumo_rhi_metal "-framework Cocoa")
+        kumo_renderer kumo_agent imgui_lib kumo_rhi_metal "-framework Cocoa")
 endif()

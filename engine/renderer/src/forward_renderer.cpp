@@ -162,6 +162,7 @@ bool ForwardRenderer::uploadMesh(const asset::MeshData& mesh, GpuMesh& out) {
     device_->queue().writeBuffer(*out.vertexBuffer, 0, mesh.vertices.data(), vertexBytes);
     device_->queue().writeBuffer(*out.indexBuffer, 0, mesh.indices.data(), indexBytes);
     out.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+    out.localAabb = mesh.localAabb;
     return true;
 }
 
@@ -226,6 +227,10 @@ std::int32_t ForwardRenderer::addMaterial(const MaterialParams& params) {
 
 std::uint32_t ForwardRenderer::meshCount() const {
     return static_cast<std::uint32_t>(meshes_.size());
+}
+
+const math::Aabb* ForwardRenderer::meshLocalAabb(std::uint32_t index) const {
+    return index < meshes_.size() ? &meshes_[index].localAabb : nullptr;
 }
 
 std::uint32_t ForwardRenderer::materialCount() const {

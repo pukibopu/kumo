@@ -1,5 +1,6 @@
 add_executable(kumo_tests
     test_core_file.cpp
+    test_main_thread_queue.cpp
     test_math.cpp
     test_math_m4.cpp
     test_scene.cpp
@@ -7,9 +8,12 @@ add_executable(kumo_tests
     test_primitives.cpp
     test_shaderc.cpp
     test_shader_snapshots.cpp
+    test_agent_tool_registry.cpp
+    test_agent_scene_tools.cpp
+    test_agent_session.cpp
 )
 target_link_libraries(kumo_tests PRIVATE doctest::doctest kumo_core kumo_math kumo_shaderc
-    kumo_scene kumo_asset)
+    kumo_scene kumo_asset kumo_agent nlohmann_json::nlohmann_json)
 target_compile_definitions(kumo_tests PRIVATE
     KUMO_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders"
     KUMO_SNAPSHOT_DIR="${CMAKE_SOURCE_DIR}/tests/snapshots"

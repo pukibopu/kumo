@@ -45,6 +45,20 @@ public:
         return true;
     }
 
+    // Preserves slot generations so ids handed out before the clear keep missing.
+    void clear() {
+        free_.clear();
+        for (std::uint32_t i = 0; i < slots_.size(); ++i) {
+            if (slots_[i].occupied) {
+                slots_[i].occupied = false;
+                ++slots_[i].generation;
+                slots_[i].value = T{};
+            }
+            free_.push_back(i);
+        }
+        live_ = 0;
+    }
+
     T* get(EntityId id) {
         Slot* slot = slotOf(id);
         return slot != nullptr ? &slot->value : nullptr;

@@ -37,6 +37,29 @@ TEST_CASE("SlotMap insert/get/remove and stale-generation invalidation") {
     CHECK(count == map.size());
 }
 
+TEST_CASE("SlotMap::clear preserves stale-id misses across future inserts") {
+    scene::SlotMap<int> map;
+    scene::EntityId a = map.insert(1);
+    scene::EntityId b = map.insert(2);
+    CHECK(map.size() == 2);
+
+    map.clear();
+    CHECK(map.size() == 0);
+    CHECK(map.empty());
+    CHECK(map.get(a) == nullptr);
+    CHECK(map.get(b) == nullptr);
+
+    // Reinsert enough values to recycle every slot clear() freed; ids captured
+    // before the clear must still miss even once their slot is reused.
+    scene::EntityId c = map.insert(3);
+    scene::EntityId d = map.insert(4);
+    CHECK(map.size() == 2);
+    CHECK(map.get(a) == nullptr);
+    CHECK(map.get(b) == nullptr);
+    REQUIRE(map.get(c) != nullptr);
+    REQUIRE(map.get(d) != nullptr);
+}
+
 TEST_CASE("Scene::addLight caps at 16") {
     scene::Scene s;
     for (int i = 0; i < 16; ++i) {

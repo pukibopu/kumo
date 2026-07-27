@@ -6,6 +6,8 @@
 #include <kumo/scene/light.h>
 
 #include <array>
+#include <mutex>
+#include <string>
 #include <vector>
 
 struct GLFWwindow;
@@ -46,9 +48,23 @@ struct ChatPanel {
     bool scrollToBottom = false;
 };
 
+// Provider retry callbacks land here from the worker thread; the panel shows
+// the text while the session waits on the model (ADR 0030).
+class RetryNotice {
+public:
+    void set(std::string text);
+    void clear();
+    std::string get() const;
+
+private:
+    mutable std::mutex mutex_;
+    std::string text_;
+};
+
 // `session` may be null (no provider configured): the panel renders a hint
-// instead of the input. Drains the session transcript every frame.
-void drawChatPanel(ChatPanel& panel, kumo::agent::AgentSession* session);
+// instead of the input. Drains the session transcript every frame. `notice`
+// may be null.
+void drawChatPanel(ChatPanel& panel, kumo::agent::AgentSession* session, RetryNotice* notice);
 
 // Modal for a destructive tool awaiting approval; `gate` may be null.
 void drawConfirmDialog(kumo::agent::ConfirmationGate* gate);

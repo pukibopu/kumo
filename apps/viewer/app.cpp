@@ -311,6 +311,11 @@ void saveSceneFile(const scene::Scene& world, const std::filesystem::path& model
 void loadSceneFile(scene::Scene& world, renderer::ForwardRenderer& renderer,
                    const std::filesystem::path& modelPath) {
     const std::filesystem::path path = std::filesystem::current_path() / kSceneFileName;
+    if (!std::filesystem::exists(path)) {
+        // Expected state, not an error: nothing has been saved yet.
+        logInfo("no saved scene at {} (press K to save one first)", path.string());
+        return;
+    }
     const auto text = readTextFile(path);
     if (!text.has_value()) {
         logError("scene load failed: {}", text.error());

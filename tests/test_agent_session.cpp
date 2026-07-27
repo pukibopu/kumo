@@ -6,7 +6,11 @@
 #include <kumo/agent/tool_registry.h>
 #include <kumo/core/main_thread_queue.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <future>
 #include <string>
 #include <thread>
 #include <utility>
@@ -82,6 +86,17 @@ AgentSession::Desc desc(int maxToolRounds = 16) {
             .maxTokens = 512,
             .maxToolRounds = maxToolRounds};
 }
+
+class FailingProvider final : public ILLMProvider {
+public:
+    CompleteResult complete(const ChatRequest& request) override {
+        messageCounts.push_back(request.messages.size());
+        return std::unexpected(
+            ProviderError{.kind = ProviderError::Kind::Network, .message = "connection refused"});
+    }
+
+    std::vector<std::size_t> messageCounts;
+};
 
 } // namespace
 
@@ -160,9 +175,10 @@ TEST_CASE("AgentSession feeds unknown-tool errors back instead of failing the tu
     CHECK(messages[2].toolResults[0].contentJson.find("unknown tool") != std::string::npos);
 }
 
-TEST_CASE("AgentSession stops at the tool round limit") {
+TEST_CASE("AgentSession stops at the tool round limit without executing the final calls") {
     MainThreadQueue queue;
-    ToolRegistry registry = echoRegistry();
+    std::vector<std::string> seenArgs;
+    ToolRegistry registry = echoRegistry(&seenArgs);
     FakeProvider provider(
         {toolUse("c1", "echo", "{}"), toolUse("c2", "echo", "{}"), toolUse("c3", "echo", "{}")});
     AgentSession session(provider, registry, queue, nullptr, desc(2));
@@ -171,6 +187,9 @@ TEST_CASE("AgentSession stops at the tool round limit") {
     REQUIRE(pumpUntilIdle(queue, session));
 
     CHECK(provider.requests().size() == 2);
+    // The final round's calls are stripped, not run: results could never be
+    // sent back, and the scene must not mutate behind the model.
+    CHECK(seenArgs.size() == 1);
     const std::vector<Entry> transcript = session.drainTranscript();
     REQUIRE(!transcript.empty());
     CHECK(transcript.back().kind == Kind::Error);
@@ -194,6 +213,40 @@ TEST_CASE("AgentSession surfaces MaxTokens truncation instead of swallowing it")
     REQUIRE(!transcript.empty());
     CHECK(transcript.back().kind == Kind::Error);
     CHECK(transcript.back().text.find("max_tokens") != std::string::npos);
+
+    // The truncated calls must not poison later requests as dangling tool_use.
+    REQUIRE(session.submit("again"));
+    REQUIRE(pumpUntilIdle(queue, session));
+    REQUIRE(provider.requests().size() == 2);
+    for (const ChatMessage& message : provider.requests()[1].messages) {
+        CHECK(message.toolCalls.empty());
+    }
+}
+
+TEST_CASE("AgentSession rolls back the user message when the provider errors") {
+    MainThreadQueue queue;
+    ToolRegistry registry = echoRegistry();
+    FailingProvider provider;
+    AgentSession session(provider, registry, queue, nullptr, desc());
+
+    REQUIRE(session.submit("one"));
+    REQUIRE(pumpUntilIdle(queue, session));
+    REQUIRE(session.submit("two"));
+    REQUIRE(pumpUntilIdle(queue, session));
+
+    // Each attempt must carry exactly one user message: the failed turn's
+    // message is rolled back, never left to stack up as consecutive users.
+    REQUIRE(provider.messageCounts.size() == 2);
+    CHECK(provider.messageCounts[0] == 1);
+    CHECK(provider.messageCounts[1] == 1);
+
+    const std::vector<Entry> transcript = session.drainTranscript();
+    bool sawError = false;
+    for (const Entry& entry : transcript) {
+        sawError = sawError || (entry.kind == Kind::Error &&
+                                entry.text.find("connection refused") != std::string::npos);
+    }
+    CHECK(sawError);
 }
 
 TEST_CASE("ConfirmationGate denial turns a destructive call into cancelled_by_user") {
@@ -220,7 +273,7 @@ TEST_CASE("ConfirmationGate denial turns a destructive call into cancelled_by_us
     // A second submit while the turn is blocked must be rejected, not queued.
     CHECK(!session.submit("second"));
 
-    gate.resolve(false);
+    gate.resolve(gate.pending()->id, false);
     REQUIRE(pumpUntilIdle(queue, session));
     CHECK(!executed);
     REQUIRE(provider.requests().size() == 2);
@@ -230,9 +283,27 @@ TEST_CASE("ConfirmationGate denial turns a destructive call into cancelled_by_us
     // Approval lets the same tool through.
     REQUIRE(session.submit("again"));
     REQUIRE(waitFor([&] { return gate.pending().has_value(); }));
-    gate.resolve(true);
+    gate.resolve(gate.pending()->id, true);
     REQUIRE(pumpUntilIdle(queue, session));
     CHECK(executed);
+}
+
+TEST_CASE("ConfirmationGate ignores decisions for prompts it is not showing") {
+    ConfirmationGate gate;
+    std::atomic<bool> abortFlag{false};
+    bool approved = true;
+    std::thread asker([&] { approved = gate.ask("nuke", "{}", abortFlag); });
+
+    REQUIRE(waitFor([&] { return gate.pending().has_value(); }));
+    const std::uint64_t id = gate.pending()->id;
+    // A stale or forged id (e.g. a double-click racing the next prompt) must
+    // not answer the prompt on screen.
+    gate.resolve(id + 1, true);
+    CHECK(gate.pending().has_value());
+    gate.resolve(id, false);
+    asker.join();
+    CHECK(!approved);
+    CHECK(!gate.pending().has_value());
 }
 
 TEST_CASE("AgentSession destruction unblocks a worker waiting on tool work") {
@@ -245,8 +316,14 @@ TEST_CASE("AgentSession destruction unblocks a worker waiting on tool work") {
         // The worker posts the tool call and blocks; nobody ever drains.
         REQUIRE(waitFor([&] { return queue.pending() > 0; }));
     }
-    // Reaching this point without a hang is the assertion.
+    // Reaching this point without a hang is the assertion. The undrained item
+    // captures only app-owned state, so running it late is safe and the queue
+    // remains usable for a future session.
+    queue.drain();
     CHECK(queue.pending() == 0);
+    std::future<std::string> after = queue.post([] { return std::string("alive"); });
+    queue.drain();
+    CHECK(after.get() == "alive");
 }
 
 TEST_CASE("AgentSession destruction unblocks a worker waiting for confirmation") {

@@ -7,8 +7,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <cmath>
-#include <format>
 #include <string>
 
 using namespace kumo;
@@ -79,6 +77,13 @@ TEST_CASE("scene_add_entity validates primitive and field types") {
           "error");
     CHECK(f.invoke("scene_add_entity", R"({"primitive":"cube","size":"big"})")["status"] ==
           "error");
+    CHECK(f.invoke("scene_add_entity", R"({"primitive":"cube","size":0})")["status"] == "error");
+    // Wrong-typed strings must yield the tool's own vocabulary, not raw
+    // nlohmann exception text.
+    const json badName = f.invoke("scene_add_entity", R"({"primitive":"cube","name":42})");
+    CHECK(badName["status"] == "error");
+    CHECK(badName["message"].get<std::string>().find("json.exception") == std::string::npos);
+    CHECK(badName["message"].get<std::string>().find("name") != std::string::npos);
     CHECK(f.scene.entities.empty());
 }
 
@@ -92,6 +97,35 @@ TEST_CASE("scene_set_transform updates only the provided fields") {
     REQUIRE(entity != nullptr);
     CHECK(entity->transform.position.y == doctest::Approx(6.0f));
     CHECK(entity->transform.scale.x == doctest::Approx(1.0f));
+}
+
+TEST_CASE("scene_set_transform is atomic: an invalid field leaves the entity untouched") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[1,1,1]})");
+    const json result =
+        f.invoke("scene_set_transform", R"({"entity_id":"0:0","position":[5,6,7],"scale":[1,2]})");
+    CHECK(result["status"] == "error");
+    const scene::Entity* entity = f.scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    // The valid position that preceded the bad scale must not have been applied.
+    CHECK(entity->transform.position.x == doctest::Approx(1.0f));
+}
+
+TEST_CASE("scene_set_transform rejects degenerate and non-finite values") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube"})");
+    // Zero scale would make the model matrix singular (NaN normal matrix).
+    CHECK(f.invoke("scene_set_transform", R"({"entity_id":"0:0","scale":[0,0,0]})")["status"] ==
+          "error");
+    CHECK(f.invoke("scene_set_transform", R"({"entity_id":"0:0","scale":[1,-1,1]})")["status"] ==
+          "error");
+    // 1e39 exceeds float range and would arrive as inf.
+    CHECK(f.invoke("scene_set_transform",
+                   R"({"entity_id":"0:0","position":[1e39,0,0]})")["status"] == "error");
+    const scene::Entity* entity = f.scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    CHECK(entity->transform.scale.x == doctest::Approx(1.0f));
+    CHECK(entity->transform.position.x == doctest::Approx(0.0f));
 }
 
 TEST_CASE("entity id parsing rejects garbage and stale ids") {
@@ -129,6 +163,13 @@ TEST_CASE("camera_set applies position, look_at and fov") {
     CHECK(euler.y == doctest::Approx(0.0f).epsilon(0.01));
 }
 
+TEST_CASE("camera_set is atomic: an invalid field leaves the camera untouched") {
+    Fixture f;
+    const json result = f.invoke("camera_set", R"({"position":[9,9,9],"fov_y_deg":"wide"})");
+    CHECK(result["status"] == "error");
+    CHECK(f.scene.camera.position.z == doctest::Approx(3.0f));
+}
+
 TEST_CASE("light_set appends when index is omitted and enforces the 16 cap") {
     Fixture f;
     const json first = f.invoke(
@@ -155,6 +196,31 @@ TEST_CASE("light_set modifies an existing light and rejects bad indices") {
     CHECK(f.scene.lights()[0].intensity == doctest::Approx(7.0f));
     CHECK(f.invoke("light_set", R"({"index":5,"intensity":1})")["status"] == "error");
     CHECK(f.invoke("light_set", R"({"index":0,"type":"spot"})")["status"] == "error");
+    // The schema says integer; an integral float still addresses light 0.
+    CHECK(f.invoke("light_set", R"({"index":0.0,"intensity":2})")["status"] == "ok");
+    CHECK(f.scene.lights()[0].intensity == doctest::Approx(2.0f));
+    CHECK(f.invoke("light_set", R"({"index":0.5,"intensity":2})")["status"] == "error");
+}
+
+TEST_CASE("light_set is atomic: a rejected call appends nothing and edits nothing") {
+    Fixture f;
+    // Append-mode rejection must not leave a default light behind.
+    CHECK(f.invoke("light_set", R"({"type":"spot"})")["status"] == "error");
+    CHECK(f.invoke("light_set", R"({"color":[1,0]})")["status"] == "error");
+    CHECK(f.scene.lights().empty());
+    // Edit-mode rejection must not half-apply earlier fields.
+    f.invoke("light_set", R"({"intensity":1})");
+    CHECK(f.invoke("light_set", R"({"index":0,"intensity":9,"color":[1,0]})")["status"] == "error");
+    CHECK(f.scene.lights()[0].intensity == doctest::Approx(1.0f));
+}
+
+TEST_CASE("light_set rejects a zero direction") {
+    Fixture f;
+    f.invoke("light_set", R"({"intensity":1})");
+    // The renderer normalizes unconditionally; zero would become NaN state.
+    const json result = f.invoke("light_set", R"({"index":0,"direction":[0,0,0]})");
+    CHECK(result["status"] == "error");
+    CHECK(f.scene.lights()[0].direction.y == doctest::Approx(-1.0f));
 }
 
 TEST_CASE("material_set_param without a renderer reports a structured error") {

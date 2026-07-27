@@ -21,6 +21,10 @@ struct ToolDef {
 // Takes the raw arguments JSON the model produced, returns the result JSON.
 using ToolHandler = std::function<std::string(std::string_view argsJson)>;
 
+// The {"status":"error","message":...} envelope every tool-result error uses;
+// the single definition of that wire shape (ADR 0028).
+std::string errorJson(std::string_view message);
+
 class ToolRegistry {
 public:
     // False when the name is empty or already taken; defs() reports registrations

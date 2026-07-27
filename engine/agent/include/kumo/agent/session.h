@@ -29,6 +29,8 @@ class ConfirmationGate;
 // This API is the seam a future product shell consumes, so it must stay free of
 // UI and platform types (ADR 0043). All referenced objects must outlive the
 // session; in a composition root, declare it after the scene, renderer and queue.
+// Shutdown never latches state onto the queue or gate: the worker polls abort_
+// while waiting, so both stay usable by other sessions.
 class AgentSession {
 public:
     enum class Status { Idle, WaitingForModel, RunningTool, WaitingForConfirmation };

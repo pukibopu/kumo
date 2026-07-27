@@ -3,7 +3,7 @@
 #include <kumo/agent/confirmation_gate.h>
 #include <kumo/core/main_thread_queue.h>
 
-#include <exception>
+#include <chrono>
 #include <format>
 #include <utility>
 
@@ -15,18 +15,15 @@ AgentSession::AgentSession(ILLMProvider& provider, const ToolRegistry& registry,
       desc_(std::move(desc)), worker_([this] { workerLoop(); }) {}
 
 AgentSession::~AgentSession() {
+    // The worker unblocks itself: awaitJson() and ConfirmationGate::ask() poll
+    // abort_, so shutdown never latches cancel state onto the app-owned queue or
+    // gate (another session may share them).
     abort_.store(true);
     {
         std::lock_guard lock(mutex_);
         stopping_ = true;
     }
     cv_.notify_all();
-    if (confirm_ != nullptr) {
-        confirm_->cancelAll();
-    }
-    // Unblocks a worker waiting on a tool future; the queue stays cancelled, which
-    // is fine because the session is the only poster and is going away.
-    queue_.cancelAll(R"({"status":"error","message":"cancelled: shutting down"})");
     if (worker_.joinable()) {
         worker_.join();
     }
@@ -84,6 +81,7 @@ void AgentSession::workerLoop() {
 }
 
 void AgentSession::runTurn(std::string userText) {
+    const std::size_t turnStart = history_.size();
     pushEntry({.kind = TranscriptEntry::Kind::User, .text = userText});
     ChatMessage userMessage;
     userMessage.role = Role::User;
@@ -91,6 +89,9 @@ void AgentSession::runTurn(std::string userText) {
     history_.push_back(std::move(userMessage));
 
     for (int round = 0; round < desc_.maxToolRounds; ++round) {
+        if (abort_.load()) {
+            return;
+        }
         setStatus(Status::WaitingForModel);
         ChatRequest request;
         request.model = desc_.model;
@@ -104,9 +105,26 @@ void AgentSession::runTurn(std::string userText) {
         }
         if (!result.has_value()) {
             pushEntry({.kind = TranscriptEntry::Kind::Error, .text = result.error().message});
+            // Roll back the dangling user message so a retry does not put two
+            // consecutive user messages on the wire. Later-round state is kept:
+            // its tools already ran, and history ending on tool results is
+            // something the codecs handle.
+            if (history_.size() == turnStart + 1) {
+                history_.resize(turnStart);
+            }
             return;
         }
 
+        const bool hadCalls = !result->toolCalls.empty();
+        const bool wantsTools = result->stopReason == StopReason::ToolUse && hadCalls;
+        // A truncated or otherwise-ended reply may carry incomplete calls, and
+        // the final round must not execute (its results could never be sent
+        // back). Either way the calls are stripped: an assistant tool_use with
+        // no matching tool_result poisons every later request.
+        const bool execute = wantsTools && round + 1 < desc_.maxToolRounds;
+        if (!execute) {
+            result->toolCalls.clear();
+        }
         if (!result->text.empty()) {
             pushEntry({.kind = TranscriptEntry::Kind::Assistant, .text = result->text});
         }
@@ -115,15 +133,21 @@ void AgentSession::runTurn(std::string userText) {
                        .toolName = call.name,
                        .json = call.argumentsJson});
         }
-        // A truncated reply may carry incomplete tool calls, so MaxTokens ends the
-        // turn even when calls are present (never silently swallowed).
-        const bool wantsTools =
-            result->stopReason == StopReason::ToolUse && !result->toolCalls.empty();
-        history_.push_back(std::move(*result));
-        if (!wantsTools) {
-            if (history_.back().stopReason == StopReason::MaxTokens) {
+        const StopReason stop = result->stopReason;
+        if (!result->text.empty() || !result->toolCalls.empty()) {
+            history_.push_back(std::move(*result));
+        }
+        if (!execute) {
+            if (stop == StopReason::MaxTokens) {
                 pushEntry({.kind = TranscriptEntry::Kind::Error,
                            .text = "response truncated by max_tokens"});
+            } else if (wantsTools) {
+                pushEntry({.kind = TranscriptEntry::Kind::Error,
+                           .text = std::format("tool round limit ({}) reached; calls not executed",
+                                               desc_.maxToolRounds)});
+            } else if (hadCalls) {
+                pushEntry({.kind = TranscriptEntry::Kind::Error,
+                           .text = "tool calls dropped: reply did not stop for tool use"});
             }
             return;
         }
@@ -142,8 +166,6 @@ void AgentSession::runTurn(std::string userText) {
         }
         history_.push_back(std::move(toolMessage));
     }
-    pushEntry({.kind = TranscriptEntry::Kind::Error,
-               .text = std::format("tool round limit ({}) reached", desc_.maxToolRounds)});
 }
 
 ToolResult AgentSession::executeToolCall(const ToolCall& call) {
@@ -152,30 +174,33 @@ ToolResult AgentSession::executeToolCall(const ToolCall& call) {
     const ToolDef* def = registry_.find(call.name);
     if (def != nullptr && def->destructive && confirm_ != nullptr) {
         setStatus(Status::WaitingForConfirmation);
-        if (!confirm_->ask({.toolName = call.name, .argumentsJson = call.argumentsJson})) {
+        if (!confirm_->ask(call.name, call.argumentsJson, abort_)) {
             result.contentJson = R"({"status":"cancelled_by_user"})";
             return result;
         }
     }
     setStatus(Status::RunningTool);
     // An unknown tool also goes through invoke(): its error JSON is protocol
-    // payload the model corrects itself with (ADR 0028).
+    // payload the model corrects itself with (ADR 0028). The work captures only
+    // app-owned state, so it stays runnable even if this session dies first.
     std::future<std::string> future =
-        queue_.post([this, name = call.name, args = call.argumentsJson] {
-            return registry_.invoke(name, args);
+        queue_.post([registry = &registry_, name = call.name, args = call.argumentsJson] {
+            return registry->invoke(name, args);
         });
     result.contentJson = awaitJson(std::move(future));
     return result;
 }
 
 std::string AgentSession::awaitJson(std::future<std::string> future) {
-    try {
-        return future.get();
-    } catch (const std::exception&) {
-        // MainThreadQueue never leaves a broken promise; this is the ADR 0035
-        // boundary catch in case that guarantee is ever violated.
-        return R"({"status":"error","message":"tool execution unavailable"})";
+    // Bounded waits so an aborted session stops waiting on work nobody drains;
+    // the queued item is fulfilled by a later drain or the queue's destructor.
+    while (future.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+        if (abort_.load()) {
+            return errorJson("cancelled: shutting down");
+        }
     }
+    // MainThreadQueue never leaves a broken promise, so get() cannot throw.
+    return future.get();
 }
 
 void AgentSession::pushEntry(TranscriptEntry entry) {

@@ -8,13 +8,9 @@
 
 namespace kumo::agent {
 
-namespace {
-
 std::string errorJson(std::string_view message) {
     return nlohmann::json{{"status", "error"}, {"message", message}}.dump();
 }
-
-} // namespace
 
 bool ToolRegistry::add(ToolDef def, ToolHandler handler) {
     if (def.name.empty() || handler == nullptr || find(def.name) != nullptr) {

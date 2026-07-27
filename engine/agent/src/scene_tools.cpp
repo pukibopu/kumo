@@ -27,12 +27,14 @@ namespace {
 using nlohmann::json;
 using renderer::ForwardRenderer;
 
-std::string errorJson(std::string_view message) {
-    return json{{"status", "error"}, {"message", message}}.dump();
-}
-
 std::string okJson() {
     return json{{"status", "ok"}}.dump();
+}
+
+// Invalid UTF-8 (e.g. legacy-encoded glTF node names) must degrade to U+FFFD,
+// never to a dump() throw that blinds the model to the whole scene.
+std::string dumpSafe(const json& value) {
+    return value.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 // Floats round-trip through double with shortest-representation dumping, so
@@ -78,7 +80,8 @@ std::optional<scene::EntityId> parseId(std::string_view text) {
 
 // Readers return false only on a present-but-invalid field, with `error` set; an
 // absent key leaves `out` untouched and succeeds, which is what gives every tool
-// its partial-update semantics.
+// its partial-update semantics. Values must be finite: 1e39 casting to inf would
+// otherwise flow into uniforms as scene state.
 bool readNumbers(const json& args, const char* key, float* out, std::size_t count,
                  std::string& error) {
     const auto it = args.find(key);
@@ -94,7 +97,12 @@ bool readNumbers(const json& args, const char* key, float* out, std::size_t coun
             error = std::format("{} must be an array of {} numbers", key, count);
             return false;
         }
-        out[i] = (*it)[i].get<float>();
+        const float value = (*it)[i].get<float>();
+        if (!std::isfinite(value)) {
+            error = std::format("{} must contain finite numbers", key);
+            return false;
+        }
+        out[i] = value;
     }
     return true;
 }
@@ -117,7 +125,27 @@ bool readNumber(const json& args, const char* key, float& out, std::string& erro
         error = std::format("{} must be a number", key);
         return false;
     }
-    out = it->get<float>();
+    const float value = it->get<float>();
+    if (!std::isfinite(value)) {
+        error = std::format("{} must be a finite number", key);
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+// json::value() throws on present-but-wrong-type keys; raw library exception
+// text must never become the tool's reply, so string reads are explicit.
+bool readString(const json& args, const char* key, std::string& out, std::string& error) {
+    const auto it = args.find(key);
+    if (it == args.end()) {
+        return true;
+    }
+    if (!it->is_string()) {
+        error = std::format("{} must be a string", key);
+        return false;
+    }
+    out = it->get<std::string>();
     return true;
 }
 
@@ -131,6 +159,13 @@ bool readMaterial(const json& args, ForwardRenderer::MaterialParams& params, std
 bool readTransform(const json& args, scene::Transform& transform, std::string& error) {
     if (!readFloat3(args, "position", transform.position, error) ||
         !readFloat3(args, "scale", transform.scale, error)) {
+        return false;
+    }
+    if (args.contains("scale") &&
+        (transform.scale.x <= 1e-6f || transform.scale.y <= 1e-6f || transform.scale.z <= 1e-6f)) {
+        // A zero component makes the model matrix singular and its inverse (the
+        // normal matrix) NaN; the glTF path assumes positive scale throughout.
+        error = "scale components must be positive";
         return false;
     }
     math::float3 euler{0.0f, 0.0f, 0.0f};
@@ -183,6 +218,10 @@ std::string sceneList(const SceneToolContext& context) {
                {"position", numberArray(entity.transform.position)},
                {"rotation_euler_deg", numberArray(math::eulerDegrees(entity.transform.rotation))},
                {"scale", numberArray(entity.transform.scale)}};
+        if (entity.materialIndex >= 0) {
+            // Exposed so the model can see when entities share one material.
+            e["material_index"] = entity.materialIndex;
+        }
         if (context.renderer != nullptr && entity.meshIndex >= 0) {
             const math::Aabb* local =
                 context.renderer->meshLocalAabb(static_cast<std::uint32_t>(entity.meshIndex));
@@ -222,22 +261,31 @@ std::string sceneList(const SceneToolContext& context) {
                      {"fov_y_deg", rounded(math::degrees(camera.fovY))},
                      {"near", rounded(camera.nearZ)}}},
                    {"lights", std::move(lights)}};
-    return out.dump();
+    return dumpSafe(out);
 }
 
 std::string sceneAddEntity(const SceneToolContext& context, const json& args) {
-    const std::string primitive = args.value("primitive", "");
+    std::string error;
+    std::string primitive;
+    if (!readString(args, "primitive", primitive, error)) {
+        return errorJson(error);
+    }
     if (primitive != "sphere" && primitive != "cube" && primitive != "plane") {
         return errorJson("primitive must be one of: sphere, cube, plane");
     }
-    std::string error;
     float size = 1.0f;
     if (!readNumber(args, "size", size, error)) {
         return errorJson(error);
     }
+    if (args.contains("size") && size <= 0.0f) {
+        return errorJson("size must be positive");
+    }
 
     scene::Entity entity;
-    entity.name = args.value("name", primitive);
+    entity.name = primitive;
+    if (!readString(args, "name", entity.name, error)) {
+        return errorJson(error);
+    }
     if (!readTransform(args, entity.transform, error)) {
         return errorJson(error);
     }
@@ -288,77 +336,100 @@ std::string sceneSetTransform(const SceneToolContext& context, const json& args)
     if (!lookup.has_value()) {
         return lookup.error();
     }
+    // Staged so a rejected field never leaves the entity half-moved: the model
+    // must be able to trust that an error means nothing changed.
+    scene::Transform staged = lookup->entity->transform;
     std::string error;
-    if (!readTransform(args, lookup->entity->transform, error)) {
+    if (!readTransform(args, staged, error)) {
         return errorJson(error);
     }
+    lookup->entity->transform = staged;
     return okJson();
 }
 
 std::string cameraSet(const SceneToolContext& context, const json& args) {
-    scene::Camera& camera = context.scene->camera;
+    scene::Camera staged = context.scene->camera;
     std::string error;
-    if (!readFloat3(args, "position", camera.position, error)) {
+    if (!readFloat3(args, "position", staged.position, error)) {
         return errorJson(error);
     }
-    float fovDeg = math::degrees(camera.fovY);
+    float fovDeg = math::degrees(staged.fovY);
     if (!readNumber(args, "fov_y_deg", fovDeg, error)) {
         return errorJson(error);
     }
-    camera.fovY = math::radians(std::clamp(fovDeg, 1.0f, 179.0f));
-    if (!readNumber(args, "near", camera.nearZ, error)) {
+    staged.fovY = math::radians(std::clamp(fovDeg, 1.0f, 179.0f));
+    if (!readNumber(args, "near", staged.nearZ, error)) {
         return errorJson(error);
     }
-    camera.nearZ = std::max(camera.nearZ, 0.001f);
+    staged.nearZ = std::max(staged.nearZ, 0.001f);
     if (args.contains("look_at")) {
         math::float3 target{0.0f, 0.0f, 0.0f};
         if (!readFloat3(args, "look_at", target, error)) {
             return errorJson(error);
         }
-        camera.lookAt(target);
+        staged.lookAt(target);
     }
+    context.scene->camera = staged;
     return okJson();
 }
 
 std::string lightSet(const SceneToolContext& context, const json& args) {
     scene::Scene& scene = *context.scene;
-    std::size_t index = 0;
+    std::optional<std::size_t> index;
     if (args.contains("index")) {
-        if (!args["index"].is_number_unsigned()) {
+        const json& raw = args["index"];
+        // The schema says integer; a model sending 0.0 still means light 0.
+        const double value = raw.is_number() ? raw.get<double>() : -1.0;
+        if (value < 0.0 || value != std::floor(value)) {
             return errorJson("index must be a non-negative integer");
         }
-        index = args["index"].get<std::size_t>();
-        if (scene.light(index) == nullptr) {
-            return errorJson(std::format("light index {} out of range ({} lights)", index,
+        index = static_cast<std::size_t>(value);
+        if (scene.light(*index) == nullptr) {
+            return errorJson(std::format("light index {} out of range ({} lights)", *index,
                                          scene.lights().size()));
         }
-    } else {
-        if (!scene.addLight({})) {
-            return errorJson("light budget exhausted: the scene supports at most 16 lights");
-        }
-        index = scene.lights().size() - 1;
     }
-    scene::Light& light = *scene.light(index);
 
+    // Staged so a rejected call neither half-edits a light nor leaves a freshly
+    // appended default one behind (lights cannot be removed individually).
+    scene::Light staged = index.has_value() ? *scene.light(*index) : scene::Light{};
     if (args.contains("type")) {
-        const std::string type = args.value("type", "");
+        std::string type;
+        std::string error;
+        if (!readString(args, "type", type, error)) {
+            return errorJson(error);
+        }
         if (type == "directional") {
-            light.type = scene::LightType::Directional;
+            staged.type = scene::LightType::Directional;
         } else if (type == "point") {
-            light.type = scene::LightType::Point;
+            staged.type = scene::LightType::Point;
         } else {
             return errorJson("type must be one of: directional, point");
         }
     }
     std::string error;
-    if (!readFloat3(args, "color", light.color, error) ||
-        !readNumber(args, "intensity", light.intensity, error) ||
-        !readFloat3(args, "direction", light.direction, error) ||
-        !readFloat3(args, "position", light.position, error) ||
-        !readNumber(args, "range", light.range, error)) {
+    if (!readFloat3(args, "color", staged.color, error) ||
+        !readNumber(args, "intensity", staged.intensity, error) ||
+        !readFloat3(args, "direction", staged.direction, error) ||
+        !readFloat3(args, "position", staged.position, error) ||
+        !readNumber(args, "range", staged.range, error)) {
         return errorJson(error);
     }
-    return json{{"status", "ok"}, {"index", index}}.dump();
+    const math::float3& d = staged.direction;
+    if (args.contains("direction") && d.x * d.x + d.y * d.y + d.z * d.z < 1e-8f) {
+        // The renderer normalizes unconditionally; zero would become NaN state.
+        return errorJson("direction must be a non-zero vector");
+    }
+
+    if (index.has_value()) {
+        *scene.light(*index) = staged;
+    } else {
+        if (!scene.addLight(staged)) {
+            return errorJson("light budget exhausted: the scene supports at most 16 lights");
+        }
+        index = scene.lights().size() - 1;
+    }
+    return json{{"status", "ok"}, {"index", *index}}.dump();
 }
 
 std::string materialSetParam(const SceneToolContext& context, const json& args) {
@@ -369,21 +440,50 @@ std::string materialSetParam(const SceneToolContext& context, const json& args) 
     if (!lookup.has_value()) {
         return lookup.error();
     }
-    if (lookup->entity->materialIndex < 0) {
-        return errorJson("entity has no material");
+    ForwardRenderer& renderer = *context.renderer;
+
+    ForwardRenderer::MaterialParams params;
+    if (lookup->entity->materialIndex >= 0) {
+        const ForwardRenderer::MaterialParams* current =
+            renderer.materialParams(static_cast<std::uint32_t>(lookup->entity->materialIndex));
+        if (current == nullptr) {
+            return errorJson("material index out of range");
+        }
+        params = *current;
+    } else if (const ForwardRenderer::MaterialParams* fallback =
+                   renderer.materialParams(renderer.defaultMaterialIndex())) {
+        params = *fallback;
     }
-    const auto materialIndex = static_cast<std::uint32_t>(lookup->entity->materialIndex);
-    const ForwardRenderer::MaterialParams* current =
-        context.renderer->materialParams(materialIndex);
-    if (current == nullptr) {
-        return errorJson("material index out of range");
-    }
-    ForwardRenderer::MaterialParams params = *current;
     std::string error;
     if (!readMaterial(args, params, error)) {
         return errorJson(error);
     }
-    context.renderer->setMaterialParams(materialIndex, params);
+
+    if (lookup->entity->materialIndex < 0) {
+        // Entities without a material render with the default record; give them
+        // their own on first write so they become editable.
+        const std::int32_t newIndex = renderer.addMaterial(params);
+        if (newIndex < 0) {
+            return errorJson("gpu upload failed");
+        }
+        lookup->entity->materialIndex = newIndex;
+        return okJson();
+    }
+
+    std::size_t sharers = 0;
+    context.scene->entities.forEach([&](scene::EntityId, const scene::Entity& other) {
+        if (other.materialIndex == lookup->entity->materialIndex) {
+            ++sharers;
+        }
+    });
+    renderer.setMaterialParams(static_cast<std::uint32_t>(lookup->entity->materialIndex), params);
+    if (sharers > 1) {
+        // Cloning here would strip the shared material's textures (addMaterial is
+        // untextured), so shared records are edited in place and the count keeps
+        // the model aware of the blast radius; per-entity splitting needs
+        // renderer-side material cloning (M6).
+        return json{{"status", "ok"}, {"entities_sharing_material", sharers}}.dump();
+    }
     return okJson();
 }
 

@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -41,6 +42,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <poll.h>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -700,24 +702,54 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     // MCP stdio pump (ADR 0041): one JSON-RPC line in, at most one line out.
     // handleMessage runs on the main thread by being posted through mainQueue,
     // same as every other tool callback, so it never races the render loop.
+    // stdin is read via poll with a timeout instead of a blocking getline:
+    // close() on a read-blocked fd is not a guaranteed wakeup, so shutdown
+    // relies only on the stop flag and the drain loop below.
     agent::McpServer mcpServer(mcpToolRegistry, "kumo", KUMO_VERSION_STRING);
     std::atomic<bool> mcpEof{false};
+    std::atomic<bool> mcpStop{false};
+    std::atomic<bool> mcpReaderDone{false};
     std::thread mcpReader;
     if (mcp) {
         mcpReader = std::thread([&] {
-            std::string line;
-            while (std::getline(std::cin, line)) {
-                const std::string response =
-                    mainQueue
-                        .post([&mcpServer, line] {
-                            return mcpServer.handleMessage(line).value_or(std::string());
-                        })
-                        .get();
-                if (!response.empty()) {
-                    std::cout << response << '\n' << std::flush;
+            std::string buffer;
+            std::array<char, 4096> chunk;
+            while (!mcpStop.load()) {
+                struct pollfd pfd = {.fd = 0, .events = POLLIN, .revents = 0};
+                const int ready = ::poll(&pfd, 1, 100);
+                if (ready < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    break;
                 }
+                if (ready == 0) {
+                    continue;
+                }
+                const ssize_t count = ::read(0, chunk.data(), chunk.size());
+                if (count <= 0) {
+                    break;
+                }
+                buffer.append(chunk.data(), static_cast<std::size_t>(count));
+                std::size_t start = 0;
+                for (std::size_t nl = buffer.find('\n', start); nl != std::string::npos;
+                     nl = buffer.find('\n', start)) {
+                    const std::string line = buffer.substr(start, nl - start);
+                    start = nl + 1;
+                    const std::string response =
+                        mainQueue
+                            .post([&mcpServer, line] {
+                                return mcpServer.handleMessage(line).value_or(std::string());
+                            })
+                            .get();
+                    if (!response.empty()) {
+                        std::cout << response << '\n' << std::flush;
+                    }
+                }
+                buffer.erase(0, start);
             }
             mcpEof.store(true);
+            mcpReaderDone.store(true);
         });
     }
 
@@ -816,9 +848,13 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     }
 
     if (mcpReader.joinable()) {
-        // Unblocks the reader thread's std::getline; must happen before
-        // mainQueue (and everything the reader might post to) is torn down.
-        ::close(0);
+        // The reader may be waiting on a posted item the loop will never drain
+        // again; keep draining until it observes the stop flag and exits.
+        mcpStop.store(true);
+        while (!mcpReaderDone.load()) {
+            mainQueue.drain();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         mcpReader.join();
     }
 

@@ -2,6 +2,7 @@
 #include <kumo/facade/engine_runtime.h>
 
 #include <kumo/agent/config.h>
+#include <kumo/agent/entity_id.h>
 #include <kumo/agent/fake_provider.h>
 #include <kumo/agent/http_provider.h>
 #include <kumo/agent/scene_tools.h>
@@ -21,6 +22,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <format>
 #include <fstream>
@@ -178,6 +180,29 @@ MaterialParams toMaterialParams(const scene::SavedMaterial& saved) {
     return params;
 }
 
+// Tool names the undo hook must not record a checkpoint for (ADR 0044): pure
+// reads, so they never change scene/renderer state.
+constexpr std::array<std::string_view, 3> kReadOnlyTools{"scene_list", "shader_read",
+                                                         "viewer_screenshot"};
+
+bool isFinite3(const math::float3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+bool isFiniteMaterial(const MaterialParams& params) {
+    for (float v : params.baseColor) {
+        if (!std::isfinite(v)) {
+            return false;
+        }
+    }
+    for (float v : params.emissive) {
+        if (!std::isfinite(v)) {
+            return false;
+        }
+    }
+    return std::isfinite(params.metallic) && std::isfinite(params.roughness);
+}
+
 // Builds an HTTP provider (OpenAI or Anthropic codec, by `endpoint.type`) wired
 // to `notice` for retry feedback; shared by the scene and shader sessions so
 // each gets its own transport and backoff state.
@@ -238,6 +263,52 @@ void EngineRuntime::Notice::clear() {
 std::string EngineRuntime::Notice::get() const {
     std::lock_guard lock(mutex_);
     return text_;
+}
+
+EngineRuntime::EngineRuntime()
+    : undo_([this] { return captureSceneState(); },
+            [this](const SceneState& state) { applySceneState(state); }) {}
+
+SceneState EngineRuntime::captureSceneState() const {
+    SceneState state;
+    state.world = world_;
+    const std::uint32_t count = renderer_.materialCount();
+    state.materials.reserve(count);
+    state.shaderSources.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const MaterialParams* params = renderer_.materialParams(i);
+        state.materials.push_back(params != nullptr ? *params : MaterialParams{});
+        const std::string* source = renderer_.materialShaderSource(i);
+        state.shaderSources.push_back(source != nullptr ? std::make_optional(*source)
+                                                        : std::nullopt);
+    }
+    return state;
+}
+
+// Sizes can differ when the current renderer has MORE materials than the
+// snapshot (materials are only ever appended); extra materials keep their
+// current params untouched. Vectors are never shrunk (ADR 0016: GPU resources
+// for removed entities/materials are never reclaimed).
+void EngineRuntime::applySceneState(const SceneState& state) {
+    world_ = state.world;
+    const std::uint32_t currentCount = renderer_.materialCount();
+    const std::size_t n = std::min<std::size_t>(state.materials.size(), currentCount);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto index = static_cast<std::uint32_t>(i);
+        renderer_.setMaterialParams(index, state.materials[i]);
+        const std::string* current = renderer_.materialShaderSource(index);
+        const std::optional<std::string>& snapshotSource = state.shaderSources[i];
+        if (snapshotSource.has_value()) {
+            if (current == nullptr || *current != *snapshotSource) {
+                // Previously-installed source: a recompile failure keeps the
+                // current pipeline untouched, which is the best available
+                // outcome here.
+                (void)renderer_.setMaterialShader(index, *snapshotSource);
+            }
+        } else if (current != nullptr) {
+            renderer_.clearMaterialShader(index);
+        }
+    }
 }
 
 std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const Desc& desc) {
@@ -306,6 +377,7 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
     };
     shaderTools.templatePath = desc.shaderDir / "pbr.frag";
     shaderTools.generatedDir = desc.shaderDir / "generated";
+    self->generatedShaderDir_ = shaderTools.generatedDir;
     // Shared across the chat registry and the MCP registry below, so the
     // 5-attempt shader_write cap is a single per-material counter regardless
     // of which caller is driving it.
@@ -367,6 +439,46 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
                                       {"height", extent.height}}
                     .dump();
             });
+    }
+
+    // Undo capture (ADR 0044): fires for every tool invocation on all three
+    // registries (chat sessions and, when enabled, MCP), so agent-driven
+    // changes are undoable regardless of which caller issued them. Read-only
+    // tools are excluded so they never open a pending checkpoint. The pending
+    // point opened here is only ever resolved by the paired AfterInvoke hook
+    // below, once the handler's result is known: BeforeInvoke and AfterInvoke
+    // always fire in the same invoke() call, so no gesture is left dangling
+    // across separate tool calls.
+    {
+        agent::ToolRegistry::BeforeInvoke before = [runtime = self.get()](std::string_view name) {
+            if (std::find(kReadOnlyTools.begin(), kReadOnlyTools.end(), name) !=
+                kReadOnlyTools.end()) {
+                return;
+            }
+            runtime->undo_.beginPending(std::string(name));
+        };
+        // Conservative on ambiguous results: only an explicit {"status":"ok"}
+        // commits; a missing/non-"ok" status, a non-object, or unparseable
+        // JSON all discard (error, cancelled_by_user, and unparseable results
+        // must not leave a phantom undo step).
+        agent::ToolRegistry::AfterInvoke after =
+            [runtime = self.get()](std::string_view, std::string_view resultJson) {
+                const nlohmann::json result = nlohmann::json::parse(resultJson, nullptr, false);
+                const bool ok = !result.is_discarded() && result.is_object() &&
+                                result.contains("status") && result["status"].is_string() &&
+                                result["status"].get<std::string>() == "ok";
+                if (ok) {
+                    runtime->undo_.commitPending();
+                } else {
+                    runtime->undo_.discardPending();
+                }
+            };
+        self->sceneToolRegistry_.setBeforeInvoke(before);
+        self->shaderToolRegistry_.setBeforeInvoke(before);
+        self->mcpToolRegistry_.setBeforeInvoke(before);
+        self->sceneToolRegistry_.setAfterInvoke(after);
+        self->shaderToolRegistry_.setAfterInvoke(after);
+        self->mcpToolRegistry_.setAfterInvoke(after);
     }
 
     std::optional<agent::ConfirmationGate> confirmGate;
@@ -500,8 +612,12 @@ EngineRuntime::~EngineRuntime() {
 
 bool EngineRuntime::pump() {
     // Tool callbacks land here, outside any command encoder lifetime, so scene
-    // changes are frame-atomic (ADR 0005).
-    mainQueue_.drain();
+    // changes are frame-atomic (ADR 0005). Any drained item is a state change
+    // an agent/MCP caller made off the render loop; the product shell needs a
+    // frame to pick it up.
+    if (mainQueue_.drain() > 0) {
+        markDirty();
+    }
     // The MCP client hung up (stdin closed); the shell should shut down cleanly.
     return !mcpEof_.load();
 }
@@ -514,6 +630,15 @@ void EngineRuntime::render(rhi::CommandEncoder& encoder, rhi::Texture* output,
 void EngineRuntime::resize(rhi::Extent2D size) {
     extent_ = size;
     renderer_.resize(size);
+    markDirty();
+}
+
+void EngineRuntime::markDirty() {
+    frameDirty_.mark();
+}
+
+bool EngineRuntime::consumeRenderNeeded() {
+    return frameDirty_.consume();
 }
 
 scene::Scene& EngineRuntime::world() {
@@ -539,7 +664,11 @@ agent::ConfirmationGate* EngineRuntime::confirmGate() {
 }
 
 bool EngineRuntime::reloadPipelines() {
-    return renderer_.reloadPipelines();
+    const bool ok = renderer_.reloadPipelines();
+    if (ok) {
+        markDirty();
+    }
+    return ok;
 }
 
 EngineRuntime::Notice& EngineRuntime::sceneRetryNotice() {
@@ -650,7 +779,195 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
         ++loaded;
     }
     logInfo("scene loaded: {} entities, {} lights", loaded, saved.lights.size());
+    markDirty();
     return true;
+}
+
+std::vector<EngineRuntime::EntityInfo> EngineRuntime::listEntities() const {
+    std::vector<EntityInfo> out;
+    world_.entities.forEach([&](scene::EntityId id, const scene::Entity& entity) {
+        out.push_back(
+            {.id = agent::formatEntityId(id), .name = entity.name, .primitive = entity.primitive});
+    });
+    return out;
+}
+
+EngineRuntime::EntityDetail EngineRuntime::entityDetail(const std::string& id) const {
+    EntityDetail detail;
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return detail;
+    }
+    const scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr) {
+        return detail;
+    }
+    detail.found = true;
+    detail.id = id;
+    detail.name = entity->name;
+    detail.primitive = entity->primitive;
+    detail.position = entity->transform.position;
+    detail.eulerDeg = math::eulerDegrees(entity->transform.rotation);
+    detail.scale = entity->transform.scale;
+    if (entity->materialIndex >= 0) {
+        const MaterialParams* params =
+            renderer_.materialParams(static_cast<std::uint32_t>(entity->materialIndex));
+        if (params != nullptr) {
+            detail.hasMaterial = true;
+            detail.material = *params;
+            detail.hasCustomShader =
+                renderer_.materialShaderSource(static_cast<std::uint32_t>(entity->materialIndex)) !=
+                nullptr;
+        }
+    }
+    return detail;
+}
+
+void EngineRuntime::beginEdit(const std::string& label) {
+    undo_.beginPending(label);
+}
+
+bool EngineRuntime::setEntityTransform(const std::string& id, math::float3 position,
+                                       math::float3 eulerDeg, math::float3 scale) {
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return false;
+    }
+    scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr) {
+        return false;
+    }
+    if (!isFinite3(position) || !isFinite3(eulerDeg) || !isFinite3(scale)) {
+        return false;
+    }
+    if (scale.x <= 1e-6f || scale.y <= 1e-6f || scale.z <= 1e-6f) {
+        return false;
+    }
+    entity->transform.position = position;
+    entity->transform.rotation = math::quatFromEulerDegrees(eulerDeg);
+    entity->transform.scale = scale;
+    // Harmless no-op when an earlier call in the same gesture already
+    // committed the pending point opened by beginEdit.
+    undo_.commitPending();
+    markDirty();
+    return true;
+}
+
+bool EngineRuntime::setEntityMaterial(const std::string& id, const MaterialParams& params) {
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return false;
+    }
+    scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr) {
+        return false;
+    }
+    if (!isFiniteMaterial(params)) {
+        return false;
+    }
+    if (entity->materialIndex < 0) {
+        // Entities without a material render with the default record; give
+        // them their own on first write so they become editable (mirrors
+        // material_set_param).
+        const std::int32_t newIndex = renderer_.addMaterial(params);
+        if (newIndex < 0) {
+            return false;
+        }
+        entity->materialIndex = newIndex;
+        undo_.commitPending();
+        markDirty();
+        return true;
+    }
+    const bool applied =
+        renderer_.setMaterialParams(static_cast<std::uint32_t>(entity->materialIndex), params);
+    if (applied) {
+        // Harmless no-op when an earlier call in the same gesture already
+        // committed the pending point opened by beginEdit.
+        undo_.commitPending();
+        markDirty();
+    }
+    return applied;
+}
+
+std::optional<std::string> EngineRuntime::entityShaderSource(const std::string& id) const {
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return std::nullopt;
+    }
+    const scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr || entity->materialIndex < 0) {
+        return std::nullopt;
+    }
+    const std::string* source =
+        renderer_.materialShaderSource(static_cast<std::uint32_t>(entity->materialIndex));
+    return source != nullptr ? std::make_optional(*source) : std::nullopt;
+}
+
+bool EngineRuntime::clearEntityShader(const std::string& id) {
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return false;
+    }
+    scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr || entity->materialIndex < 0) {
+        return false;
+    }
+    const auto materialIndex = static_cast<std::uint32_t>(entity->materialIndex);
+    if (renderer_.materialShaderSource(materialIndex) == nullptr) {
+        return false;
+    }
+    undo_.beginPending("clear_shader");
+    const bool cleared = renderer_.clearMaterialShader(materialIndex);
+    if (cleared) {
+        undo_.commitPending();
+        markDirty();
+    }
+    return cleared;
+}
+
+std::filesystem::path EngineRuntime::generatedShaderPath(const std::string& id) const {
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return {};
+    }
+    const scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr || entity->materialIndex < 0) {
+        return {};
+    }
+    if (renderer_.materialShaderSource(static_cast<std::uint32_t>(entity->materialIndex)) ==
+        nullptr) {
+        return {};
+    }
+    return generatedShaderDir_ / ("material_" + std::to_string(entity->materialIndex) + ".frag");
+}
+
+bool EngineRuntime::undoAvailable() const {
+    return undo_.canUndo();
+}
+bool EngineRuntime::redoAvailable() const {
+    return undo_.canRedo();
+}
+std::string EngineRuntime::undoLabel() const {
+    const std::string* label = undo_.undoLabel();
+    return label != nullptr ? *label : std::string();
+}
+std::string EngineRuntime::redoLabel() const {
+    const std::string* label = undo_.redoLabel();
+    return label != nullptr ? *label : std::string();
+}
+bool EngineRuntime::undo() {
+    const bool ok = undo_.undo();
+    if (ok) {
+        markDirty();
+    }
+    return ok;
+}
+bool EngineRuntime::redo() {
+    const bool ok = undo_.redo();
+    if (ok) {
+        markDirty();
+    }
+    return ok;
 }
 
 } // namespace kumo::facade

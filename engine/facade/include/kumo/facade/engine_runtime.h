@@ -5,6 +5,9 @@
 #include <kumo/agent/session.h>
 #include <kumo/agent/tool_registry.h>
 #include <kumo/core/main_thread_queue.h>
+#include <kumo/facade/frame_dirty.h>
+#include <kumo/facade/undo_stack.h>
+#include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
 #include <kumo/scene/scene.h>
 
@@ -15,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace kumo::rhi {
 class Device;
@@ -63,12 +67,68 @@ public:
     EngineRuntime(const EngineRuntime&) = delete;
     EngineRuntime& operator=(const EngineRuntime&) = delete;
 
+    // Inspector-facing entity listing/detail (ADR 0044); ids are the
+    // "index:generation" wire form scene_list uses.
+    struct EntityInfo {
+        std::string id;
+        std::string name;
+        std::string primitive;
+    };
+    struct EntityDetail {
+        bool found = false;
+        std::string id;
+        std::string name;
+        std::string primitive;
+        math::float3 position{0.0f, 0.0f, 0.0f};
+        math::float3 eulerDeg{0.0f, 0.0f, 0.0f};
+        math::float3 scale{1.0f, 1.0f, 1.0f};
+        bool hasMaterial = false;
+        renderer::ForwardRenderer::MaterialParams material;
+        bool hasCustomShader = false;
+    };
+
+    std::vector<EntityInfo> listEntities() const;
+    EntityDetail entityDetail(const std::string& id) const;
+
+    // beginEdit opens a pending undo point; the first setEntity*/clearEntityShader
+    // call that succeeds after it commits that snapshot into an undo step, so
+    // multi-field edits (and repeated calls during one drag gesture) collapse
+    // into a single step. A failed call leaves the pending snapshot open for
+    // the next attempt.
+    void beginEdit(const std::string& label);
+    // Validates like the scene tools (positive scale, finite); returns false and
+    // leaves the entity untouched on bad input. Commits the pending undo point
+    // opened by beginEdit on success; leaves it pending on failure.
+    bool setEntityTransform(const std::string& id, math::float3 position, math::float3 eulerDeg,
+                            math::float3 scale);
+    // Validates finiteness; commits the pending undo point opened by beginEdit
+    // on success, leaves it pending on failure.
+    bool setEntityMaterial(const std::string& id,
+                           const renderer::ForwardRenderer::MaterialParams& params);
+    std::optional<std::string> entityShaderSource(const std::string& id) const; // custom only
+    bool clearEntityShader(const std::string& id); // opens and commits its own undo point
+    std::filesystem::path generatedShaderPath(const std::string& id) const; // empty when none
+
+    bool undoAvailable() const;
+    bool redoAvailable() const;
+    std::string undoLabel() const; // "" when none
+    std::string redoLabel() const; // "" when none
+    bool undo();
+    bool redo();
+
     // Once per frame, before rendering: drains tool work. Returns false when the
     // runtime wants the app to quit (MCP client hung up).
     bool pump();
     void render(rhi::CommandEncoder& encoder, rhi::Texture* output,
                 const renderer::ForwardRenderer::Overlay& overlay = {});
     void resize(rhi::Extent2D size);
+
+    // Render-on-demand (product shell only; the GLFW viewer ignores this and
+    // renders unconditionally). Every state change the runtime can observe
+    // calls markDirty(); the shell's tick calls consumeRenderNeeded() to
+    // decide whether to acquire a drawable and render this frame at all.
+    void markDirty();
+    bool consumeRenderNeeded();
 
     scene::Scene& world();
     renderer::ForwardRenderer& renderer();
@@ -87,7 +147,11 @@ public:
     bool loadScene(const std::filesystem::path& path);
 
 private:
-    EngineRuntime() = default;
+    // Not '= default': undo_ needs capture/apply lambdas bound to `this`.
+    EngineRuntime();
+
+    SceneState captureSceneState() const;
+    void applySceneState(const SceneState& state);
 
     // Members below are declared in the order app.cpp's locals used to be: that
     // order is the destruction contract (reverse of declaration). Sessions/mcp
@@ -95,10 +159,23 @@ private:
     // renderer they reach into via raw pointers/references outlive them.
     rhi::Device* device_ = nullptr;
     std::filesystem::path modelPath_;
+    std::filesystem::path generatedShaderDir_;
 
     renderer::ForwardRenderer renderer_;
     scene::Scene world_;
     rhi::Extent2D extent_{};
+
+    // Unified undo (ADR 0044), pending-commit model: agent tool calls open a
+    // pending point in the ToolRegistry BeforeInvoke hook below and resolve it
+    // (commit/discard) in the paired AfterInvoke hook once the result is
+    // known; inspector-driven edits open one in beginEdit and commit it from
+    // the setEntity*/clearEntityShader call that actually succeeds.
+    UndoStack undo_;
+
+    // 2 mirrors ForwardRenderer::kFrameSlots (private, not reachable here):
+    // one render per dirty pending frame so both double-buffered slots get
+    // the new state before the app goes idle again.
+    FrameDirty frameDirty_{2};
 
     MainThreadQueue mainQueue_;
     agent::ToolRegistry sceneToolRegistry_;

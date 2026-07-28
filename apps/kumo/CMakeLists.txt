@@ -15,9 +15,16 @@ target_compile_definitions(kumo_bridge PRIVATE
     KUMO_REPO_DIR="${CMAKE_SOURCE_DIR}")
 kumo_target_warnings(kumo_bridge)
 
-add_executable(kumo_app MACOSX_BUNDLE KumoApp.swift Viewport.swift)
+add_executable(kumo_app MACOSX_BUNDLE KumoApp.swift Viewport.swift Inspector.swift)
 target_compile_options(kumo_app PRIVATE
     "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-import-objc-header \"${CMAKE_CURRENT_SOURCE_DIR}/KumoEngine.h\">")
+if(CMAKE_OSX_ARCHITECTURES)
+    # CMake's Swift support ignores CMAKE_OSX_ARCHITECTURES; mirror it so the
+    # Swift objects match the C++ libraries' architecture.
+    list(GET CMAKE_OSX_ARCHITECTURES 0 KUMO_SWIFT_ARCH)
+    target_compile_options(kumo_app PRIVATE
+        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-target ${KUMO_SWIFT_ARCH}-apple-macosx14.0>")
+endif()
 target_link_libraries(kumo_app PRIVATE
     kumo_bridge "-framework Cocoa" "-framework QuartzCore" "-framework CoreVideo" "-lc++")
 set_target_properties(kumo_app PROPERTIES

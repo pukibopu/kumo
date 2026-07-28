@@ -27,9 +27,26 @@ std::string errorJson(std::string_view message);
 
 class ToolRegistry {
 public:
+    // Fires once the name has resolved against defs_ and the arguments have
+    // passed the JSON-object check, right before the handler runs: an unknown
+    // tool name or malformed arguments never reach it. The composition root
+    // uses this to open an undo point ahead of every tool call that will
+    // actually execute, scene_list/shader_read/viewer_screenshot excepted
+    // (ADR 0044); null by default.
+    using BeforeInvoke = std::function<void(std::string_view name)>;
+
+    // Fires after the handler (or its exception conversion) with the result
+    // JSON; pairs with BeforeInvoke so the composition root can commit or
+    // discard the undo point it opened. Same firing conditions as
+    // BeforeInvoke: unknown tool / malformed arguments fire neither hook.
+    using AfterInvoke = std::function<void(std::string_view name, std::string_view resultJson)>;
+
     // False when the name is empty or already taken; defs() reports registrations
     // in the order they were added.
     bool add(ToolDef def, ToolHandler handler);
+
+    void setBeforeInvoke(BeforeInvoke hook);
+    void setAfterInvoke(AfterInvoke hook);
 
     std::span<const ToolDef> defs() const;
     const ToolDef* find(std::string_view name) const;
@@ -45,6 +62,8 @@ public:
 private:
     std::vector<ToolDef> defs_;
     std::vector<ToolHandler> handlers_;
+    BeforeInvoke beforeInvoke_;
+    AfterInvoke afterInvoke_;
 };
 
 } // namespace kumo::agent

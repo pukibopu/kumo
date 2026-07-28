@@ -6,6 +6,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace kumo::agent;
 using nlohmann::json;
@@ -85,4 +86,42 @@ TEST_CASE("ToolRegistry converts handler exceptions into error JSON") {
     const json result = invokeParsed(registry, "boom", "{}");
     CHECK(result["status"] == "error");
     CHECK(result["message"] == "dependency");
+}
+
+TEST_CASE("ToolRegistry::setBeforeInvoke fires with the tool name before the handler runs") {
+    ToolRegistry registry;
+    std::vector<std::string> order;
+    registry.add(makeDef("t"), [&](std::string_view) {
+        order.push_back("handler");
+        return std::string("{}");
+    });
+    registry.setBeforeInvoke([&](std::string_view name) { order.push_back(std::string(name)); });
+
+    registry.invoke("t", "{}");
+
+    REQUIRE(order.size() == 2);
+    CHECK(order[0] == "t");
+    CHECK(order[1] == "handler");
+}
+
+TEST_CASE("ToolRegistry::setBeforeInvoke fires even for an unknown tool name") {
+    ToolRegistry registry;
+    std::string seen;
+    registry.setBeforeInvoke([&](std::string_view name) { seen = name; });
+
+    invokeParsed(registry, "missing", "{}");
+
+    CHECK(seen == "missing");
+}
+
+TEST_CASE("ToolRegistry: a null BeforeInvoke hook (the default) is a no-op") {
+    ToolRegistry registry;
+    bool called = false;
+    registry.add(makeDef("t"), [&](std::string_view) {
+        called = true;
+        return std::string("{}");
+    });
+    // No setBeforeInvoke call: invoke() must not crash on the null std::function.
+    registry.invoke("t", "{}");
+    CHECK(called);
 }

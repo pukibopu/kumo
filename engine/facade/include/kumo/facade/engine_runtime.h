@@ -5,6 +5,7 @@
 #include <kumo/agent/session.h>
 #include <kumo/agent/tool_registry.h>
 #include <kumo/core/main_thread_queue.h>
+#include <kumo/facade/frame_dirty.h>
 #include <kumo/facade/undo_stack.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
@@ -122,6 +123,13 @@ public:
                 const renderer::ForwardRenderer::Overlay& overlay = {});
     void resize(rhi::Extent2D size);
 
+    // Render-on-demand (product shell only; the GLFW viewer ignores this and
+    // renders unconditionally). Every state change the runtime can observe
+    // calls markDirty(); the shell's tick calls consumeRenderNeeded() to
+    // decide whether to acquire a drawable and render this frame at all.
+    void markDirty();
+    bool consumeRenderNeeded();
+
     scene::Scene& world();
     renderer::ForwardRenderer& renderer();
     MainThreadQueue& queue();
@@ -163,6 +171,11 @@ private:
     // known; inspector-driven edits open one in beginEdit and commit it from
     // the setEntity*/clearEntityShader call that actually succeeds.
     UndoStack undo_;
+
+    // 2 mirrors ForwardRenderer::kFrameSlots (private, not reachable here):
+    // one render per dirty pending frame so both double-buffered slots get
+    // the new state before the app goes idle again.
+    FrameDirty frameDirty_{2};
 
     MainThreadQueue mainQueue_;
     agent::ToolRegistry sceneToolRegistry_;

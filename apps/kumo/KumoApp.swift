@@ -15,9 +15,10 @@ struct KumoApp: App {
     @State private var undoLabel = ""
     @State private var redoLabel = ""
 
-    // 2 Hz is enough to reflect MCP/agent-driven changes without being a
-    // meaningful CPU cost; edits and undo/redo also refresh immediately.
-    private let refreshTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+    // The timer only needs to catch MCP/agent-driven changes made off the
+    // toolbar/inspector; edits and undo/redo already refresh immediately via
+    // handleEdit(), so this interval just bounds that worst case.
+    private let refreshTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     var body: some Scene {
         WindowGroup("kumo") {

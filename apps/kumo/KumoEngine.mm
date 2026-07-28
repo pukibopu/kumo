@@ -109,7 +109,9 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
     rhi::Ptr<rhi::Device> _device;
     rhi::Ptr<rhi::Surface> _surface;
     std::unique_ptr<facade::EngineRuntime> _runtime;
-    int _framesRendered;
+    // Counts ticks, not rendered frames: render-on-demand skips rendering on
+    // an idle scene, but the scripted-exit smoke test must still terminate.
+    int _ticks;
     int _maxFrames;
 }
 @end
@@ -127,7 +129,7 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
     }
 
     _maxFrames = scriptedExitFrameCount();
-    _framesRendered = 0;
+    _ticks = 0;
 
     _device = rhi::metal::createDevice({});
     if (!_device) {
@@ -177,14 +179,19 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
         // The MCP client (if any) hung up; ask the shell to quit.
         return NO;
     }
-    rhi::Ptr<rhi::CommandEncoder> encoder = _device->queue().createCommandEncoder();
-    rhi::Texture* target = _surface->acquireNextTexture();
-    if (target != nullptr) {
-        _runtime->render(*encoder, target);
+    // Render-on-demand: nextDrawable blocks the main thread until vsync, so an
+    // idle scene must skip drawable acquisition entirely rather than just
+    // skipping the draw calls.
+    if (_runtime->consumeRenderNeeded()) {
+        rhi::Ptr<rhi::CommandEncoder> encoder = _device->queue().createCommandEncoder();
+        rhi::Texture* target = _surface->acquireNextTexture();
+        if (target != nullptr) {
+            _runtime->render(*encoder, target);
+        }
+        encoder->finishAndSubmit(_surface.get());
     }
-    encoder->finishAndSubmit(_surface.get());
 
-    if (_maxFrames > 0 && ++_framesRendered >= _maxFrames) {
+    if (_maxFrames > 0 && ++_ticks >= _maxFrames) {
         return NO;
     }
     return YES;

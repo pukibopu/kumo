@@ -612,8 +612,12 @@ EngineRuntime::~EngineRuntime() {
 
 bool EngineRuntime::pump() {
     // Tool callbacks land here, outside any command encoder lifetime, so scene
-    // changes are frame-atomic (ADR 0005).
-    mainQueue_.drain();
+    // changes are frame-atomic (ADR 0005). Any drained item is a state change
+    // an agent/MCP caller made off the render loop; the product shell needs a
+    // frame to pick it up.
+    if (mainQueue_.drain() > 0) {
+        markDirty();
+    }
     // The MCP client hung up (stdin closed); the shell should shut down cleanly.
     return !mcpEof_.load();
 }
@@ -626,6 +630,15 @@ void EngineRuntime::render(rhi::CommandEncoder& encoder, rhi::Texture* output,
 void EngineRuntime::resize(rhi::Extent2D size) {
     extent_ = size;
     renderer_.resize(size);
+    markDirty();
+}
+
+void EngineRuntime::markDirty() {
+    frameDirty_.mark();
+}
+
+bool EngineRuntime::consumeRenderNeeded() {
+    return frameDirty_.consume();
 }
 
 scene::Scene& EngineRuntime::world() {
@@ -651,7 +664,11 @@ agent::ConfirmationGate* EngineRuntime::confirmGate() {
 }
 
 bool EngineRuntime::reloadPipelines() {
-    return renderer_.reloadPipelines();
+    const bool ok = renderer_.reloadPipelines();
+    if (ok) {
+        markDirty();
+    }
+    return ok;
 }
 
 EngineRuntime::Notice& EngineRuntime::sceneRetryNotice() {
@@ -762,6 +779,7 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
         ++loaded;
     }
     logInfo("scene loaded: {} entities, {} lights", loaded, saved.lights.size());
+    markDirty();
     return true;
 }
 
@@ -831,6 +849,7 @@ bool EngineRuntime::setEntityTransform(const std::string& id, math::float3 posit
     // Harmless no-op when an earlier call in the same gesture already
     // committed the pending point opened by beginEdit.
     undo_.commitPending();
+    markDirty();
     return true;
 }
 
@@ -856,6 +875,7 @@ bool EngineRuntime::setEntityMaterial(const std::string& id, const MaterialParam
         }
         entity->materialIndex = newIndex;
         undo_.commitPending();
+        markDirty();
         return true;
     }
     const bool applied =
@@ -864,6 +884,7 @@ bool EngineRuntime::setEntityMaterial(const std::string& id, const MaterialParam
         // Harmless no-op when an earlier call in the same gesture already
         // committed the pending point opened by beginEdit.
         undo_.commitPending();
+        markDirty();
     }
     return applied;
 }
@@ -899,6 +920,7 @@ bool EngineRuntime::clearEntityShader(const std::string& id) {
     const bool cleared = renderer_.clearMaterialShader(materialIndex);
     if (cleared) {
         undo_.commitPending();
+        markDirty();
     }
     return cleared;
 }
@@ -934,10 +956,18 @@ std::string EngineRuntime::redoLabel() const {
     return label != nullptr ? *label : std::string();
 }
 bool EngineRuntime::undo() {
-    return undo_.undo();
+    const bool ok = undo_.undo();
+    if (ok) {
+        markDirty();
+    }
+    return ok;
 }
 bool EngineRuntime::redo() {
-    return undo_.redo();
+    const bool ok = undo_.redo();
+    if (ok) {
+        markDirty();
+    }
+    return ok;
 }
 
 } // namespace kumo::facade

@@ -22,6 +22,7 @@ add_executable(kumo_tests
     test_agent_config.cpp
     test_facade_runtime.cpp
     test_facade_undo.cpp
+    test_facade_frame_dirty.cpp
 )
 target_link_libraries(kumo_tests PRIVATE doctest::doctest kumo_core kumo_math kumo_shaderc
     kumo_scene kumo_asset kumo_agent kumo_renderer kumo_facade nlohmann_json::nlohmann_json)

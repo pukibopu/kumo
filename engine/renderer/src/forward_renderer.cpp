@@ -603,17 +603,18 @@ void ForwardRenderer::rebuildMaterialResources() {
                                    static_cast<std::uint32_t>(sizeof(FrameUniformsData))),
                  static_cast<std::uint32_t>(sizeof(FrameUniformsData)));
     for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
-        if (frameUniforms_[slot] && frameUniforms_[slot]->size() == frameBufferSize) {
-            continue;
+        if (!frameUniforms_[slot] || frameUniforms_[slot]->size() != frameBufferSize) {
+            frameUniforms_[slot] = device_->createBuffer({
+                .size = frameBufferSize,
+                .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+            });
+            if (!frameUniforms_[slot]) {
+                logError("shader reload: frame uniform buffer rebuild failed (slot {})", slot);
+                continue;
+            }
         }
-        frameUniforms_[slot] = device_->createBuffer({
-            .size = frameBufferSize,
-            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
-        });
-        if (!frameUniforms_[slot]) {
-            logError("shader reload: frame uniform buffer rebuild failed (slot {})", slot);
-            continue;
-        }
+        // Always recreated: bind groups cache per-entry stage visibility at
+        // creation, and the signature that got us here includes visibility.
         frameGroups_[slot] = device_->createBindGroup({
             .layout = frameLayout_,
             .entries = {{.binding = 0, .buffer = frameUniforms_[slot]}},

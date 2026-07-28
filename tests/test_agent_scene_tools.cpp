@@ -7,8 +7,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <format>
 #include <string>
+#include <vector>
 
 using namespace kumo;
 using namespace kumo::agent;
@@ -31,11 +33,12 @@ struct Fixture {
 
 } // namespace
 
-TEST_CASE("scene tools register all eight with object schemas") {
+TEST_CASE("scene tools register all ten with object schemas") {
     Fixture f;
     const char* expected[] = {"scene_list",          "scene_add_entity",    "scene_add_entities",
                               "scene_remove_entity", "scene_set_transform", "camera_set",
-                              "light_set",           "material_set_param"};
+                              "light_set",           "material_set_param",  "scene_define_group",
+                              "scene_instance_group"};
     for (const char* name : expected) {
         const ToolDef* def = f.registry.find(name);
         REQUIRE_MESSAGE(def != nullptr, name);
@@ -48,6 +51,8 @@ TEST_CASE("scene tools register all eight with object schemas") {
     CHECK(f.registry.find("scene_remove_entity")->destructive);
     CHECK(!f.registry.find("scene_add_entity")->destructive);
     CHECK(!f.registry.find("scene_add_entities")->destructive);
+    CHECK(!f.registry.find("scene_define_group")->destructive);
+    CHECK(!f.registry.find("scene_instance_group")->destructive);
 }
 
 TEST_CASE("registerSceneListTool registers exactly scene_list") {
@@ -348,4 +353,239 @@ TEST_CASE("scene_list reports entities, camera and lights as compact JSON") {
     CHECK(listed["camera"]["fov_y_deg"] == doctest::Approx(60.0));
     REQUIRE(listed["lights"].size() == 1);
     CHECK(listed["lights"][0]["intensity"] == doctest::Approx(3.0));
+}
+
+TEST_CASE("scene_define_group validates every member and stores nothing in the scene") {
+    Fixture f;
+    const json result = f.invoke("scene_define_group",
+                                 R"({"name":"pine","entities":[
+{"name":"trunk","primitive":"cylinder","position":[0,0.5,0]},
+{"name":"top","primitive":"cone","position":[0,1.2,0]}
+]})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["group"] == "pine");
+    CHECK(result["members"] == 2);
+    CHECK(f.scene.entities.empty());
+}
+
+TEST_CASE("scene_define_group rejects a bad member, naming it, and stores nothing") {
+    Fixture f;
+    const json result = f.invoke("scene_define_group",
+                                 R"({"name":"bad","entities":[
+{"primitive":"cube"},
+{"primitive":"cube","scale":[1,-1,1]}
+]})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("entities[1]") != std::string::npos);
+
+    // Nothing was stored, so a later instance call reports an unknown group.
+    const json instance =
+        f.invoke("scene_instance_group", R"({"name":"bad","transforms":[{"position":[0,0,0]}]})");
+    CHECK(instance["status"] == "error");
+    CHECK(instance["message"].get<std::string>().find("unknown group") != std::string::npos);
+}
+
+TEST_CASE("scene_define_group redefinition overwrites the prior definition") {
+    Fixture f;
+    REQUIRE(f.invoke("scene_define_group",
+                     R"({"name":"g","entities":[{"primitive":"cube"}]})")["members"] == 1);
+    const json result =
+        f.invoke("scene_define_group",
+                 R"({"name":"g","entities":[{"primitive":"cube"},{"primitive":"sphere"}]})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["members"] == 2);
+}
+
+TEST_CASE("scene_define_group rejects an empty or too-long name") {
+    Fixture f;
+    CHECK(f.invoke("scene_define_group",
+                   R"({"name":"","entities":[{"primitive":"cube"}]})")["status"] == "error");
+    const std::string longName(65, 'a');
+    CHECK(f.invoke("scene_define_group",
+                   std::format(R"({{"name":"{}","entities":[{{"primitive":"cube"}}]}})",
+                               longName))["status"] == "error");
+}
+
+TEST_CASE("scene_define_group rejects more than 32 entities") {
+    Fixture f;
+    std::string args = R"({"name":"big","entities":[)";
+    for (int i = 0; i < 33; ++i) {
+        if (i > 0) {
+            args += ",";
+        }
+        args += R"({"primitive":"cube"})";
+    }
+    args += "]}";
+    CHECK(f.invoke("scene_define_group", args)["status"] == "error");
+}
+
+TEST_CASE("scene_instance_group with explicit transforms stamps every member per instance") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"pair","entities":[
+{"name":"a","primitive":"cube","position":[0,0,0]},
+{"name":"b","primitive":"sphere","position":[1,0,0]}
+]})");
+    const json result = f.invoke("scene_instance_group", R"({"name":"pair","transforms":[
+{"position":[10,0,0]},
+{"position":[20,0,0]}
+]})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["instances"] == 2);
+    REQUIRE(result["entity_ids"].size() == 4);
+    CHECK(result["entity_ids"][0] == "0:0");
+    CHECK(result["entity_ids"][3] == "3:0");
+    REQUIRE(f.scene.entities.size() == 4);
+
+    const scene::Entity* e0 = f.scene.entities.get({0, 0});
+    const scene::Entity* e1 = f.scene.entities.get({1, 0});
+    const scene::Entity* e2 = f.scene.entities.get({2, 0});
+    const scene::Entity* e3 = f.scene.entities.get({3, 0});
+    REQUIRE(e0 != nullptr);
+    REQUIRE(e1 != nullptr);
+    REQUIRE(e2 != nullptr);
+    REQUIRE(e3 != nullptr);
+    CHECK(e0->name == "pair_0_a");
+    CHECK(e1->name == "pair_0_b");
+    CHECK(e2->name == "pair_1_a");
+    CHECK(e3->name == "pair_1_b");
+    CHECK(e0->transform.position.x == doctest::Approx(10.0f));
+    // Member "b" sits at local (1,0,0); with an identity instance rotation and
+    // unit scale the world position is a plain offset.
+    CHECK(e1->transform.position.x == doctest::Approx(11.0f));
+    CHECK(e2->transform.position.x == doctest::Approx(20.0f));
+    CHECK(e3->transform.position.x == doctest::Approx(21.0f));
+}
+
+TEST_CASE("scene_instance_group composes instance and member transforms") {
+    Fixture f;
+    f.invoke("scene_define_group",
+             R"({"name":"g","entities":[{"name":"m","primitive":"cube","position":[1,0,0]}]})");
+    const json result = f.invoke("scene_instance_group", R"({"name":"g","transforms":[
+{"position":[5,2,3],"rotation_euler_deg":[0,90,0],"scale":2}
+]})");
+    REQUIRE(result["status"] == "ok");
+    const scene::Entity* e = f.scene.entities.get({0, 0});
+    REQUIRE(e != nullptr);
+
+    // world = instPos + instRot * (instScale * memberLocal); computed directly
+    // via quatFromEulerDegrees rather than assuming a rotation convention.
+    const math::quat instRot = math::quatFromEulerDegrees({0.0f, 90.0f, 0.0f});
+    const math::float3 memberLocal{1.0f, 0.0f, 0.0f};
+    const math::float3 instScale{2.0f, 2.0f, 2.0f};
+    const math::float3 expected =
+        math::float3{5.0f, 2.0f, 3.0f} + instRot * (instScale * memberLocal);
+
+    CHECK(e->transform.position.x == doctest::Approx(expected.x));
+    CHECK(e->transform.position.y == doctest::Approx(expected.y));
+    CHECK(e->transform.position.z == doctest::Approx(expected.z));
+    CHECK(e->transform.scale.x == doctest::Approx(2.0f));
+}
+
+TEST_CASE("scene_instance_group scatter is deterministic for a fixed seed") {
+    auto samplePositions = [](std::int64_t seed) {
+        Fixture fx;
+        fx.invoke("scene_define_group",
+                  R"({"name":"tree","entities":[{"name":"trunk","primitive":"cylinder"}]})");
+        const json result = fx.invoke(
+            "scene_instance_group",
+            std::format(R"({{"name":"tree","scatter":{{"count":5,"area":[10,10],"seed":{}}}}})",
+                        seed));
+        REQUIRE(result["status"] == "ok");
+        std::vector<math::float3> positions;
+        fx.scene.entities.forEach([&](scene::EntityId, const scene::Entity& e) {
+            positions.push_back(e.transform.position);
+        });
+        return positions;
+    };
+
+    const std::vector<math::float3> a = samplePositions(42);
+    const std::vector<math::float3> b = samplePositions(42);
+    REQUIRE(a.size() == 5);
+    REQUIRE(b.size() == 5);
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        CHECK(a[i].x == doctest::Approx(b[i].x));
+        CHECK(a[i].z == doctest::Approx(b[i].z));
+    }
+
+    const std::vector<math::float3> c = samplePositions(7);
+    bool anyDifferent = false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::abs(a[i].x - c[i].x) > 1e-4f || std::abs(a[i].z - c[i].z) > 1e-4f) {
+            anyDifferent = true;
+        }
+    }
+    CHECK(anyDifferent);
+}
+
+TEST_CASE("scene_instance_group rejects instances x members over 256 and creates nothing") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"quad","entities":[
+{"primitive":"cube"},{"primitive":"cube"},{"primitive":"cube"},{"primitive":"cube"},{"primitive":"cube"}
+]})");
+    // 5 members x 60 instances = 300 > 256.
+    const json result =
+        f.invoke("scene_instance_group",
+                 R"({"name":"quad","scatter":{"count":60,"area":[10,10],"seed":1}})");
+    CHECK(result["status"] == "error");
+    CHECK(f.scene.entities.empty());
+}
+
+TEST_CASE("scene_instance_group scatter positions stay within the area bounds") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"g","entities":[{"primitive":"cube"}]})");
+    const json result = f.invoke(
+        "scene_instance_group",
+        R"({"name":"g","scatter":{"count":40,"area":[4,6],"position":[100,5,-50],"seed":3}})");
+    REQUIRE(result["status"] == "ok");
+    constexpr float kEps = 1e-3f;
+    f.scene.entities.forEach([&](scene::EntityId, const scene::Entity& e) {
+        CHECK(e.transform.position.x >= 98.0f - kEps);
+        CHECK(e.transform.position.x <= 102.0f + kEps);
+        CHECK(e.transform.position.y == doctest::Approx(5.0f));
+        CHECK(e.transform.position.z >= -53.0f - kEps);
+        CHECK(e.transform.position.z <= -47.0f + kEps);
+    });
+}
+
+TEST_CASE("scene_instance_group scatter respects scale_jitter bounds") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"g","entities":[{"primitive":"cube"}]})");
+    const json result =
+        f.invoke("scene_instance_group",
+                 R"({"name":"g","scatter":{"count":30,"area":[5,5],"seed":9,"scale_jitter":0.3}})");
+    REQUIRE(result["status"] == "ok");
+    constexpr float kEps = 1e-4f;
+    f.scene.entities.forEach([&](scene::EntityId, const scene::Entity& e) {
+        CHECK(e.transform.scale.x >= 0.7f - kEps);
+        CHECK(e.transform.scale.x <= 1.3f + kEps);
+        CHECK(e.transform.scale.y == doctest::Approx(e.transform.scale.x));
+        CHECK(e.transform.scale.z == doctest::Approx(e.transform.scale.x));
+    });
+}
+
+TEST_CASE("scene_instance_group requires exactly one of transforms or scatter, and a known group") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"g","entities":[{"primitive":"cube"}]})");
+    CHECK(f.invoke("scene_instance_group", R"({"name":"g"})")["status"] == "error");
+    CHECK(f.invoke("scene_instance_group",
+                   R"({"name":"g","transforms":[{"position":[0,0,0]}],)"
+                   R"("scatter":{"count":1,"area":[1,1]}})")["status"] == "error");
+    CHECK(f.invoke("scene_instance_group",
+                   R"({"name":"missing","transforms":[{"position":[0,0,0]}]})")["status"] ==
+          "error");
+}
+
+TEST_CASE("scene_list reports defined group names, sorted, only once any exist") {
+    Fixture f;
+    const json before = json::parse(f.registry.invoke("scene_list", ""), nullptr, false);
+    CHECK(!before.contains("groups"));
+
+    f.invoke("scene_define_group", R"({"name":"zeta","entities":[{"primitive":"cube"}]})");
+    f.invoke("scene_define_group", R"({"name":"alpha","entities":[{"primitive":"sphere"}]})");
+
+    const json after = json::parse(f.registry.invoke("scene_list", ""), nullptr, false);
+    REQUIRE(after.contains("groups"));
+    REQUIRE(after["groups"].size() == 2);
+    CHECK(after["groups"][0] == "alpha");
+    CHECK(after["groups"][1] == "zeta");
 }

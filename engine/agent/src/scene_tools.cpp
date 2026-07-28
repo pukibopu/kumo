@@ -18,8 +18,10 @@
 #include <expected>
 #include <format>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -260,13 +262,22 @@ std::string sceneList(const SceneToolContext& context) {
     }
 
     const scene::Camera& camera = scene.camera;
-    const json out{{"entities", std::move(entities)},
-                   {"camera",
-                    {{"position", numberArray(camera.position)},
-                     {"rotation_euler_deg", numberArray(math::eulerDegrees(camera.rotation))},
-                     {"fov_y_deg", rounded(math::degrees(camera.fovY))},
-                     {"near", rounded(camera.nearZ)}}},
-                   {"lights", std::move(lights)}};
+    json out{{"entities", std::move(entities)},
+             {"camera",
+              {{"position", numberArray(camera.position)},
+               {"rotation_euler_deg", numberArray(math::eulerDegrees(camera.rotation))},
+               {"fov_y_deg", rounded(math::degrees(camera.fovY))},
+               {"near", rounded(camera.nearZ)}}},
+             {"lights", std::move(lights)}};
+    if (context.groups != nullptr && !context.groups->empty()) {
+        std::vector<std::string> names;
+        names.reserve(context.groups->size());
+        for (const auto& [groupName, def] : *context.groups) {
+            names.push_back(groupName);
+        }
+        std::sort(names.begin(), names.end());
+        out["groups"] = std::move(names);
+    }
     return dumpSafe(out);
 }
 
@@ -419,6 +430,335 @@ std::string sceneAddEntities(const SceneToolContext& context, const json& args) 
         idsJson.push_back(formatEntityId(id));
     }
     return json{{"status", "ok"}, {"entity_ids", std::move(idsJson)}}.dump();
+}
+
+GroupMaterialSpec toGroupMaterial(const ForwardRenderer::MaterialParams& params) {
+    GroupMaterialSpec out;
+    std::copy(std::begin(params.baseColor), std::end(params.baseColor), out.baseColor);
+    out.metallic = params.metallic;
+    out.roughness = params.roughness;
+    std::copy(std::begin(params.emissive), std::end(params.emissive), out.emissive);
+    return out;
+}
+
+ForwardRenderer::MaterialParams toMaterialParams(const GroupMaterialSpec& spec) {
+    ForwardRenderer::MaterialParams out;
+    std::copy(std::begin(spec.baseColor), std::end(spec.baseColor), out.baseColor);
+    out.metallic = spec.metallic;
+    out.roughness = spec.roughness;
+    std::copy(std::begin(spec.emissive), std::end(spec.emissive), out.emissive);
+    return out;
+}
+
+// Reads a scale field that accepts either a single number (uniform) or a
+// 3-element array (per-axis); absent leaves `out` untouched, same contract as
+// readFloat3/readNumber.
+bool readScale(const json& args, const char* key, math::float3& out, std::string& error) {
+    const auto it = args.find(key);
+    if (it == args.end()) {
+        return true;
+    }
+    if (it->is_number()) {
+        const float value = it->get<float>();
+        if (!std::isfinite(value)) {
+            error = std::format("{} must be finite", key);
+            return false;
+        }
+        out = {value, value, value};
+        return true;
+    }
+    if (it->is_array()) {
+        return readFloat3(args, key, out, error);
+    }
+    error = std::format("{} must be a number or an array of 3 numbers", key);
+    return false;
+}
+
+// Integer fields arrive as JSON numbers (an LLM may send 5.0 for an integer);
+// mirrors light_set's index handling rather than requiring is_number_integer().
+bool readInt(const json& args, const char* key, std::int64_t& out, std::string& error) {
+    const auto it = args.find(key);
+    if (it == args.end()) {
+        return true;
+    }
+    if (!it->is_number()) {
+        error = std::format("{} must be an integer", key);
+        return false;
+    }
+    const double value = it->get<double>();
+    if (value != std::floor(value)) {
+        error = std::format("{} must be an integer", key);
+        return false;
+    }
+    out = static_cast<std::int64_t>(value);
+    return true;
+}
+
+// Group name validation shared by define and instance: same 1-64 char rule.
+std::expected<std::string, std::string> readGroupName(const json& args) {
+    const auto it = args.find("name");
+    if (it == args.end() || !it->is_string()) {
+        return std::unexpected(std::string("name (string) is required"));
+    }
+    const std::string name = it->get<std::string>();
+    if (name.empty() || name.size() > 64) {
+        return std::unexpected(std::string("name must be 1-64 characters"));
+    }
+    return name;
+}
+
+// Non-destructive: stores a validated assembly, never touches the scene or
+// renderer. Every member is validated with the same parseEntityInput used by
+// scene_add_entity(ies), so a bad item is rejected before anything is stored;
+// redefining an existing name overwrites it wholesale.
+std::string sceneDefineGroup(const SceneToolContext& context, const json& args) {
+    std::expected<std::string, std::string> name = readGroupName(args);
+    if (!name.has_value()) {
+        return errorJson(name.error());
+    }
+
+    const auto it = args.find("entities");
+    if (it == args.end() || !it->is_array()) {
+        return errorJson("entities (array) is required");
+    }
+    if (it->empty()) {
+        return errorJson("entities must not be empty");
+    }
+    if (it->size() > 32) {
+        return errorJson(std::format("entities: at most 32 allowed per group, got {}", it->size()));
+    }
+
+    GroupDef def;
+    def.members.reserve(it->size());
+    for (std::size_t i = 0; i < it->size(); ++i) {
+        if (!(*it)[i].is_object()) {
+            return errorJson(std::format("entities[{}]: must be an object", i));
+        }
+        std::expected<EntityInput, std::string> input = parseEntityInput((*it)[i]);
+        if (!input.has_value()) {
+            return errorJson(std::format("entities[{}]: {}", i, input.error()));
+        }
+        GroupEntitySpec spec;
+        spec.name = input->entity.name;
+        spec.primitive = input->entity.primitive;
+        spec.size = input->entity.primitiveSize;
+        spec.transform = input->entity.transform;
+        spec.material = toGroupMaterial(input->material);
+        def.members.push_back(std::move(spec));
+    }
+
+    const std::size_t members = def.members.size();
+    (*context.groups)[*name] = std::move(def);
+    return json{{"status", "ok"}, {"group", *name}, {"members", members}}.dump();
+}
+
+// world = instanceTRS ∘ memberTRS, no shear: the instance's rotation and
+// uniform-or-per-axis scale are applied to the member's local offset before
+// translating by the instance position (ADR 0038-adjacent composition, no new
+// type needed since scene::Transform already holds TRS).
+scene::Transform composeGroupMember(const scene::Transform& instance,
+                                    const scene::Transform& member) {
+    scene::Transform out;
+    out.position = instance.position + instance.rotation * (instance.scale * member.position);
+    out.rotation = instance.rotation * member.rotation;
+    out.scale = instance.scale * member.scale;
+    return out;
+}
+
+// Parses one `transforms[i]` item into a full instance transform; position is
+// required (unlike scene_add_entity, an instance needs somewhere to be).
+std::expected<scene::Transform, std::string> parseInstanceTransform(const json& item) {
+    if (!item.is_object()) {
+        return std::unexpected(std::string("must be an object"));
+    }
+    scene::Transform t;
+    std::string error;
+    if (!item.contains("position")) {
+        return std::unexpected(std::string("position is required"));
+    }
+    if (!readFloat3(item, "position", t.position, error)) {
+        return std::unexpected(error);
+    }
+    math::float3 euler{0.0f, 0.0f, 0.0f};
+    if (item.contains("rotation_euler_deg")) {
+        if (!readFloat3(item, "rotation_euler_deg", euler, error)) {
+            return std::unexpected(error);
+        }
+        t.rotation = math::quatFromEulerDegrees(euler);
+    }
+    if (!readScale(item, "scale", t.scale, error)) {
+        return std::unexpected(error);
+    }
+    if (t.scale.x <= 1e-6f || t.scale.y <= 1e-6f || t.scale.z <= 1e-6f) {
+        return std::unexpected(std::string("scale components must be positive"));
+    }
+    return t;
+}
+
+// Deterministic scatter: one std::mt19937 seeded from `seed`, drawn in a fixed
+// x/z/yaw/scale order per instance so identical seed+args always reproduce the
+// same sequence (yaw and scale draws are skipped entirely when their jitter is
+// zero, keeping the no-jitter case reproducible without a degenerate [0,0] range).
+std::expected<std::vector<scene::Transform>, std::string> parseScatter(const json& scatter) {
+    if (!scatter.is_object()) {
+        return std::unexpected(std::string("scatter must be an object"));
+    }
+    std::string error;
+    if (!scatter.contains("count")) {
+        return std::unexpected(std::string("count is required"));
+    }
+    std::int64_t count = 0;
+    if (!readInt(scatter, "count", count, error)) {
+        return std::unexpected(error);
+    }
+    if (count < 1 || count > 64) {
+        return std::unexpected(std::string("count must be between 1 and 64"));
+    }
+
+    if (!scatter.contains("area")) {
+        return std::unexpected(std::string("area ([width,depth]) is required"));
+    }
+    float area[2] = {0.0f, 0.0f};
+    if (!readNumbers(scatter, "area", area, 2, error)) {
+        return std::unexpected(error);
+    }
+    if (area[0] < 0.0f || area[1] < 0.0f) {
+        return std::unexpected(std::string("area components must be non-negative"));
+    }
+
+    math::float3 center{0.0f, 0.0f, 0.0f};
+    if (!readFloat3(scatter, "position", center, error)) {
+        return std::unexpected(error);
+    }
+
+    std::int64_t seed = 0;
+    if (!readInt(scatter, "seed", seed, error)) {
+        return std::unexpected(error);
+    }
+
+    float scaleJitter = 0.0f;
+    if (!readNumber(scatter, "scale_jitter", scaleJitter, error)) {
+        return std::unexpected(error);
+    }
+    if (scaleJitter < 0.0f || scaleJitter > 0.5f) {
+        return std::unexpected(std::string("scale_jitter must be between 0 and 0.5"));
+    }
+
+    float rotationJitterDeg = 0.0f;
+    if (!readNumber(scatter, "rotation_jitter_deg", rotationJitterDeg, error)) {
+        return std::unexpected(error);
+    }
+    if (rotationJitterDeg < 0.0f || rotationJitterDeg > 180.0f) {
+        return std::unexpected(std::string("rotation_jitter_deg must be between 0 and 180"));
+    }
+
+    std::mt19937 rng(static_cast<std::uint32_t>(static_cast<std::uint64_t>(seed)));
+    std::uniform_real_distribution<float> xDist(-area[0] * 0.5f, area[0] * 0.5f);
+    std::uniform_real_distribution<float> zDist(-area[1] * 0.5f, area[1] * 0.5f);
+    std::uniform_real_distribution<float> yawDist(-rotationJitterDeg, rotationJitterDeg);
+    std::uniform_real_distribution<float> scaleDist(1.0f - scaleJitter, 1.0f + scaleJitter);
+
+    std::vector<scene::Transform> instances;
+    instances.reserve(static_cast<std::size_t>(count));
+    for (std::int64_t i = 0; i < count; ++i) {
+        scene::Transform t;
+        t.position = {center.x + xDist(rng), center.y, center.z + zDist(rng)};
+        const float yaw = rotationJitterDeg > 0.0f ? yawDist(rng) : 0.0f;
+        t.rotation = math::quatFromEulerDegrees({0.0f, yaw, 0.0f});
+        const float factor = scaleJitter > 0.0f ? scaleDist(rng) : 1.0f;
+        t.scale = {factor, factor, factor};
+        instances.push_back(t);
+    }
+    return instances;
+}
+
+// Stamps `group` at every instance transform; batch-atomic like
+// scene_add_entities (members are already validated at define time, so only
+// the GPU upload can fail here, rolling back this call's inserts).
+std::string sceneInstanceGroup(const SceneToolContext& context, const json& args) {
+    std::expected<std::string, std::string> name = readGroupName(args);
+    if (!name.has_value()) {
+        return errorJson(name.error());
+    }
+    const auto groupIt = context.groups->find(*name);
+    if (groupIt == context.groups->end()) {
+        return errorJson(std::format("unknown group '{}'", *name));
+    }
+    const GroupDef& group = groupIt->second;
+
+    const bool hasTransforms = args.contains("transforms");
+    const bool hasScatter = args.contains("scatter");
+    if (hasTransforms == hasScatter) {
+        return errorJson("exactly one of transforms or scatter is required");
+    }
+
+    std::vector<scene::Transform> instances;
+    if (hasTransforms) {
+        const json& transforms = args["transforms"];
+        if (!transforms.is_array()) {
+            return errorJson("transforms must be an array");
+        }
+        if (transforms.empty()) {
+            return errorJson("transforms must not be empty");
+        }
+        instances.reserve(transforms.size());
+        for (std::size_t i = 0; i < transforms.size(); ++i) {
+            std::expected<scene::Transform, std::string> t = parseInstanceTransform(transforms[i]);
+            if (!t.has_value()) {
+                return errorJson(std::format("transforms[{}]: {}", i, t.error()));
+            }
+            instances.push_back(*t);
+        }
+    } else {
+        std::expected<std::vector<scene::Transform>, std::string> scattered =
+            parseScatter(args["scatter"]);
+        if (!scattered.has_value()) {
+            return errorJson(std::format("scatter.{}", scattered.error()));
+        }
+        instances = std::move(*scattered);
+    }
+
+    const std::size_t total = instances.size() * group.members.size();
+    if (total > 256) {
+        return errorJson(
+            std::format("instances x group members must be at most 256, got {}", total));
+    }
+
+    std::vector<EntityInput> parsed;
+    parsed.reserve(total);
+    for (std::size_t i = 0; i < instances.size(); ++i) {
+        for (const GroupEntitySpec& member : group.members) {
+            EntityInput input;
+            input.entity.name = std::format("{}_{}_{}", *name, i, member.name);
+            input.entity.primitive = member.primitive;
+            input.entity.primitiveSize = member.size;
+            input.entity.transform = composeGroupMember(instances[i], member.transform);
+            input.material = toMaterialParams(member.material);
+            parsed.push_back(std::move(input));
+        }
+    }
+
+    std::vector<scene::EntityId> ids;
+    ids.reserve(parsed.size());
+    for (std::size_t i = 0; i < parsed.size(); ++i) {
+        std::expected<scene::EntityId, std::string> id =
+            buildAndInsertEntity(context, std::move(parsed[i]));
+        if (!id.has_value()) {
+            for (scene::EntityId created : ids) {
+                context.scene->entities.remove(created);
+            }
+            return errorJson(std::format("member {}: {}", i, id.error()));
+        }
+        ids.push_back(*id);
+    }
+
+    json idsJson = json::array();
+    for (scene::EntityId id : ids) {
+        idsJson.push_back(formatEntityId(id));
+    }
+    return json{
+        {"status", "ok"}, {"instances", instances.size()}, {"entity_ids", std::move(idsJson)}}
+        .dump();
 }
 
 std::string sceneRemoveEntity(const SceneToolContext& context, const json& args) {
@@ -627,6 +967,9 @@ void registerSceneListTool(ToolRegistry& registry, SceneToolContext context) {
 
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
     KUMO_ASSERT(context.scene != nullptr);
+    if (context.groups == nullptr) {
+        context.groups = std::make_shared<std::unordered_map<std::string, GroupDef>>();
+    }
 
     registerSceneListTool(registry, context);
 
@@ -709,6 +1052,41 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
 "required":["entity_id"]})",
         false,
         [](const SceneToolContext& ctx, const json& args) { return materialSetParam(ctx, args); });
+
+    add("scene_define_group",
+        "Define a reusable named assembly of primitives (local transforms relative to the group "
+        "origin). Instance it with scene_instance_group.",
+        std::string(
+            R"({"type":"object","properties":{"name":{"type":"string","description":"Group name, 1-64 characters"},)") +
+            R"("entities":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","properties":{)" +
+            kEntityPropertiesSchema +
+            R"(},"required":["primitive"]}}},"required":["name","entities"]})",
+        false,
+        [](const SceneToolContext& ctx, const json& args) { return sceneDefineGroup(ctx, args); });
+
+    add("scene_instance_group",
+        "Stamp N instances of a defined group, either at explicit transforms or scattered "
+        "deterministically over an area (count/area/seed/jitter). Prefer this for repeated "
+        "structures (forests, crowds, fences).",
+        R"({"type":"object","properties":{
+"name":{"type":"string","description":"Name from a prior scene_define_group call"},
+"transforms":{"type":"array","description":"Explicit instance transforms; mutually exclusive with scatter","items":{"type":"object","properties":{
+"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+"rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+"scale":{"description":"Uniform scale factor or [x,y,z]","oneOf":[{"type":"number"},{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}]}},
+"required":["position"]}},
+"scatter":{"type":"object","description":"Deterministic random placement; mutually exclusive with transforms","properties":{
+"count":{"type":"integer","minimum":1,"maximum":64},
+"area":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2,"description":"[width,depth] centered on position"},
+"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Scatter rectangle center, default origin"},
+"seed":{"type":"integer","description":"Default 0; identical seed and args reproduce identical output"},
+"scale_jitter":{"type":"number","minimum":0,"maximum":0.5,"description":"Per-instance uniform scale factor 1+/-jitter"},
+"rotation_jitter_deg":{"type":"number","minimum":0,"maximum":180,"description":"Per-instance yaw jitter"}},
+"required":["count","area"]}},
+"required":["name"]})",
+        false, [](const SceneToolContext& ctx, const json& args) {
+            return sceneInstanceGroup(ctx, args);
+        });
 }
 
 } // namespace kumo::agent

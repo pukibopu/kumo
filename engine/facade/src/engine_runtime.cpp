@@ -52,6 +52,8 @@ constexpr const char* kSceneSystemPrompt =
     "For multi-entity builds use scene_add_entities (one call, up to 128 entities) instead of "
     "repeated single adds. "
     "Call scene_list before spatial reasoning or edits that depend on current state. "
+    "For repeated structures, scene_define_group once then scene_instance_group with scatter "
+    "(count/area/seed) instead of adding entities one by one. "
     "Tool errors come back as JSON with status \"error\": read the message, correct the "
     "call and retry. Keep replies short. Always reply in the user's language.";
 
@@ -184,9 +186,10 @@ MaterialParams toMaterialParams(const scene::SavedMaterial& saved) {
 }
 
 // Tool names the undo hook must not record a checkpoint for (ADR 0044): pure
-// reads, so they never change scene/renderer state.
-constexpr std::array<std::string_view, 3> kReadOnlyTools{"scene_list", "shader_read",
-                                                         "viewer_screenshot"};
+// reads, so they never change scene/renderer state, plus scene_define_group
+// (M6.9), which only stores a validated assembly and never touches the scene.
+constexpr std::array<std::string_view, 4> kReadOnlyTools{"scene_list", "shader_read",
+                                                         "viewer_screenshot", "scene_define_group"};
 
 bool isFinite3(const math::float3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -367,11 +370,16 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
 
     // Agent stack. Two registries scope each session to its own tools: the
     // shader assistant gets scene_list (to find entities) plus the shader
-    // tools, but not the six scene-editing tools.
-    agent::registerSceneTools(self->sceneToolRegistry_,
-                              {.scene = &self->world_, .renderer = &self->renderer_});
-    agent::registerSceneListTool(self->shaderToolRegistry_,
-                                 {.scene = &self->world_, .renderer = &self->renderer_});
+    // tools, but not the scene-editing tools. `groups` is seeded once here and
+    // reused (like shaderTools.failureCounts below) so scene_define_group /
+    // scene_instance_group definitions are visible from every registry built
+    // off this runtime, chat and MCP alike.
+    agent::SceneToolContext sceneTools;
+    sceneTools.scene = &self->world_;
+    sceneTools.renderer = &self->renderer_;
+    sceneTools.groups = std::make_shared<std::unordered_map<std::string, agent::GroupDef>>();
+    agent::registerSceneTools(self->sceneToolRegistry_, sceneTools);
+    agent::registerSceneListTool(self->shaderToolRegistry_, sceneTools);
     agent::ShaderToolContext shaderTools;
     shaderTools.scene = &self->world_;
     shaderTools.setShader = [renderer = &self->renderer_](std::uint32_t index,
@@ -396,8 +404,7 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
     // semantics stay single-sourced: the same contexts back both this
     // registry and the embedded assistants' registries above.
     if (desc.mcp) {
-        agent::registerSceneTools(self->mcpToolRegistry_,
-                                  {.scene = &self->world_, .renderer = &self->renderer_});
+        agent::registerSceneTools(self->mcpToolRegistry_, sceneTools);
         agent::registerShaderTools(self->mcpToolRegistry_, shaderTools);
         self->mcpToolRegistry_.add(
             {.name = "viewer_screenshot",

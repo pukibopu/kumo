@@ -1,6 +1,6 @@
 # 架构
 
-（随里程碑推进持续补充，当前对应 M6。）
+（随里程碑推进持续补充，当前对应 M6.75。）
 
 ## 应用与平台层（macOS）
 
@@ -34,7 +34,9 @@ core ← shadercompiler
 math ← scene ← asset
 { rhi, scene, asset, shadercompiler } ← renderer
 { scene, renderer, shadercompiler } ← agent
-所有模块 ← apps/viewer
+{ agent, renderer, scene, asset } ← facade
+facade ← apps/viewer（GLFW 开发壳）
+facade ← apps/kumo（SwiftUI 产品壳，经 ObjC++ 桥）
 ```
 
 依赖严格无环，由 CMake 链接关系约束。`rhi` 只含纯虚接口与 POD 描述结构，不含任何平台头文件。
@@ -50,6 +52,11 @@ math ← scene ← asset
 - `engine/asset`——glTF/HDR/PNG 装载（cgltf + stb）、程序化图元、per-mesh AABB
 - `engine/renderer`——前向 PBR 渲染器与 IBL 烘焙：`ForwardRenderer` 类 + `renderer::ibl` 自由函数，bind group layout 由 shader 反射生成（ADR 0040），增量上传接口供 agent 建实体；M6 起支持材质级定制 fragment pipeline 与重建式热重载（见 shaders.md）
 - `engine/agent`——LLM 助手（见 agents.md）：provider 栈（NSURLSession shim + 重试退避 + OpenAI/Claude 双 codec、per-agent 端点）、工具注册表（场景七工具 + shader 双工具，按助手收窄）、worker 线程会话（历史压缩、队列化确认门）、MCP server（stdio JSON-RPC，复用同一工具注册表，ADR 0041）
+- `engine/facade`——壳共享的组合层（ADR 0044）：`EngineRuntime`（窗口层之上的一切装配：资产/IBL/渲染器/双 agent/三 registry/MCP 泵/持久化）、快照撤销栈（pending-commit，agent/MCP/inspector 变更同栈）、共享轨道相机（输入 vs agent 仲裁）、按需渲染脏标记
+
+## 产品壳（apps/kumo，M6.75）
+
+SwiftUI（macOS 先行）：NavigationSplitView（场景树 / CAMetalLayer 视口 / inspector）+ 可折叠聊天栏（场景/Shader 页签）+ 工具日志 + 破坏性确认弹窗 + 设置（per-agent 端点表单，API key 入 Keychain、启动时以不覆盖真实环境变量的方式注入 env）。引擎↔Swift 经 `KumoEngine` ObjC++ facade（纯值类型接口，ADR 0044 语言边界：引擎零 Swift、Swift 零渲染逻辑）；display link 驱动 tick、节流到主队列至多挂一个，场景无变更时跳过 drawable 获取（按需渲染）。inspector 含材质 shader 只读查看器（还原 / 访达显示），⌘Z/⇧⌘Z 走统一撤销栈。
 
 （M3 的 Vulkan 后端已于 M4 移除，项目聚焦 Metal。）
 

@@ -27,6 +27,16 @@ ctest --preset macos-debug
 
 ## Running
 
+**Product app (SwiftUI, recommended)**:
+
+```sh
+open build/macos-debug/apps/kumo/kumo_app.app
+```
+
+Scene tree / viewport (left-drag orbits, scroll zooms) / inspector (transform & material editing, shader viewer, ⌘Z undo) / chat (⌘⇧J, scene + shader assistants) / settings (⌘, — API keys go to the Keychain).
+
+**Dev viewer (GLFW + ImGui)**:
+
 ```sh
 ./build/macos-debug/apps/viewer/viewer                 # loads DamagedHelmet + studio HDR by default
 ./build/macos-debug/apps/viewer/viewer path/to/model.glb --env path/to/env.hdr

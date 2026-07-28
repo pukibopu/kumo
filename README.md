@@ -27,6 +27,16 @@ ctest --preset macos-debug
 
 ## 运行
 
+**产品 app（SwiftUI，推荐）**：
+
+```sh
+open build/macos-debug/apps/kumo/kumo_app.app
+```
+
+场景树 / 视口（左键拖拽旋转、滚轮缩放）/ inspector（变换与材质编辑、shader 查看、⌘Z 撤销）/ 聊天（⌘⇧J，场景与 Shader 双助手）/ 设置（⌘,，API key 入 Keychain）。
+
+**开发 viewer（GLFW + ImGui）**：
+
 ```sh
 ./build/macos-debug/apps/viewer/viewer                 # 默认加载 DamagedHelmet + 摄影棚 HDR
 ./build/macos-debug/apps/viewer/viewer path/to/model.glb --env path/to/env.hdr

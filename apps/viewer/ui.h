@@ -1,12 +1,10 @@
 #pragma once
 
-#include <kumo/agent/confirmation_gate.h>
-#include <kumo/agent/session.h>
+#include <kumo/facade/engine_runtime.h>
 #include <kumo/rhi/rhi.h>
 #include <kumo/scene/light.h>
 
 #include <array>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -48,24 +46,12 @@ struct ChatPanel {
     bool scrollToBottom = false;
 };
 
-// Provider retry callbacks land here from the worker thread; the panel shows
-// the text while the session waits on the model (ADR 0030).
-class RetryNotice {
-public:
-    void set(std::string text);
-    void clear();
-    std::string get() const;
-
-private:
-    mutable std::mutex mutex_;
-    std::string text_;
-};
-
 // One 助手 window with a 场景/Shader tab pair; either session may be null (the
 // tab then shows its configuration hint).
 void drawAgentPanels(ChatPanel& scenePanel, kumo::agent::AgentSession* sceneSession,
-                     RetryNotice* sceneNotice, ChatPanel& shaderPanel,
-                     kumo::agent::AgentSession* shaderSession, RetryNotice* shaderNotice);
+                     kumo::facade::EngineRuntime::Notice* sceneNotice, ChatPanel& shaderPanel,
+                     kumo::agent::AgentSession* shaderSession,
+                     kumo::facade::EngineRuntime::Notice* shaderNotice);
 
 // Full, untruncated record of every tool call and result (ADR 0022). `shaderPanel`
 // may be null; when non-null and it holds tool entries, its log is appended

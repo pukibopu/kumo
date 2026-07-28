@@ -61,7 +61,8 @@ void wrappedLine(const std::string& line) {
 // Window body only (transcript child + status line + input row); the caller
 // owns Begin/End so multiple sessions can share one window as tabs. Render-only:
 // the caller has already drained the session's transcript into panel.entries.
-void drawChatContents(ChatPanel& panel, AgentSession* session, RetryNotice* notice) {
+void drawChatContents(ChatPanel& panel, AgentSession* session,
+                      kumo::facade::EngineRuntime::Notice* notice) {
     using Entry = AgentSession::TranscriptEntry;
 
     const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f;
@@ -258,24 +259,10 @@ void drawMaterialPanel(float& metallic, float& roughness) {
     ImGui::End();
 }
 
-void RetryNotice::set(std::string text) {
-    std::lock_guard lock(mutex_);
-    text_ = std::move(text);
-}
-
-void RetryNotice::clear() {
-    std::lock_guard lock(mutex_);
-    text_.clear();
-}
-
-std::string RetryNotice::get() const {
-    std::lock_guard lock(mutex_);
-    return text_;
-}
-
 void drawAgentPanels(ChatPanel& scenePanel, kumo::agent::AgentSession* sceneSession,
-                     RetryNotice* sceneNotice, ChatPanel& shaderPanel,
-                     kumo::agent::AgentSession* shaderSession, RetryNotice* shaderNotice) {
+                     kumo::facade::EngineRuntime::Notice* sceneNotice, ChatPanel& shaderPanel,
+                     kumo::agent::AgentSession* shaderSession,
+                     kumo::facade::EngineRuntime::Notice* shaderNotice) {
     drainInto(scenePanel, sceneSession);
     drainInto(shaderPanel, shaderSession);
 

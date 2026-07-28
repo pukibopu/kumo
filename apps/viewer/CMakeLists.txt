@@ -12,7 +12,8 @@ kumo_target_warnings(viewer)
 
 if(APPLE)
     set_source_files_properties(metal_layer_glue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(viewer PRIVATE kumo_rhi kumo_shaderc kumo_scene kumo_asset
-        kumo_renderer kumo_agent imgui_lib kumo_rhi_metal nlohmann_json::nlohmann_json
-        "-framework Cocoa")
+    # kumo_facade transitively provides kumo_rhi/kumo_shaderc/kumo_scene/kumo_asset/
+    # kumo_renderer/kumo_agent (all PUBLIC in its own link); kumo_rhi_metal is the
+    # concrete Device the shell creates, which facade itself stays agnostic of.
+    target_link_libraries(viewer PRIVATE kumo_facade kumo_rhi_metal imgui_lib "-framework Cocoa")
 endif()

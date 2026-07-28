@@ -1,1 +1,12 @@
 add_subdirectory(viewer)
+
+if(APPLE)
+    include(CheckLanguage)
+    check_language(Swift)
+    if(CMAKE_Swift_COMPILER)
+        enable_language(Swift)
+        add_subdirectory(kumo)
+    else()
+        message(STATUS "Swift not found; kumo app skipped")
+    endif()
+endif()

@@ -1,8 +1,10 @@
 #include <kumo/agent/session.h>
 
 #include <kumo/agent/confirmation_gate.h>
+#include <kumo/agent/summary.h>
 #include <kumo/core/main_thread_queue.h>
 
+#include <algorithm>
 #include <chrono>
 #include <format>
 #include <utility>
@@ -74,6 +76,7 @@ void AgentSession::workerLoop() {
             hasPending_ = false;
         }
         runTurn(std::move(userText));
+        compressIfNeeded();
         {
             std::lock_guard lock(mutex_);
             busy_ = false;
@@ -167,6 +170,37 @@ void AgentSession::runTurn(std::string userText) {
             toolMessage.toolResults.push_back(std::move(toolResult));
         }
         history_.push_back(std::move(toolMessage));
+    }
+}
+
+void AgentSession::compressIfNeeded() {
+    if (desc_.summaryThresholdTokens == 0 || abort_.load()) {
+        return;
+    }
+    if (!shouldCompress(history_, desc_.summaryThresholdTokens)) {
+        return;
+    }
+    const auto keep = static_cast<std::size_t>(std::max(desc_.keepRecentMessages, 0));
+    const std::size_t cutoff = compressionCutoff(history_, keep);
+    if (cutoff == 0) {
+        return;
+    }
+
+    setStatus(Status::WaitingForModel);
+    const ChatRequest request = makeSummaryRequest(
+        std::span<const ChatMessage>(history_.data(), cutoff), desc_.model, desc_.maxTokens);
+    const CompleteResult result = provider_.complete(request);
+    if (abort_.load()) {
+        return;
+    }
+    if (result.has_value() && !result->text.empty()) {
+        history_.erase(history_.begin(), history_.begin() + static_cast<std::ptrdiff_t>(cutoff));
+        history_.insert(history_.begin(), makeSummaryMessage(result->text));
+        pushEntry({.kind = TranscriptEntry::Kind::Info,
+                   .text = std::format("compressed {} earlier messages into a summary", cutoff)});
+    } else {
+        pushEntry({.kind = TranscriptEntry::Kind::Info,
+                   .text = "history compression failed; keeping full history"});
     }
 }
 

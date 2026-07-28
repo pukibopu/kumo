@@ -9,6 +9,7 @@
 #include <kumo/agent/tool_registry.h>
 #include <kumo/asset/asset.h>
 #include <kumo/asset/primitives.h>
+#include <kumo/core/file.h>
 #include <kumo/core/file_watcher.h>
 #include <kumo/core/log.h>
 #include <kumo/core/main_thread_queue.h>
@@ -17,6 +18,7 @@
 #include <kumo/renderer/ibl.h>
 #include <kumo/rhi/rhi.h>
 #include <kumo/rhi_metal/rhi_metal.h>
+#include <kumo/scene/persistence.h>
 #include <kumo/scene/scene.h>
 
 #define GLFW_INCLUDE_NONE
@@ -30,6 +32,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -112,6 +115,8 @@ struct AppInput {
     bool rotating = false;
     float pendingScroll = 0.0f;
     bool screenshotKeyDown = false;
+    bool saveKeyDown = false;
+    bool loadKeyDown = false;
 };
 
 void onScroll(GLFWwindow* window, double, double yOffset) {
@@ -256,6 +261,134 @@ void saveScreenshot(rhi::Device& device, rhi::Texture& texture, int frame) {
     }
 }
 
+using MaterialParams = renderer::ForwardRenderer::MaterialParams;
+
+scene::SavedMaterial toSavedMaterial(const MaterialParams& params) {
+    scene::SavedMaterial saved;
+    std::copy(std::begin(params.baseColor), std::end(params.baseColor), saved.baseColor);
+    saved.metallic = params.metallic;
+    saved.roughness = params.roughness;
+    std::copy(std::begin(params.emissive), std::end(params.emissive), saved.emissive);
+    return saved;
+}
+
+MaterialParams toMaterialParams(const scene::SavedMaterial& saved) {
+    MaterialParams params;
+    std::copy(std::begin(saved.baseColor), std::end(saved.baseColor), params.baseColor);
+    params.metallic = saved.metallic;
+    params.roughness = saved.roughness;
+    std::copy(std::begin(saved.emissive), std::end(saved.emissive), params.emissive);
+    return params;
+}
+
+constexpr const char* kSceneFileName = "kumo_scene.json";
+
+void saveSceneFile(const scene::Scene& world, const std::filesystem::path& modelPath,
+                   const renderer::ForwardRenderer& renderer) {
+    const scene::MaterialLookup lookup =
+        [&renderer](std::int32_t materialIndex) -> std::optional<scene::SavedMaterial> {
+        if (materialIndex < 0) {
+            return std::nullopt;
+        }
+        const MaterialParams* params =
+            renderer.materialParams(static_cast<std::uint32_t>(materialIndex));
+        return params != nullptr ? std::make_optional(toSavedMaterial(*params)) : std::nullopt;
+    };
+    const std::string json = scene::saveSceneJson(world, modelPath.string(), lookup);
+    const std::filesystem::path path = std::filesystem::current_path() / kSceneFileName;
+    std::ofstream out(path, std::ios::binary);
+    out << json;
+    if (!out) {
+        logError("scene save failed: {}", path.string());
+        return;
+    }
+    logInfo("scene saved: {}", path.string());
+}
+
+// Rebuilds procedural entities exactly like scene_add_entity does; glTF-sourced
+// entities keep their saved mesh/material indices, validated against the
+// currently loaded scene since the format does not persist mesh/texture data.
+void loadSceneFile(scene::Scene& world, renderer::ForwardRenderer& renderer,
+                   const std::filesystem::path& modelPath) {
+    const std::filesystem::path path = std::filesystem::current_path() / kSceneFileName;
+    if (!std::filesystem::exists(path)) {
+        // Expected state, not an error: nothing has been saved yet.
+        logInfo("no saved scene at {} (press K to save one first)", path.string());
+        return;
+    }
+    const auto text = readTextFile(path);
+    if (!text.has_value()) {
+        logError("scene load failed: {}", text.error());
+        return;
+    }
+    const auto parsed = scene::parseSceneJson(*text);
+    if (!parsed.has_value()) {
+        logError("scene load failed: {}", parsed.error());
+        return;
+    }
+    const scene::SavedScene& saved = *parsed;
+    if (saved.modelPath != modelPath.string()) {
+        logInfo("scene load: saved model '{}' differs from the current '{}'; proceeding anyway",
+                saved.modelPath, modelPath.string());
+    }
+
+    world.entities.clear();
+    world.clearLights();
+    for (std::size_t i = 0; i < saved.lights.size(); ++i) {
+        if (!world.addLight(saved.lights[i])) {
+            logError("scene load: light budget exhausted; dropping {} of {} lights",
+                     saved.lights.size() - i, saved.lights.size());
+            break;
+        }
+    }
+    world.camera = saved.camera;
+
+    std::size_t loaded = 0;
+    for (const scene::SavedEntity& savedEntity : saved.entities) {
+        scene::Entity entity = savedEntity.entity;
+        if (!entity.primitive.empty()) {
+            asset::MeshData mesh;
+            const float half = entity.primitiveSize * 0.5f;
+            if (entity.primitive == "sphere") {
+                mesh = asset::makeSphere(half);
+            } else if (entity.primitive == "cube") {
+                mesh = asset::makeCube(half);
+            } else if (entity.primitive == "plane") {
+                mesh = asset::makePlane(half);
+            } else {
+                logError("scene load: unknown primitive '{}' on entity '{}', skipping",
+                         entity.primitive, entity.name);
+                continue;
+            }
+            const MaterialParams material = savedEntity.material.has_value()
+                                                ? toMaterialParams(*savedEntity.material)
+                                                : MaterialParams{};
+            const std::int32_t meshIndex = renderer.addMesh(mesh);
+            const std::int32_t materialIndex = renderer.addMaterial(material);
+            if (meshIndex < 0 || materialIndex < 0) {
+                logError("scene load: gpu upload failed for entity '{}', skipping", entity.name);
+                continue;
+            }
+            entity.meshIndex = meshIndex;
+            entity.materialIndex = materialIndex;
+        } else {
+            if (entity.meshIndex < 0 ||
+                static_cast<std::uint32_t>(entity.meshIndex) >= renderer.meshCount()) {
+                logError("scene load: mesh index {} out of range for entity '{}', skipping",
+                         entity.meshIndex, entity.name);
+                continue;
+            }
+            if (savedEntity.material.has_value() && entity.materialIndex >= 0) {
+                renderer.setMaterialParams(static_cast<std::uint32_t>(entity.materialIndex),
+                                           toMaterialParams(*savedEntity.material));
+            }
+        }
+        world.entities.insert(entity);
+        ++loaded;
+    }
+    logInfo("scene loaded: {} entities, {} lights", loaded, saved.lights.size());
+}
+
 } // namespace
 
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
@@ -382,6 +515,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         sessionDesc.model = config->sceneModel;
         sessionDesc.systemPrompt = kSceneSystemPrompt;
         sessionDesc.maxTokens = config->maxTokens;
+        sessionDesc.summaryThresholdTokens = config->summaryThresholdTokens;
         // The key never reaches the log (ADR 0012).
         kumo::logInfo("agent provider ready: {} {} at {}", openAi ? "openai" : "anthropic",
                       config->sceneModel, config->baseUrl);
@@ -466,6 +600,22 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
             sDown && !input.screenshotKeyDown && !ImGui::GetIO().WantCaptureKeyboard;
         input.screenshotKeyDown = sDown;
 
+        const bool kDown = glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS;
+        const bool saveRequested =
+            kDown && !input.saveKeyDown && !ImGui::GetIO().WantCaptureKeyboard;
+        input.saveKeyDown = kDown;
+        if (saveRequested) {
+            saveSceneFile(world, modelPath, renderer);
+        }
+
+        const bool lDown = glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS;
+        const bool loadRequested =
+            lDown && !input.loadKeyDown && !ImGui::GetIO().WantCaptureKeyboard;
+        input.loadKeyDown = lDown;
+        if (loadRequested) {
+            loadSceneFile(world, renderer, modelPath);
+        }
+
         rhi::Ptr<rhi::CommandEncoder> encoder = device->queue().createCommandEncoder();
         rhi::Texture* target = surface->acquireNextTexture();
         if (target != nullptr) {
@@ -476,6 +626,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
                 ui::drawMaterialPanel(overrideMetallic, overrideRoughness);
                 ui::drawChatPanel(chatPanel, session.has_value() ? &*session : nullptr,
                                   &retryNotice);
+                ui::drawToolLogPanel(chatPanel);
                 ui::drawConfirmDialog(confirmGate.has_value() ? &*confirmGate : nullptr);
                 ui::endFrame(*encoder, pass);
             });

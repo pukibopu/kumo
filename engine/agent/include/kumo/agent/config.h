@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -21,6 +22,8 @@ struct AgentConfig {
     std::uint32_t maxTokens = 4096;
     std::chrono::seconds requestTimeout{120};
     bool confirmDestructive = false;
+    // agents.summary_threshold_tokens; 0 disables history compression.
+    std::size_t summaryThresholdTokens = 8000;
 
     // False leaves rendering fully functional with the chat panel disabled and
     // a configuration hint (ADR 0012).

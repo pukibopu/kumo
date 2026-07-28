@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <mutex>
@@ -40,10 +41,13 @@ public:
         std::string systemPrompt;
         std::uint32_t maxTokens = 4096;
         int maxToolRounds = 16;
+        // 0 disables history compression.
+        std::size_t summaryThresholdTokens = 0;
+        int keepRecentMessages = 8;
     };
 
     struct TranscriptEntry {
-        enum class Kind { User, Assistant, ToolCall, ToolResult, Error };
+        enum class Kind { User, Assistant, ToolCall, ToolResult, Error, Info };
         Kind kind = Kind::Assistant;
         // User/Assistant text or the error message.
         std::string text;
@@ -70,6 +74,7 @@ public:
 private:
     void workerLoop();
     void runTurn(std::string userText);
+    void compressIfNeeded();
     ToolResult executeToolCall(const ToolCall& call);
     std::string awaitJson(std::future<std::string> future);
     void pushEntry(TranscriptEntry entry);

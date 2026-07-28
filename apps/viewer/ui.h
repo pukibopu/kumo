@@ -66,6 +66,9 @@ private:
 // may be null.
 void drawChatPanel(ChatPanel& panel, kumo::agent::AgentSession* session, RetryNotice* notice);
 
+// Full, untruncated record of every tool call and result (ADR 0022).
+void drawToolLogPanel(const ChatPanel& panel);
+
 // Modal for a destructive tool awaiting approval; `gate` may be null.
 void drawConfirmDialog(kumo::agent::ConfirmationGate* gate);
 

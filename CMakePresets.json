@@ -4,7 +4,8 @@
         {
             "name": "base",
             "hidden": true,
-            "binaryDir": "${sourceDir}/build/${presetName}"
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": { "CMAKE_OSX_ARCHITECTURES": "arm64" }
         },
         {
             "name": "macos-debug",

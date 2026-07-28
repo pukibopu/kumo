@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CoreVideo
+import os
 import QuartzCore
 import SwiftUI
 
@@ -17,7 +18,10 @@ final class EngineHolder: ObservableObject {
 final class KumoMetalView: NSView {
     private var engine: KumoEngine?
     private var displayLink: CVDisplayLink?
-    private var frameInFlight = false
+    // Checked on the display-link thread so at most one tick is ever queued on
+    // the main runloop; unguarded dispatching floods it at vsync rate and
+    // starves UI event handling.
+    private let tickQueued = OSAllocatedUnfairLock(initialState: false)
     var holder: EngineHolder?
 
     override init(frame frameRect: NSRect) {
@@ -62,7 +66,14 @@ final class KumoMetalView: NSView {
         guard let link else { return }
         CVDisplayLinkSetOutputHandler(link) { [weak self] _, _, _, _, _ in
             guard let self else { return kCVReturnSuccess }
-            DispatchQueue.main.async { self.fireFrame() }
+            let shouldDispatch = self.tickQueued.withLock { queued -> Bool in
+                if queued { return false }
+                queued = true
+                return true
+            }
+            if shouldDispatch {
+                DispatchQueue.main.async { self.fireFrame() }
+            }
             return kCVReturnSuccess
         }
         CVDisplayLinkStart(link)
@@ -73,9 +84,8 @@ final class KumoMetalView: NSView {
     // here; this guard drops a callback that outpaces the previous tick
     // instead of letting them pile up on the main queue.
     private func fireFrame() {
-        guard !frameInFlight, let engine else { return }
-        frameInFlight = true
-        defer { frameInFlight = false }
+        defer { tickQueued.withLock { $0 = false } }
+        guard let engine else { return }
         if !engine.tick() {
             stopAndTerminate()
         }

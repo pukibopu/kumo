@@ -358,6 +358,9 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
     if (desc.demoPrimitives) {
         addDemoPrimitives(self->renderer_, self->world_);
     }
+    // Mirrors the shells' pre-loop apply: the orbit camera's own defaults
+    // become the initial view instead of scene::Camera's raw defaults.
+    self->orbit_.apply(self->world_.camera);
 
     // Agent stack. Two registries scope each session to its own tools: the
     // shader assistant gets scene_list (to find entities) plus the shader
@@ -618,8 +621,30 @@ bool EngineRuntime::pump() {
     if (mainQueue_.drain() > 0) {
         markDirty();
     }
+    // Orbit arbitration (ADR 0039): user input wins and is written onto the
+    // scene camera; otherwise the orbit camera adopts whatever the scene
+    // camera holds, so an agent/MCP camera_set (or a scene load, drained
+    // above) is not overwritten on the next drag.
+    if (orbitMoved_) {
+        orbit_.apply(world_.camera);
+        orbitMoved_ = false;
+    } else {
+        orbit_.syncFrom(world_.camera);
+    }
     // The MCP client hung up (stdin closed); the shell should shut down cleanly.
     return !mcpEof_.load();
+}
+
+void EngineRuntime::orbitRotate(float dx, float dy) {
+    orbit_.rotate(dx, dy);
+    orbitMoved_ = true;
+    markDirty();
+}
+
+void EngineRuntime::orbitZoom(float delta) {
+    orbit_.zoom(delta);
+    orbitMoved_ = true;
+    markDirty();
 }
 
 void EngineRuntime::render(rhi::CommandEncoder& encoder, rhi::Texture* output,

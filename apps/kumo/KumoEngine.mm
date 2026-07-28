@@ -335,6 +335,14 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
     _runtime->resize({.width = width, .height = height});
 }
 
+- (void)orbitRotateDX:(float)dx dy:(float)dy {
+    _runtime->orbitRotate(dx, dy);
+}
+
+- (void)orbitZoom:(float)delta {
+    _runtime->orbitZoom(delta);
+}
+
 - (NSArray<KumoEntityInfo*>*)listEntities {
     NSMutableArray<KumoEntityInfo*>* out = [NSMutableArray array];
     for (const facade::EngineRuntime::EntityInfo& entity : _runtime->listEntities()) {

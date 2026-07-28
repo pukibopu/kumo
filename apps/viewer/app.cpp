@@ -4,7 +4,6 @@
 #include <kumo/core/file_watcher.h>
 #include <kumo/core/log.h>
 #include <kumo/facade/engine_runtime.h>
-#include <kumo/math/math.h>
 #include <kumo/rhi/rhi.h>
 #include <kumo/rhi_metal/rhi_metal.h>
 #include <kumo/scene/light.h>
@@ -16,7 +15,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -39,53 +37,7 @@ void configureSurface(rhi::Surface& surface, int width, int height) {
          .format = kSwapchainFormat});
 }
 
-// App-layer camera control (ADR 0039): drag rotates, scroll zooms. The pose is
-// written to the scene camera only on user input; otherwise the controller syncs
-// itself from the camera, so agent camera_set calls are not overwritten.
-struct OrbitController {
-    float yaw = 0.0f;
-    float pitch = 0.15f;
-    float distance = 3.0f;
-    math::float3 target{0.0f, 0.0f, 0.0f};
-
-    void rotate(float dx, float dy) {
-        yaw -= dx * 0.005f;
-        pitch = std::clamp(pitch + dy * 0.005f, -1.5f, 1.5f);
-    }
-
-    void zoom(float scroll) {
-        // The ceiling follows an agent-imported distance so one scroll notch
-        // narrows the range smoothly instead of teleporting back to 20.
-        distance =
-            std::clamp(distance * std::exp(-scroll * 0.12f), 0.5f, std::max(20.0f, distance));
-    }
-
-    void apply(scene::Camera& camera) const {
-        const math::float3 offset{std::cos(pitch) * std::sin(yaw), std::sin(pitch),
-                                  std::cos(pitch) * std::cos(yaw)};
-        camera.position = target + offset * distance;
-        camera.lookAt(target);
-    }
-
-    // Adopts the camera's aim as the new pivot: the target moves onto the view
-    // ray at the previous pivot distance, so the next drag orbits the agent's
-    // framing instead of snapping back to the old target. Imported pitch is
-    // clamped into the range rotate() allows.
-    void syncFrom(const scene::Camera& camera) {
-        const float len = length(camera.position - target);
-        if (len > 1e-4f) {
-            distance = len;
-        }
-        const math::float3 forward = camera.rotation * math::float3(0.0f, 0.0f, -1.0f);
-        target = camera.position + forward * distance;
-        const math::float3 dir = -forward;
-        pitch = std::clamp(std::asin(std::clamp(dir.y, -1.0f, 1.0f)), -1.5f, 1.5f);
-        yaw = std::atan2(dir.x, dir.z);
-    }
-};
-
 struct AppInput {
-    OrbitController orbit;
     double lastCursorX = 0.0;
     double lastCursorY = 0.0;
     bool rotating = false;
@@ -102,13 +54,13 @@ void onScroll(GLFWwindow* window, double, double yOffset) {
     }
 }
 
-// True when the user rotated or zoomed this frame.
-bool updateOrbit(GLFWwindow* window, AppInput& input) {
-    bool moved = false;
+// Cursor tracking, WantCaptureMouse gating and scroll accumulation stay in the
+// shell; rotate/zoom deltas forward to the runtime's orbit camera (ADR 0039),
+// which arbitrates against agent camera_set calls once per frame in pump().
+void updateOrbit(GLFWwindow* window, AppInput& input, facade::EngineRuntime& runtime) {
     if (input.pendingScroll != 0.0f) {
-        input.orbit.zoom(input.pendingScroll);
+        runtime.orbitZoom(input.pendingScroll);
         input.pendingScroll = 0.0f;
-        moved = true;
     }
     const bool wantMouse = ImGui::GetIO().WantCaptureMouse;
     const bool pressed =
@@ -120,14 +72,12 @@ bool updateOrbit(GLFWwindow* window, AppInput& input) {
         const float dx = static_cast<float>(x - input.lastCursorX);
         const float dy = static_cast<float>(y - input.lastCursorY);
         if (dx != 0.0f || dy != 0.0f) {
-            input.orbit.rotate(dx, dy);
-            moved = true;
+            runtime.orbitRotate(dx, dy);
         }
     }
     input.rotating = pressed;
     input.lastCursorX = x;
     input.lastCursorY = y;
-    return moved;
 }
 
 void saveScreenshot(rhi::Device& device, rhi::Texture& texture, int frame) {
@@ -227,7 +177,6 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     }
 
     ui::init(*device, window);
-    input.orbit.apply(runtime->world().camera);
     if (scene::Light* light = runtime->world().light(0)) {
         // The slider defaults define the startup look; from here on the panel
         // applies its own edits and syncFrom mirrors everything else.
@@ -262,11 +211,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
                 {static_cast<std::uint32_t>(fbWidth), static_cast<std::uint32_t>(fbHeight)});
         }
 
-        if (updateOrbit(window, input)) {
-            input.orbit.apply(runtime->world().camera);
-        } else {
-            input.orbit.syncFrom(runtime->world().camera);
-        }
+        updateOrbit(window, input, *runtime);
         // Sliders mirror the light; the panel applies user edits itself in the
         // same frame, so agent light_set changes are never overwritten here.
         if (scene::Light* light = runtime->world().light(0)) {

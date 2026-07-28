@@ -24,6 +24,12 @@ final class KumoMetalView: NSView {
     private let tickQueued = OSAllocatedUnfairLock(initialState: false)
     var holder: EngineHolder?
 
+    // Left-drag orbits the camera, matching the GLFW viewer (ADR 0039); no
+    // modifier handling needed. Tracked in view-local coordinates.
+    private var lastDragLocation: NSPoint = .zero
+
+    override var acceptsFirstResponder: Bool { true }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -104,6 +110,29 @@ final class KumoMetalView: NSView {
         if let displayLink {
             CVDisplayLinkStop(displayLink)
         }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        lastDragLocation = convert(event.locationInWindow, from: nil)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let engine else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        let dx = Float(location.x - lastDragLocation.x)
+        // AppKit y grows upward; the runtime's orbit camera expects GLFW's
+        // y-down convention, so the delta is negated.
+        let dy = Float(-(location.y - lastDragLocation.y))
+        lastDragLocation = location
+        engine.orbitRotateDX(dx, dy: dy)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let engine else { return }
+        // Precise trackpad deltas are ~10-100x a GLFW wheel notch; 0.05 maps
+        // them into roughly the same range as a mouse wheel step.
+        let scale: Float = event.hasPreciseScrollingDeltas ? 0.05 : 1.0
+        engine.orbitZoom(Float(event.scrollingDeltaY) * scale)
     }
 }
 

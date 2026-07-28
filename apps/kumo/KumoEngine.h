@@ -86,6 +86,11 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
 - (BOOL)tick;
 - (void)resizeWidth:(uint32_t)width height:(uint32_t)height;
 
+// Orbit camera input (ADR 0039): dx/dy are in the GLFW convention (y grows
+// downward); AppKit's mouse events are y-up, so the caller flips the sign.
+- (void)orbitRotateDX:(float)dx dy:(float)dy;
+- (void)orbitZoom:(float)delta;
+
 // Scene tree + inspector (ADR 0044).
 - (NSArray<KumoEntityInfo*>*)listEntities;
 - (KumoEntityDetail*)entityDetail:(NSString*)entityId;

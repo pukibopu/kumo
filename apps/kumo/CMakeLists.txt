@@ -15,7 +15,7 @@ target_compile_definitions(kumo_bridge PRIVATE
     KUMO_REPO_DIR="${CMAKE_SOURCE_DIR}")
 kumo_target_warnings(kumo_bridge)
 
-add_executable(kumo_app MACOSX_BUNDLE KumoApp.swift Viewport.swift)
+add_executable(kumo_app MACOSX_BUNDLE KumoApp.swift Viewport.swift Inspector.swift)
 target_compile_options(kumo_app PRIVATE
     "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-import-objc-header \"${CMAKE_CURRENT_SOURCE_DIR}/KumoEngine.h\">")
 target_link_libraries(kumo_app PRIVATE

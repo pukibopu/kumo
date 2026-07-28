@@ -59,15 +59,10 @@ void wrappedLine(const std::string& line) {
 }
 
 // Window body only (transcript child + status line + input row); the caller
-// owns Begin/End so multiple sessions can share one window as tabs.
+// owns Begin/End so multiple sessions can share one window as tabs. Render-only:
+// the caller has already drained the session's transcript into panel.entries.
 void drawChatContents(ChatPanel& panel, AgentSession* session, RetryNotice* notice) {
     using Entry = AgentSession::TranscriptEntry;
-    if (session != nullptr) {
-        for (Entry& entry : session->drainTranscript()) {
-            panel.entries.push_back(std::move(entry));
-            panel.scrollToBottom = true;
-        }
-    }
 
     const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f;
     ImGui::BeginChild("##transcript", {0.0f, -footer});
@@ -161,6 +156,20 @@ void drawToolLog(const ChatPanel& panel) {
         } else if (entry.kind == Entry::Kind::ToolResult) {
             wrappedLine(std::format("← {} {}", entry.toolName, entry.json));
         }
+    }
+}
+
+// Drains a session's transcript into its panel unconditionally, regardless of
+// which tab is active: the tool log (ADR 0022) must stay live for the inactive
+// session too, and an undrained transcript_ would otherwise accumulate forever.
+void drainInto(ChatPanel& panel, AgentSession* session) {
+    using Entry = AgentSession::TranscriptEntry;
+    if (session == nullptr) {
+        return;
+    }
+    for (Entry& entry : session->drainTranscript()) {
+        panel.entries.push_back(std::move(entry));
+        panel.scrollToBottom = true;
     }
 }
 
@@ -267,6 +276,9 @@ std::string RetryNotice::get() const {
 void drawAgentPanels(ChatPanel& scenePanel, kumo::agent::AgentSession* sceneSession,
                      RetryNotice* sceneNotice, ChatPanel& shaderPanel,
                      kumo::agent::AgentSession* shaderSession, RetryNotice* shaderNotice) {
+    drainInto(scenePanel, sceneSession);
+    drainInto(shaderPanel, shaderSession);
+
     ImGui::SetNextWindowPos({960.0f, 10.0f}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize({310.0f, 500.0f}, ImGuiCond_FirstUseEver);
     ImGui::Begin("助手");

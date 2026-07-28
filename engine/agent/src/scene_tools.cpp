@@ -502,8 +502,22 @@ json parseArgs(std::string_view argsJson) {
 
 } // namespace
 
+void registerSceneListTool(ToolRegistry& registry, SceneToolContext context) {
+    KUMO_ASSERT(context.scene != nullptr);
+
+    registry.add({.name = "scene_list",
+                  .description = "List the scene: every entity with id, transform, world-space "
+                                 "AABB and material factors, plus the camera and lights. Call "
+                                 "this before spatial reasoning or edits.",
+                  .parametersSchema = R"({"type":"object","properties":{}})",
+                  .destructive = false},
+                 [context](std::string_view) { return sceneList(context); });
+}
+
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
     KUMO_ASSERT(context.scene != nullptr);
+
+    registerSceneListTool(registry, context);
 
     auto add = [&](const char* name, const char* description, const char* schema, bool destructive,
                    auto handler) {
@@ -515,14 +529,6 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
                          return handler(context, parseArgs(argsJson));
                      });
     };
-
-    registry.add({.name = "scene_list",
-                  .description = "List the scene: every entity with id, transform, world-space "
-                                 "AABB and material factors, plus the camera and lights. Call "
-                                 "this before spatial reasoning or edits.",
-                  .parametersSchema = R"({"type":"object","properties":{}})",
-                  .destructive = false},
-                 [context](std::string_view) { return sceneList(context); });
 
     add("scene_add_entity",
         "Add a procedural primitive entity to the scene; returns its entity_id.",

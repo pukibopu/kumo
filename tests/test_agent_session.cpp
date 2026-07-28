@@ -306,6 +306,43 @@ TEST_CASE("ConfirmationGate ignores decisions for prompts it is not showing") {
     CHECK(!gate.pending().has_value());
 }
 
+TEST_CASE("ConfirmationGate queues concurrent askers and resolves each by its own id") {
+    ConfirmationGate gate;
+    std::atomic<bool> abortFlag{false};
+    bool firstApproved = true;
+    bool secondApproved = false;
+    std::thread firstAsker([&] { firstApproved = gate.ask("nuke_a", "{}", abortFlag); });
+
+    REQUIRE(waitFor([&] { return gate.pending().has_value(); }));
+    const std::uint64_t firstId = gate.pending()->id;
+    CHECK(gate.pending()->toolName == "nuke_a");
+
+    std::thread secondAsker([&] { secondApproved = gate.ask("nuke_b", "{}", abortFlag); });
+    // The second ask must queue behind the first rather than clobber it: the
+    // prompt on screen stays the first one while both askers wait.
+    for (int i = 0; i < 20; ++i) {
+        REQUIRE(gate.pending().has_value());
+        CHECK(gate.pending()->id == firstId);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    gate.resolve(firstId, false);
+    firstAsker.join();
+    CHECK(!firstApproved);
+
+    // Deciding the first prompt must not touch the second: it only now becomes
+    // the one showing, and only its own id resolves it.
+    REQUIRE(waitFor(
+        [&] { return gate.pending().has_value() && gate.pending()->toolName == "nuke_b"; }));
+    const std::uint64_t secondId = gate.pending()->id;
+    CHECK(secondId != firstId);
+
+    gate.resolve(secondId, true);
+    secondAsker.join();
+    CHECK(secondApproved);
+    CHECK(!gate.pending().has_value());
+}
+
 TEST_CASE("AgentSession destruction unblocks a worker waiting on tool work") {
     MainThreadQueue queue;
     ToolRegistry registry = echoRegistry();

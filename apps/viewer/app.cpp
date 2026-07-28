@@ -516,10 +516,14 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
 
     // Agent stack. Declared after world/renderer and destroyed before them: the
     // session destructors cancel queued tool work and join their workers while
-    // the state the tools touch is still alive.
+    // the state the tools touch is still alive. Two registries scope each
+    // session to its own tools: the shader assistant gets scene_list (to find
+    // entities) plus the shader tools, but not the six scene-editing tools.
     kumo::MainThreadQueue mainQueue;
-    agent::ToolRegistry toolRegistry;
-    agent::registerSceneTools(toolRegistry, {.scene = &world, .renderer = &renderer});
+    agent::ToolRegistry sceneToolRegistry;
+    agent::ToolRegistry shaderToolRegistry;
+    agent::registerSceneTools(sceneToolRegistry, {.scene = &world, .renderer = &renderer});
+    agent::registerSceneListTool(shaderToolRegistry, {.scene = &world, .renderer = &renderer});
     agent::ShaderToolContext shaderTools;
     shaderTools.scene = &world;
     shaderTools.setShader = [&renderer](std::uint32_t index, std::string_view source) {
@@ -530,7 +534,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     };
     shaderTools.templatePath = std::filesystem::path(KUMO_SHADER_DIR) / "pbr.frag";
     shaderTools.generatedDir = std::filesystem::path(KUMO_SHADER_DIR) / "generated";
-    agent::registerShaderTools(toolRegistry, shaderTools);
+    agent::registerShaderTools(shaderToolRegistry, shaderTools);
 
     ui::RetryNotice sceneRetryNotice;
     ui::RetryNotice shaderRetryNotice;
@@ -587,11 +591,11 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         confirmGate.emplace();
     }
     if (sceneProvider != nullptr) {
-        sceneSession.emplace(*sceneProvider, toolRegistry, mainQueue,
+        sceneSession.emplace(*sceneProvider, sceneToolRegistry, mainQueue,
                              confirmGate.has_value() ? &*confirmGate : nullptr, sceneDesc);
     }
     if (shaderProvider != nullptr) {
-        shaderSession.emplace(*shaderProvider, toolRegistry, mainQueue,
+        shaderSession.emplace(*shaderProvider, shaderToolRegistry, mainQueue,
                               confirmGate.has_value() ? &*confirmGate : nullptr, shaderDesc);
     }
 

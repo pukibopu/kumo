@@ -48,6 +48,14 @@ TEST_CASE("scene tools register all seven with object schemas") {
     CHECK(!f.registry.find("scene_add_entity")->destructive);
 }
 
+TEST_CASE("registerSceneListTool registers exactly scene_list") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    registerSceneListTool(registry, {.scene = &scene, .renderer = nullptr});
+    REQUIRE(registry.defs().size() == 1);
+    CHECK(registry.defs()[0].name == "scene_list");
+}
+
 TEST_CASE("scene_add_entity inserts an entity and returns its id") {
     Fixture f;
     const json result = f.invoke(

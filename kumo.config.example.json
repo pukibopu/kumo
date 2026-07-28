@@ -8,8 +8,8 @@
         "request_timeout_seconds": 120
     },
     "agents": {
-        "scene": { "model": "" },
-        "shader": { "model": "" },
+        "scene": { "type": "", "base_url": "", "api_key": "", "model": "" },
+        "shader": { "type": "", "base_url": "", "api_key": "", "model": "" },
         "confirm_destructive": false,
         "summary_threshold_tokens": 8000
     }

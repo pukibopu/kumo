@@ -11,6 +11,7 @@ add_executable(kumo_tests
     test_shader_snapshots.cpp
     test_renderer_compat.cpp
     test_agent_tool_registry.cpp
+    test_agent_mcp_server.cpp
     test_agent_scene_tools.cpp
     test_agent_shader_tools.cpp
     test_agent_session.cpp

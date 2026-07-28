@@ -58,6 +58,121 @@ void wrappedLine(const std::string& line) {
     ImGui::PopTextWrapPos();
 }
 
+// Window body only (transcript child + status line + input row); the caller
+// owns Begin/End so multiple sessions can share one window as tabs. Render-only:
+// the caller has already drained the session's transcript into panel.entries.
+void drawChatContents(ChatPanel& panel, AgentSession* session, RetryNotice* notice) {
+    using Entry = AgentSession::TranscriptEntry;
+
+    const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f;
+    ImGui::BeginChild("##transcript", {0.0f, -footer});
+    for (const Entry& entry : panel.entries) {
+        switch (entry.kind) {
+        case Entry::Kind::User:
+            wrappedLine(std::format("你: {}", entry.text));
+            break;
+        case Entry::Kind::Assistant:
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 210, 255, 255));
+            wrappedLine(std::format("助手: {}", entry.text));
+            ImGui::PopStyleColor();
+            break;
+        case Entry::Kind::ToolCall:
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255));
+            wrappedLine(std::format("→ {} {}", entry.toolName, entry.json));
+            ImGui::PopStyleColor();
+            break;
+        case Entry::Kind::ToolResult:
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 170, 120, 255));
+            wrappedLine(std::format("← {} {}", entry.toolName, entry.json));
+            ImGui::PopStyleColor();
+            break;
+        case Entry::Kind::Error:
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(240, 110, 110, 255));
+            wrappedLine(std::format("错误: {}", entry.text));
+            ImGui::PopStyleColor();
+            break;
+        case Entry::Kind::Info:
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255));
+            wrappedLine(std::format("· {}", entry.text));
+            ImGui::PopStyleColor();
+            break;
+        }
+    }
+    if (panel.scrollToBottom) {
+        ImGui::SetScrollHereY(1.0f);
+        panel.scrollToBottom = false;
+    }
+    ImGui::EndChild();
+
+    if (session == nullptr) {
+        ImGui::TextWrapped("未配置模型：在 kumo.config.json 填写 provider（参考 "
+                           "kumo.config.example.json），或用 --offline 运行离线演示脚本。");
+    } else {
+        const AgentSession::Status status = session->status();
+        std::string statusLine = statusText(status);
+        if (notice != nullptr) {
+            if (status == AgentSession::Status::WaitingForModel) {
+                if (const std::string retry = notice->get(); !retry.empty()) {
+                    statusLine = retry;
+                }
+            } else {
+                notice->clear();
+            }
+        }
+        ImGui::TextUnformatted(statusLine.c_str());
+        const bool canSend = !session->busy();
+        ImGui::BeginDisabled(!canSend);
+        ImGui::SetNextItemWidth(-60.0f);
+        bool send = ImGui::InputText("##input", panel.input.data(), panel.input.size(),
+                                     ImGuiInputTextFlags_EnterReturnsTrue);
+        if (send) {
+            // EnterReturnsTrue clears the active id; without this every message
+            // would need a mouse re-click on the input box.
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+        ImGui::SameLine();
+        send = ImGui::Button("发送") || send;
+        ImGui::EndDisabled();
+        if (send && canSend && panel.input[0] != '\0') {
+            if (session->submit(panel.input.data())) {
+                panel.input[0] = '\0';
+            }
+        }
+    }
+}
+
+bool hasToolEntries(const ChatPanel& panel) {
+    using Entry = AgentSession::TranscriptEntry;
+    return std::any_of(panel.entries.begin(), panel.entries.end(), [](const Entry& entry) {
+        return entry.kind == Entry::Kind::ToolCall || entry.kind == Entry::Kind::ToolResult;
+    });
+}
+
+void drawToolLog(const ChatPanel& panel) {
+    using Entry = AgentSession::TranscriptEntry;
+    for (const Entry& entry : panel.entries) {
+        if (entry.kind == Entry::Kind::ToolCall) {
+            wrappedLine(std::format("→ {} {}", entry.toolName, entry.json));
+        } else if (entry.kind == Entry::Kind::ToolResult) {
+            wrappedLine(std::format("← {} {}", entry.toolName, entry.json));
+        }
+    }
+}
+
+// Drains a session's transcript into its panel unconditionally, regardless of
+// which tab is active: the tool log (ADR 0022) must stay live for the inactive
+// session too, and an undrained transcript_ would otherwise accumulate forever.
+void drainInto(ChatPanel& panel, AgentSession* session) {
+    using Entry = AgentSession::TranscriptEntry;
+    if (session == nullptr) {
+        return;
+    }
+    for (Entry& entry : session->drainTranscript()) {
+        panel.entries.push_back(std::move(entry));
+        panel.scrollToBottom = true;
+    }
+}
+
 } // namespace
 
 void init(kumo::rhi::Device& device, GLFWwindow* window) {
@@ -158,108 +273,44 @@ std::string RetryNotice::get() const {
     return text_;
 }
 
-void drawChatPanel(ChatPanel& panel, AgentSession* session, RetryNotice* notice) {
-    using Entry = AgentSession::TranscriptEntry;
-    if (session != nullptr) {
-        for (Entry& entry : session->drainTranscript()) {
-            panel.entries.push_back(std::move(entry));
-            panel.scrollToBottom = true;
-        }
-    }
+void drawAgentPanels(ChatPanel& scenePanel, kumo::agent::AgentSession* sceneSession,
+                     RetryNotice* sceneNotice, ChatPanel& shaderPanel,
+                     kumo::agent::AgentSession* shaderSession, RetryNotice* shaderNotice) {
+    drainInto(scenePanel, sceneSession);
+    drainInto(shaderPanel, shaderSession);
 
     ImGui::SetNextWindowPos({960.0f, 10.0f}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize({310.0f, 500.0f}, ImGuiCond_FirstUseEver);
     ImGui::Begin("助手");
-
-    const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f;
-    ImGui::BeginChild("##transcript", {0.0f, -footer});
-    for (const Entry& entry : panel.entries) {
-        switch (entry.kind) {
-        case Entry::Kind::User:
-            wrappedLine(std::format("你: {}", entry.text));
-            break;
-        case Entry::Kind::Assistant:
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 210, 255, 255));
-            wrappedLine(std::format("助手: {}", entry.text));
-            ImGui::PopStyleColor();
-            break;
-        case Entry::Kind::ToolCall:
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255));
-            wrappedLine(std::format("→ {} {}", entry.toolName, entry.json));
-            ImGui::PopStyleColor();
-            break;
-        case Entry::Kind::ToolResult:
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 170, 120, 255));
-            wrappedLine(std::format("← {} {}", entry.toolName, entry.json));
-            ImGui::PopStyleColor();
-            break;
-        case Entry::Kind::Error:
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(240, 110, 110, 255));
-            wrappedLine(std::format("错误: {}", entry.text));
-            ImGui::PopStyleColor();
-            break;
-        case Entry::Kind::Info:
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255));
-            wrappedLine(std::format("· {}", entry.text));
-            ImGui::PopStyleColor();
-            break;
+    if (ImGui::BeginTabBar("##agents")) {
+        if (ImGui::BeginTabItem("场景")) {
+            drawChatContents(scenePanel, sceneSession, sceneNotice);
+            ImGui::EndTabItem();
         }
-    }
-    if (panel.scrollToBottom) {
-        ImGui::SetScrollHereY(1.0f);
-        panel.scrollToBottom = false;
-    }
-    ImGui::EndChild();
-
-    if (session == nullptr) {
-        ImGui::TextWrapped("未配置模型：在 kumo.config.json 填写 provider（参考 "
-                           "kumo.config.example.json），或用 --offline 运行离线演示脚本。");
-    } else {
-        const AgentSession::Status status = session->status();
-        std::string statusLine = statusText(status);
-        if (notice != nullptr) {
-            if (status == AgentSession::Status::WaitingForModel) {
-                if (const std::string retry = notice->get(); !retry.empty()) {
-                    statusLine = retry;
-                }
+        if (ImGui::BeginTabItem("Shader")) {
+            if (shaderSession == nullptr) {
+                ImGui::TextWrapped(
+                    "未配置 shader 模型：在 kumo.config.json 的 agents.shader 填 model（云端如 "
+                    "OpenAI 需同时填 base_url 与 api_key）。");
             } else {
-                notice->clear();
+                drawChatContents(shaderPanel, shaderSession, shaderNotice);
             }
+            ImGui::EndTabItem();
         }
-        ImGui::TextUnformatted(statusLine.c_str());
-        const bool canSend = !session->busy();
-        ImGui::BeginDisabled(!canSend);
-        ImGui::SetNextItemWidth(-60.0f);
-        bool send = ImGui::InputText("##input", panel.input.data(), panel.input.size(),
-                                     ImGuiInputTextFlags_EnterReturnsTrue);
-        if (send) {
-            // EnterReturnsTrue clears the active id; without this every message
-            // would need a mouse re-click on the input box.
-            ImGui::SetKeyboardFocusHere(-1);
-        }
-        ImGui::SameLine();
-        send = ImGui::Button("发送") || send;
-        ImGui::EndDisabled();
-        if (send && canSend && panel.input[0] != '\0') {
-            if (session->submit(panel.input.data())) {
-                panel.input[0] = '\0';
-            }
-        }
+        ImGui::EndTabBar();
     }
     ImGui::End();
 }
 
-void drawToolLogPanel(const ChatPanel& panel) {
-    using Entry = AgentSession::TranscriptEntry;
+void drawToolLogPanel(const ChatPanel& scenePanel, const ChatPanel* shaderPanel) {
     ImGui::SetNextWindowPos({960.0f, 520.0f}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize({310.0f, 190.0f}, ImGuiCond_FirstUseEver);
     ImGui::Begin("工具日志");
-    for (const Entry& entry : panel.entries) {
-        if (entry.kind == Entry::Kind::ToolCall) {
-            wrappedLine(std::format("→ {} {}", entry.toolName, entry.json));
-        } else if (entry.kind == Entry::Kind::ToolResult) {
-            wrappedLine(std::format("← {} {}", entry.toolName, entry.json));
-        }
+    drawToolLog(scenePanel);
+    if (shaderPanel != nullptr && hasToolEntries(*shaderPanel)) {
+        ImGui::Separator();
+        ImGui::TextUnformatted("— shader —");
+        drawToolLog(*shaderPanel);
     }
     ImGui::End();
 }

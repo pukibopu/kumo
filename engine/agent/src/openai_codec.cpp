@@ -42,7 +42,8 @@ const char* roleName(Role role) {
 } // namespace
 
 std::string encodeChatCompletionsRequest(const ChatRequest& request) {
-    json body{{"model", request.model}, {"max_tokens", request.maxTokens}};
+    // Current OpenAI models reject the legacy max_tokens name.
+    json body{{"model", request.model}, {"max_completion_tokens", request.maxTokens}};
 
     json messages = json::array();
     if (!request.systemPrompt.empty()) {

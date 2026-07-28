@@ -1,6 +1,6 @@
 {
     "model": "test-model",
-    "max_tokens": 256,
+    "max_completion_tokens": 256,
     "messages": [
         { "role": "system", "content": "You are a test." },
         { "role": "user", "content": "add a sphere" },

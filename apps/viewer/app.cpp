@@ -6,6 +6,7 @@
 #include <kumo/agent/http_provider.h>
 #include <kumo/agent/scene_tools.h>
 #include <kumo/agent/session.h>
+#include <kumo/agent/shader_tools.h>
 #include <kumo/agent/tool_registry.h>
 #include <kumo/asset/asset.h>
 #include <kumo/asset/primitives.h>
@@ -56,6 +57,27 @@ constexpr const char* kSceneSystemPrompt =
     "Call scene_list before spatial reasoning or edits that depend on current state. "
     "Tool errors come back as JSON with status \"error\": read the message, correct the "
     "call and retry. Keep replies short. Always reply in the user's language.";
+
+// English for tool-call stability; the closing instruction keeps replies in the
+// user's language (ADR 0028). The binding contract mirrors docs/shaders.md and
+// is the first defense against interface-breaking edits (ADR 0029).
+constexpr const char* kShaderSystemPrompt =
+    "You are the shader assistant inside kumo, a physically based Metal renderer whose "
+    "shaders are written in Vulkan-dialect GLSL 4.60 and cross-compiled to MSL. "
+    "You edit per-material fragment shaders: use scene_list to find the entity, "
+    "shader_read to get the CURRENT full source of its material's fragment shader, and "
+    "shader_write to replace the FULL file. Only that entity's material is affected. "
+    "Binding contract you must preserve exactly: set 0 and set 2 declarations must stay "
+    "byte-identical to the template (set 0 binding 0 is the FrameUniforms block included "
+    "via include/common.glsl; set 2 is IBL). The push_constant block (mat4 model, mat4 "
+    "normalMatrix) must not change. In set 1, bindings 0-5 (textures and sampler) must "
+    "stay as-is; you MAY extend the MaterialFactors uniform block (set 1 binding 6) by "
+    "appending new members at the END of the block — existing members baseColor, "
+    "metallicRoughness and emissive are written by the engine, appended members read as "
+    "zero until driven. Rendering is linear-light with reversed-Z, right-handed Y-up. "
+    "Compile errors return structured with file and line; fix the source and retry, at "
+    "most 5 attempts, then stop and explain. Keep the existing lighting structure unless "
+    "asked otherwise. Always reply in the user's language.";
 
 void configureSurface(rhi::Surface& surface, int width, int height) {
     surface.configure(
@@ -389,6 +411,26 @@ void loadSceneFile(scene::Scene& world, renderer::ForwardRenderer& renderer,
     logInfo("scene loaded: {} entities, {} lights", loaded, saved.lights.size());
 }
 
+// Builds an HTTP provider (OpenAI or Anthropic codec, by `endpoint.type`) wired
+// to `notice` for retry feedback; shared by the scene and shader sessions so
+// each gets its own transport and backoff state.
+std::unique_ptr<agent::ILLMProvider> makeHttpProvider(const agent::AgentEndpoint& endpoint,
+                                                      std::chrono::seconds requestTimeout,
+                                                      ui::RetryNotice& notice) {
+    agent::HttpLLMProvider::Options options;
+    options.requestTimeout = requestTimeout;
+    options.onRetry = [&notice](int attempt, int maxRetries) {
+        notice.set(std::format("网络波动，重试中 ({}/{})…", attempt, maxRetries));
+    };
+    if (endpoint.type == agent::ProviderType::OpenAi) {
+        return std::make_unique<agent::OpenAiProvider>(endpoint.baseUrl, endpoint.apiKey,
+                                                       agent::makeUrlSessionTransport(),
+                                                       std::move(options));
+    }
+    return std::make_unique<agent::ClaudeProvider>(
+        endpoint.baseUrl, endpoint.apiKey, agent::makeUrlSessionTransport(), std::move(options));
+}
+
 } // namespace
 
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
@@ -473,64 +515,94 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     }
 
     // Agent stack. Declared after world/renderer and destroyed before them: the
-    // session destructor cancels queued tool work and joins its worker while the
-    // state the tools touch is still alive.
+    // session destructors cancel queued tool work and join their workers while
+    // the state the tools touch is still alive. Two registries scope each
+    // session to its own tools: the shader assistant gets scene_list (to find
+    // entities) plus the shader tools, but not the six scene-editing tools.
     kumo::MainThreadQueue mainQueue;
-    agent::ToolRegistry toolRegistry;
-    agent::registerSceneTools(toolRegistry, {.scene = &world, .renderer = &renderer});
-    ui::RetryNotice retryNotice;
+    agent::ToolRegistry sceneToolRegistry;
+    agent::ToolRegistry shaderToolRegistry;
+    agent::registerSceneTools(sceneToolRegistry, {.scene = &world, .renderer = &renderer});
+    agent::registerSceneListTool(shaderToolRegistry, {.scene = &world, .renderer = &renderer});
+    agent::ShaderToolContext shaderTools;
+    shaderTools.scene = &world;
+    shaderTools.setShader = [&renderer](std::uint32_t index, std::string_view source) {
+        return renderer.setMaterialShader(index, source);
+    };
+    shaderTools.shaderSource = [&renderer](std::uint32_t index) {
+        return renderer.materialShaderSource(index);
+    };
+    shaderTools.templatePath = std::filesystem::path(KUMO_SHADER_DIR) / "pbr.frag";
+    shaderTools.generatedDir = std::filesystem::path(KUMO_SHADER_DIR) / "generated";
+    agent::registerShaderTools(shaderToolRegistry, shaderTools);
+
+    ui::RetryNotice sceneRetryNotice;
+    ui::RetryNotice shaderRetryNotice;
     std::optional<agent::ConfirmationGate> confirmGate;
-    std::unique_ptr<agent::ILLMProvider> provider;
-    std::optional<agent::AgentSession> session;
-    agent::AgentSession::Desc sessionDesc;
+    std::unique_ptr<agent::ILLMProvider> sceneProvider;
+    std::unique_ptr<agent::ILLMProvider> shaderProvider;
+    std::optional<agent::AgentSession> sceneSession;
+    std::optional<agent::AgentSession> shaderSession;
+    agent::AgentSession::Desc sceneDesc;
+    agent::AgentSession::Desc shaderDesc;
     bool wantConfirm = confirmDestructive;
     if (offline) {
-        provider = std::make_unique<agent::FakeProvider>(makeOfflineScript(world),
-                                                         "离线演示脚本已播放完毕。");
-        sessionDesc.model = "offline";
+        sceneProvider = std::make_unique<agent::FakeProvider>(makeOfflineScript(world),
+                                                              "离线演示脚本已播放完毕。");
+        sceneDesc.model = "offline";
         kumo::logInfo("offline agent script ready");
     } else if (auto config = agent::loadAgentConfig("kumo.config.json", ".env");
                !config.has_value()) {
         kumo::logError("agent config: {}", config.error());
-    } else if (!config->agentAvailable()) {
-        // Rendering stays fully functional; the panel shows a Chinese hint.
-        kumo::logInfo("agent disabled: {}", config->unavailableReason());
     } else {
         wantConfirm = wantConfirm || config->confirmDestructive;
-        agent::HttpLLMProvider::Options options;
-        options.requestTimeout = config->requestTimeout;
-        options.onRetry = [&retryNotice](int attempt, int maxRetries) {
-            retryNotice.set(std::format("网络波动，重试中 ({}/{})…", attempt, maxRetries));
-        };
-        const bool openAi = config->providerType == agent::ProviderType::OpenAi;
-        if (openAi) {
-            provider = std::make_unique<agent::OpenAiProvider>(config->baseUrl, config->apiKey,
-                                                               agent::makeUrlSessionTransport(),
-                                                               std::move(options));
+        if (config->scene.available()) {
+            sceneProvider =
+                makeHttpProvider(config->scene, config->requestTimeout, sceneRetryNotice);
+            sceneDesc.model = config->scene.model;
+            sceneDesc.systemPrompt = kSceneSystemPrompt;
+            sceneDesc.maxTokens = config->maxTokens;
+            sceneDesc.summaryThresholdTokens = config->summaryThresholdTokens;
+            // The key never reaches the log (ADR 0012).
+            kumo::logInfo("agent provider ready: {} {} at {}",
+                          config->scene.type == agent::ProviderType::OpenAi ? "openai"
+                                                                            : "anthropic",
+                          config->scene.model, config->scene.baseUrl);
         } else {
-            provider = std::make_unique<agent::ClaudeProvider>(config->baseUrl, config->apiKey,
-                                                               agent::makeUrlSessionTransport(),
-                                                               std::move(options));
+            // Rendering stays fully functional; the panel shows a Chinese hint.
+            kumo::logInfo("agent disabled: {}", config->scene.unavailableReason());
         }
-        sessionDesc.model = config->sceneModel;
-        sessionDesc.systemPrompt = kSceneSystemPrompt;
-        sessionDesc.maxTokens = config->maxTokens;
-        sessionDesc.summaryThresholdTokens = config->summaryThresholdTokens;
-        // The key never reaches the log (ADR 0012).
-        kumo::logInfo("agent provider ready: {} {} at {}", openAi ? "openai" : "anthropic",
-                      config->sceneModel, config->baseUrl);
+        if (config->shader.available()) {
+            shaderProvider =
+                makeHttpProvider(config->shader, config->requestTimeout, shaderRetryNotice);
+            shaderDesc.model = config->shader.model;
+            shaderDesc.systemPrompt = kShaderSystemPrompt;
+            shaderDesc.maxTokens = config->maxTokens;
+            shaderDesc.summaryThresholdTokens = config->summaryThresholdTokens;
+            kumo::logInfo("shader agent ready: {} {} at {}",
+                          config->shader.type == agent::ProviderType::OpenAi ? "openai"
+                                                                             : "anthropic",
+                          config->shader.model, config->shader.baseUrl);
+        } else {
+            kumo::logInfo("shader agent disabled: {}", config->shader.unavailableReason());
+        }
     }
     if (wantConfirm) {
         confirmGate.emplace();
     }
-    if (provider != nullptr) {
-        session.emplace(*provider, toolRegistry, mainQueue,
-                        confirmGate.has_value() ? &*confirmGate : nullptr, sessionDesc);
+    if (sceneProvider != nullptr) {
+        sceneSession.emplace(*sceneProvider, sceneToolRegistry, mainQueue,
+                             confirmGate.has_value() ? &*confirmGate : nullptr, sceneDesc);
+    }
+    if (shaderProvider != nullptr) {
+        shaderSession.emplace(*shaderProvider, shaderToolRegistry, mainQueue,
+                              confirmGate.has_value() ? &*confirmGate : nullptr, shaderDesc);
     }
 
     AppInput input;
     ui::LightSettings lightSettings;
-    ui::ChatPanel chatPanel;
+    ui::ChatPanel scenePanel;
+    ui::ChatPanel shaderPanel;
     float overrideMetallic = 1.0f;
     float overrideRoughness = 1.0f;
 
@@ -624,9 +696,11 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
                 ui::drawStatsPanel(fbWidth, fbHeight);
                 ui::drawLightPanel(lightSettings, world.light(0));
                 ui::drawMaterialPanel(overrideMetallic, overrideRoughness);
-                ui::drawChatPanel(chatPanel, session.has_value() ? &*session : nullptr,
-                                  &retryNotice);
-                ui::drawToolLogPanel(chatPanel);
+                ui::drawAgentPanels(scenePanel, sceneSession.has_value() ? &*sceneSession : nullptr,
+                                    &sceneRetryNotice, shaderPanel,
+                                    shaderSession.has_value() ? &*shaderSession : nullptr,
+                                    &shaderRetryNotice);
+                ui::drawToolLogPanel(scenePanel, &shaderPanel);
                 ui::drawConfirmDialog(confirmGate.has_value() ? &*confirmGate : nullptr);
                 ui::endFrame(*encoder, pass);
             });

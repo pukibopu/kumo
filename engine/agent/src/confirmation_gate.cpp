@@ -1,5 +1,6 @@
 #include <kumo/agent/confirmation_gate.h>
 
+#include <algorithm>
 #include <chrono>
 #include <utility>
 
@@ -8,38 +9,47 @@ namespace kumo::agent {
 bool ConfirmationGate::ask(std::string toolName, std::string argumentsJson,
                            const std::atomic<bool>& abort) {
     std::unique_lock lock(mutex_);
-    prompt_ = Prompt{++lastPromptId_, std::move(toolName), std::move(argumentsJson)};
-    resolved_ = false;
-    approved_ = false;
+    const std::uint64_t id = ++lastPromptId_;
+    pending_.push_back(Prompt{id, std::move(toolName), std::move(argumentsJson)});
     // Bounded waits instead of a cancellation latch: the abort flag belongs to
     // the asking session, so its shutdown cannot poison the shared gate.
-    while (!resolved_) {
+    while (true) {
+        if (const auto it = decisions_.find(id); it != decisions_.end()) {
+            const bool approved = it->second;
+            decisions_.erase(it);
+            return approved;
+        }
         if (abort.load()) {
-            prompt_.reset();
+            const auto it = std::find_if(pending_.begin(), pending_.end(),
+                                         [id](const Prompt& p) { return p.id == id; });
+            if (it != pending_.end()) {
+                pending_.erase(it);
+            }
+            decisions_.erase(id);
             return false;
         }
         cv_.wait_for(lock, std::chrono::milliseconds(20));
     }
-    prompt_.reset();
-    return approved_;
 }
 
 std::optional<ConfirmationGate::Prompt> ConfirmationGate::pending() const {
     std::lock_guard lock(mutex_);
-    if (resolved_) {
+    if (pending_.empty()) {
         return std::nullopt;
     }
-    return prompt_;
+    return pending_.front();
 }
 
 void ConfirmationGate::resolve(std::uint64_t promptId, bool approved) {
     {
         std::lock_guard lock(mutex_);
-        if (!prompt_.has_value() || resolved_ || prompt_->id != promptId) {
+        const auto it = std::find_if(pending_.begin(), pending_.end(),
+                                     [promptId](const Prompt& p) { return p.id == promptId; });
+        if (it == pending_.end()) {
             return;
         }
-        resolved_ = true;
-        approved_ = approved;
+        pending_.erase(it);
+        decisions_[promptId] = approved;
     }
     cv_.notify_all();
 }

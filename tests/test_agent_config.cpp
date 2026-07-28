@@ -17,23 +17,23 @@ struct ConfigSandbox {
     std::filesystem::path dir;
 
     ConfigSandbox() {
-        for (const char* name :
-             {"KUMO_PROVIDER_TYPE", "KUMO_PROVIDER_BASE_URL", "KUMO_PROVIDER_MODEL",
-              "KUMO_PROVIDER_API_KEY", "ANTHROPIC_API_KEY"}) {
-            unsetenv(name);
-        }
+        clearEnv();
         dir = std::filesystem::temp_directory_path() / "kumo_config_test";
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
     }
 
     ~ConfigSandbox() {
+        clearEnv();
+        std::filesystem::remove_all(dir);
+    }
+
+    static void clearEnv() {
         for (const char* name :
              {"KUMO_PROVIDER_TYPE", "KUMO_PROVIDER_BASE_URL", "KUMO_PROVIDER_MODEL",
-              "KUMO_PROVIDER_API_KEY", "ANTHROPIC_API_KEY"}) {
+              "KUMO_PROVIDER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"}) {
             unsetenv(name);
         }
-        std::filesystem::remove_all(dir);
     }
 
     std::filesystem::path configPath() const { return dir / "kumo.config.json"; }
@@ -58,15 +58,18 @@ TEST_CASE("agent config defaults when no file exists") {
     ConfigSandbox sandbox;
     const auto config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->providerType == ProviderType::Anthropic);
-    CHECK(config->baseUrl == "https://api.anthropic.com");
-    CHECK(config->sceneModel.empty());
+    CHECK(config->scene.type == ProviderType::Anthropic);
+    CHECK(config->scene.baseUrl == "https://api.anthropic.com");
+    CHECK(config->scene.model.empty());
     CHECK(config->maxTokens == 4096);
     CHECK(config->requestTimeout == std::chrono::seconds(120));
     CHECK(!config->confirmDestructive);
     CHECK(config->summaryThresholdTokens == 8000);
-    CHECK(!config->agentAvailable());
-    CHECK(config->unavailableReason().find("model") != std::string::npos);
+    CHECK(!config->scene.available());
+    CHECK(config->scene.unavailableReason().find("model") != std::string::npos);
+    // Shader inherits the same (empty) base as scene when nothing overrides it.
+    CHECK(config->shader.type == ProviderType::Anthropic);
+    CHECK(config->shader.baseUrl == "https://api.anthropic.com");
 }
 
 TEST_CASE("agent config parses an openai local setup without a key") {
@@ -83,14 +86,18 @@ TEST_CASE("agent config parses an openai local setup without a key") {
     })");
     const auto config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->providerType == ProviderType::OpenAi);
-    CHECK(config->baseUrl == "http://127.0.0.1:11434");
-    CHECK(config->sceneModel == "qwen2.5:14b");
+    CHECK(config->scene.type == ProviderType::OpenAi);
+    CHECK(config->scene.baseUrl == "http://127.0.0.1:11434");
+    CHECK(config->scene.model == "qwen2.5:14b");
     CHECK(config->maxTokens == 2048);
     CHECK(config->requestTimeout == std::chrono::seconds(60));
     CHECK(config->confirmDestructive);
     // Local endpoints do not check keys (ADR 0012).
-    CHECK(config->agentAvailable());
+    CHECK(config->scene.available());
+    // No agents.shader override: it inherits the same local openai endpoint.
+    CHECK(config->shader.type == ProviderType::OpenAi);
+    CHECK(config->shader.model == "qwen2.5:14b");
+    CHECK(config->shader.available());
 }
 
 TEST_CASE("agent config requires a key for remote endpoints") {
@@ -100,8 +107,8 @@ TEST_CASE("agent config requires a key for remote endpoints") {
     })");
     auto config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(!config->agentAvailable());
-    CHECK(config->unavailableReason().find("key") != std::string::npos);
+    CHECK(!config->scene.available());
+    CHECK(config->scene.unavailableReason().find("key") != std::string::npos);
 
     sandbox.writeConfig(R"({
         "provider": { "type": "openai", "base_url": "https://api.example.com",
@@ -109,7 +116,7 @@ TEST_CASE("agent config requires a key for remote endpoints") {
     })");
     config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->agentAvailable());
+    CHECK(config->scene.available());
 }
 
 TEST_CASE("agents.scene.model overrides the provider model") {
@@ -120,10 +127,72 @@ TEST_CASE("agents.scene.model overrides the provider model") {
     })");
     const auto config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->sceneModel == "scene-model");
+    CHECK(config->scene.model == "scene-model");
+    // Shader was not overridden, so it falls back to the provider model.
+    CHECK(config->shader.model == "global-model");
 }
 
-TEST_CASE("environment beats .env beats the config file") {
+TEST_CASE("agents.shader overrides base_url/api_key/model while scene inherits provider.*") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "provider": { "type": "anthropic", "base_url": "https://api.anthropic.com",
+                      "api_key": "sk-scene", "model": "scene-model" },
+        "agents": {
+            "shader": { "base_url": "https://api.example.com", "api_key": "sk-shader",
+                        "model": "shader-model" }
+        }
+    })");
+    const auto config = sandbox.load();
+    REQUIRE(config.has_value());
+
+    CHECK(config->scene.type == ProviderType::Anthropic);
+    CHECK(config->scene.baseUrl == "https://api.anthropic.com");
+    CHECK(config->scene.apiKey == "sk-scene");
+    CHECK(config->scene.model == "scene-model");
+
+    CHECK(config->shader.type == ProviderType::Anthropic);
+    CHECK(config->shader.baseUrl == "https://api.example.com");
+    CHECK(config->shader.apiKey == "sk-shader");
+    CHECK(config->shader.model == "shader-model");
+}
+
+TEST_CASE("per-endpoint type override falls back to that type's local default base_url") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "provider": { "type": "anthropic", "model": "scene-model" },
+        "agents": { "shader": { "type": "openai", "model": "shader-model" } }
+    })");
+    const auto config = sandbox.load();
+    REQUIRE(config.has_value());
+    // Scene inherits the anthropic base untouched.
+    CHECK(config->scene.type == ProviderType::Anthropic);
+    CHECK(config->scene.baseUrl == "https://api.anthropic.com");
+    // Shader's type flips to openai; its base_url was never set for either the
+    // base or the shader override, so it gets the openai local default, not
+    // the anthropic base_url it would have inherited.
+    CHECK(config->shader.type == ProviderType::OpenAi);
+    CHECK(config->shader.baseUrl == "http://127.0.0.1:11434");
+}
+
+TEST_CASE("OPENAI_API_KEY applies only to an openai-type endpoint") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "provider": { "type": "anthropic", "model": "scene-model" },
+        "agents": { "shader": { "type": "openai", "base_url": "https://api.openai.com",
+                                "model": "shader-model" } }
+    })");
+    setenv("OPENAI_API_KEY", "sk-openai-env", 1);
+    const auto config = sandbox.load();
+    REQUIRE(config.has_value());
+    // The anthropic scene endpoint does not recognize OPENAI_API_KEY.
+    CHECK(config->scene.apiKey.empty());
+    CHECK(!config->scene.available());
+    // The openai shader endpoint does.
+    CHECK(config->shader.apiKey == "sk-openai-env");
+    CHECK(config->shader.available());
+}
+
+TEST_CASE("environment beats .env beats the config file, per endpoint") {
     ConfigSandbox sandbox;
     sandbox.writeConfig(R"({
         "provider": { "type": "anthropic", "model": "file-model", "api_key": "sk-file" }
@@ -132,15 +201,15 @@ TEST_CASE("environment beats .env beats the config file") {
 
     auto config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->apiKey == "sk-dotenv");
-    CHECK(config->sceneModel == "dotenv-model");
+    CHECK(config->scene.apiKey == "sk-dotenv");
+    CHECK(config->scene.model == "dotenv-model");
 
     setenv("ANTHROPIC_API_KEY", "sk-env", 1);
     setenv("KUMO_PROVIDER_MODEL", "env-model", 1);
     config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->apiKey == "sk-env");
-    CHECK(config->sceneModel == "env-model");
+    CHECK(config->scene.apiKey == "sk-env");
+    CHECK(config->scene.model == "env-model");
 
     // Tier beats name: a process-env KUMO_PROVIDER_API_KEY wins over the
     // .env-sourced ANTHROPIC_API_KEY even though the latter is more specific.
@@ -148,7 +217,7 @@ TEST_CASE("environment beats .env beats the config file") {
     setenv("KUMO_PROVIDER_API_KEY", "sk-generic-env", 1);
     config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->apiKey == "sk-generic-env");
+    CHECK(config->scene.apiKey == "sk-generic-env");
     unsetenv("KUMO_PROVIDER_API_KEY");
 }
 
@@ -168,9 +237,13 @@ TEST_CASE("KUMO_PROVIDER_TYPE switches the protocol and default base url") {
     setenv("KUMO_PROVIDER_MODEL", "qwen2.5:14b", 1);
     const auto config = sandbox.load();
     REQUIRE(config.has_value());
-    CHECK(config->providerType == ProviderType::OpenAi);
-    CHECK(config->baseUrl == "http://127.0.0.1:11434");
-    CHECK(config->agentAvailable());
+    CHECK(config->scene.type == ProviderType::OpenAi);
+    CHECK(config->scene.baseUrl == "http://127.0.0.1:11434");
+    CHECK(config->scene.available());
+    // The env override lands on the base before the per-agent overlay, so
+    // shader (which has no override of its own) sees it too.
+    CHECK(config->shader.type == ProviderType::OpenAi);
+    CHECK(config->shader.baseUrl == "http://127.0.0.1:11434");
 }
 
 TEST_CASE("agent config rejects malformed input with a pointed message") {
@@ -187,6 +260,11 @@ TEST_CASE("agent config rejects malformed input with a pointed message") {
     const auto badType = sandbox.load();
     REQUIRE(!badType.has_value());
     CHECK(badType.error().find("grpc") != std::string::npos);
+
+    sandbox.writeConfig(R"({ "agents": { "shader": { "type": "grpc" } } })");
+    const auto badShaderType = sandbox.load();
+    REQUIRE(!badShaderType.has_value());
+    CHECK(badShaderType.error().find("agents.shader.type") != std::string::npos);
 
     sandbox.writeConfig(R"({ "agents": { "summary_threshold_tokens": "many" } })");
     const auto badThreshold = sandbox.load();

@@ -61,13 +61,16 @@ private:
     std::string text_;
 };
 
-// `session` may be null (no provider configured): the panel renders a hint
-// instead of the input. Drains the session transcript every frame. `notice`
-// may be null.
-void drawChatPanel(ChatPanel& panel, kumo::agent::AgentSession* session, RetryNotice* notice);
+// One 助手 window with a 场景/Shader tab pair; either session may be null (the
+// tab then shows its configuration hint).
+void drawAgentPanels(ChatPanel& scenePanel, kumo::agent::AgentSession* sceneSession,
+                     RetryNotice* sceneNotice, ChatPanel& shaderPanel,
+                     kumo::agent::AgentSession* shaderSession, RetryNotice* shaderNotice);
 
-// Full, untruncated record of every tool call and result (ADR 0022).
-void drawToolLogPanel(const ChatPanel& panel);
+// Full, untruncated record of every tool call and result (ADR 0022). `shaderPanel`
+// may be null; when non-null and it holds tool entries, its log is appended
+// after a separator.
+void drawToolLogPanel(const ChatPanel& scenePanel, const ChatPanel* shaderPanel);
 
 // Modal for a destructive tool awaiting approval; `gate` may be null.
 void drawConfirmDialog(kumo::agent::ConfirmationGate* gate);

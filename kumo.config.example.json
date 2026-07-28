@@ -1,15 +1,15 @@
 {
     "provider": {
-        "type": "anthropic",
-        "base_url": "https://api.anthropic.com",
+        "type": "openai",
+        "base_url": "https://api.openai.com",
         "api_key": "",
-        "model": "",
+        "model": "gpt-5.4",
         "max_tokens": 4096,
         "request_timeout_seconds": 120
     },
     "agents": {
-        "scene": { "model": "" },
-        "shader": { "model": "" },
+        "scene": { "type": "", "base_url": "", "api_key": "", "model": "" },
+        "shader": { "type": "", "base_url": "", "api_key": "", "model": "" },
         "confirm_destructive": false,
         "summary_threshold_tokens": 8000
     }

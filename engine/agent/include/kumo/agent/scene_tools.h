@@ -18,8 +18,15 @@ struct SceneToolContext {
     renderer::ForwardRenderer* renderer = nullptr;
 };
 
-// Registers the seven scene tools (ADR 0028). The context is copied into the
-// handlers; the scene and renderer it points to must outlive the registry.
+// Registers only scene_list (ADR 0028): the read-only listing tool other agents
+// (e.g. the shader assistant) need without the other six scene-editing tools.
+// The context is copied into the handler; the scene and renderer it points to
+// must outlive the registry.
+void registerSceneListTool(ToolRegistry& registry, SceneToolContext context);
+
+// Registers the seven scene tools (ADR 0028): scene_list plus the six mutating
+// tools. The context is copied into the handlers; the scene and renderer it
+// points to must outlive the registry.
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context);
 
 } // namespace kumo::agent

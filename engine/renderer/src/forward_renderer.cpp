@@ -8,7 +8,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstring>
+#include <filesystem>
+#include <format>
+#include <utility>
 
 namespace kumo::renderer {
 
@@ -81,6 +85,45 @@ std::uint32_t fullMipChain(std::uint32_t width, std::uint32_t height) {
         ++mips;
     }
     return mips;
+}
+
+// Declared byte size of the uniform_buffer at (set, binding); `fallback` when
+// absent (e.g. a stage that does not reference it).
+std::uint32_t bindingBufferSize(const shaderc::Reflection& reflection, std::uint32_t set,
+                                std::uint32_t binding, std::uint32_t fallback) {
+    for (const shaderc::ReflectionBinding& entry : reflection.bindings) {
+        if (entry.set == set && entry.binding == binding) {
+            return entry.bufferSize;
+        }
+    }
+    return fallback;
+}
+
+// The pbr pipeline's fixed shape (vertex layout, targets, depth/cull/MSAA);
+// shared by the pbr pipeline itself and every per-material custom pipeline
+// (ADR 0011), which may only differ in fragment shader and set-1 layout.
+rhi::RenderPipelineDesc pbrPipelineDesc(
+    rhi::Ptr<rhi::ShaderModule> vertexShader, rhi::Ptr<rhi::ShaderModule> fragmentShader,
+    std::vector<rhi::Ptr<rhi::BindGroupLayout>> bindGroupLayouts, std::uint32_t pushConstantSize) {
+    return {
+        .vertexShader = std::move(vertexShader),
+        .fragmentShader = std::move(fragmentShader),
+        .vertexBuffers =
+            {{.stride = sizeof(asset::Vertex),
+              .attributes =
+                  {{.format = rhi::VertexFormat::Float32x3, .offset = 0, .shaderLocation = 0},
+                   {.format = rhi::VertexFormat::Float32x3, .offset = 12, .shaderLocation = 1},
+                   {.format = rhi::VertexFormat::Float32x4, .offset = 24, .shaderLocation = 2},
+                   {.format = rhi::VertexFormat::Float32x2, .offset = 40, .shaderLocation = 3}}}},
+        .bindGroupLayouts = std::move(bindGroupLayouts),
+        .pushConstantSize = pushConstantSize,
+        .colorFormats = {kHdrFormat},
+        .depthStencil = {.format = kDepthFormat,
+                         .depthWriteEnabled = true,
+                         .depthCompare = rhi::CompareFunction::GreaterEqual},
+        .cullMode = rhi::CullMode::Back,
+        .sampleCount = kSampleCount,
+    };
 }
 
 } // namespace
@@ -166,34 +209,62 @@ bool ForwardRenderer::uploadMesh(const asset::MeshData& mesh, GpuMesh& out) {
     return true;
 }
 
+bool ForwardRenderer::buildSharedMaterialSlots(std::size_t materialIndex) {
+    KUMO_ASSERT(device_ != nullptr);
+    KUMO_ASSERT(materialIndex < materialParams_.size());
+    const MaterialFactorsData factors = toFactors(materialParams_[materialIndex]);
+    const MaterialTextures& textures = materialTextures_[materialIndex];
+
+    std::array<rhi::Ptr<rhi::Buffer>, kFrameSlots> buffers;
+    std::array<rhi::Ptr<rhi::BindGroup>, kFrameSlots> groups;
+    for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
+        buffers[slot] = device_->createBuffer({
+            .size = sizeof(MaterialFactorsData),
+            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+        });
+        if (!buffers[slot]) {
+            return false;
+        }
+        device_->queue().writeBuffer(*buffers[slot], 0, &factors, sizeof(factors));
+        groups[slot] = device_->createBindGroup({
+            .layout = materialLayout_,
+            .entries = {{.binding = 0, .texture = textures.baseColor},
+                        {.binding = 1, .texture = textures.metallicRoughness},
+                        {.binding = 2, .texture = textures.normal},
+                        {.binding = 3, .texture = textures.occlusion},
+                        {.binding = 4, .texture = textures.emissive},
+                        {.binding = 5, .sampler = materialSampler_},
+                        {.binding = 6, .buffer = buffers[slot]}},
+        });
+        if (!groups[slot]) {
+            return false;
+        }
+    }
+    materialFactorBuffers_[materialIndex] = std::move(buffers);
+    materialGroups_[materialIndex] = std::move(groups);
+    materialDirty_[materialIndex] = {};
+    return true;
+}
+
 bool ForwardRenderer::appendMaterial(const MaterialParams& params,
                                      const MaterialTextures& textures) {
     KUMO_ASSERT(device_ != nullptr);
-    const MaterialFactorsData factors = toFactors(params);
-    rhi::Ptr<rhi::Buffer> buffer = device_->createBuffer({
-        .size = sizeof(MaterialFactorsData),
-        .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
-    });
-    if (!buffer) {
-        return false;
-    }
-    device_->queue().writeBuffer(*buffer, 0, &factors, sizeof(factors));
-    rhi::Ptr<rhi::BindGroup> group = device_->createBindGroup({
-        .layout = materialLayout_,
-        .entries = {{.binding = 0, .texture = textures.baseColor},
-                    {.binding = 1, .texture = textures.metallicRoughness},
-                    {.binding = 2, .texture = textures.normal},
-                    {.binding = 3, .texture = textures.occlusion},
-                    {.binding = 4, .texture = textures.emissive},
-                    {.binding = 5, .sampler = materialSampler_},
-                    {.binding = 6, .buffer = buffer}},
-    });
-    if (!group) {
-        return false;
-    }
-    materialFactorBuffers_.push_back(std::move(buffer));
-    materialGroups_.push_back(std::move(group));
+    materialFactorBuffers_.emplace_back();
+    materialGroups_.emplace_back();
+    materialDirty_.emplace_back();
     materialParams_.push_back(params);
+    materialTextures_.push_back(textures);
+    materialShaders_.emplace_back(std::nullopt);
+    const std::size_t index = materialParams_.size() - 1;
+    if (!buildSharedMaterialSlots(index)) {
+        materialFactorBuffers_.pop_back();
+        materialGroups_.pop_back();
+        materialDirty_.pop_back();
+        materialParams_.pop_back();
+        materialTextures_.pop_back();
+        materialShaders_.pop_back();
+        return false;
+    }
     return true;
 }
 
@@ -246,16 +317,195 @@ const ForwardRenderer::MaterialParams* ForwardRenderer::materialParams(std::uint
 }
 
 bool ForwardRenderer::setMaterialParams(std::uint32_t index, const MaterialParams& params) {
-    KUMO_ASSERT(device_ != nullptr);
     if (index >= materialParams_.size()) {
         return false;
     }
     materialParams_[index] = params;
-    const MaterialFactorsData factors = toFactors(params);
-    // Single-buffered material UBO: overwriting it can tear a frame still in
-    // flight, which at worst shows one frame of mixed factors.
-    device_->queue().writeBuffer(*materialFactorBuffers_[index], 0, &factors, sizeof(factors));
+    // Deferred to flushDirtyMaterials(): writing the slot the GPU may still be
+    // reading this frame is exactly the tearing window double buffering avoids.
+    for (bool& dirty : materialDirty_[index]) {
+        dirty = true;
+    }
     return true;
+}
+
+std::expected<void, std::vector<shaderc::CompileError>>
+ForwardRenderer::setMaterialShader(std::uint32_t materialIndex, std::string_view fragmentSource) {
+    if (materialIndex >= materialParams_.size()) {
+        return std::unexpected(
+            std::vector<shaderc::CompileError>{{.file = "",
+                                                .line = 0,
+                                                .message = "material index out of range",
+                                                .secondStage = false}});
+    }
+    return compileMaterialShader(materialIndex, fragmentSource);
+}
+
+bool ForwardRenderer::clearMaterialShader(std::uint32_t materialIndex) {
+    if (materialIndex >= materialShaders_.size() || !materialShaders_[materialIndex]) {
+        return false;
+    }
+    if (!buildSharedMaterialSlots(materialIndex)) {
+        return false;
+    }
+    materialShaders_[materialIndex] = std::nullopt;
+    return true;
+}
+
+const std::string* ForwardRenderer::materialShaderSource(std::uint32_t materialIndex) const {
+    if (materialIndex >= materialShaders_.size() || !materialShaders_[materialIndex]) {
+        return nullptr;
+    }
+    return &materialShaders_[materialIndex]->fragmentSource;
+}
+
+std::expected<void, std::vector<shaderc::CompileError>>
+ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_view source) {
+    KUMO_ASSERT(device_ != nullptr);
+    KUMO_ASSERT(materialIndex < materialParams_.size());
+
+    const std::string sourceName = std::format("material{}.frag", materialIndex);
+    auto compiled = shaderc::compileGlsl(
+        source, shaderc::Stage::Fragment,
+        {.sourceName = sourceName,
+         .includeDirs = {(std::filesystem::path(KUMO_SHADER_DIR) / "include").string()}});
+    if (!compiled) {
+        return std::unexpected(compiled.error());
+    }
+
+    // ADR 0029: sets 0/2 must stay reflection-identical to the shared pbr
+    // fragment shader; only set 1 (the material's own factors) may differ.
+    for (const std::uint32_t set : {0u, 2u}) {
+        if (auto mismatch = detail::setMismatch(compiled->reflection, pbrFragReflection_, set)) {
+            return std::unexpected(
+                std::vector<shaderc::CompileError>{{.file = "",
+                                                    .line = 0,
+                                                    .message = "binding interface: " + *mismatch,
+                                                    .secondStage = false}});
+        }
+    }
+
+    // ADR 0025: 128B per-draw push constant budget, shared with the vertex stage.
+    const std::uint32_t pushSize =
+        std::max(pbrVertReflection_.pushConstantSize, compiled->reflection.pushConstantSize);
+    if (pushSize > pbrPushConstantSize_) {
+        return std::unexpected(std::vector<shaderc::CompileError>{
+            {.file = "",
+             .line = 0,
+             .message = std::format("push constant size {} exceeds the shared pbr pipeline's {} "
+                                    "byte budget",
+                                    pushSize, pbrPushConstantSize_),
+             .secondStage = false}});
+    }
+
+    const shaderc::ReflectionBinding* factors = nullptr;
+    for (const shaderc::ReflectionBinding& binding : compiled->reflection.bindings) {
+        if (binding.set == 1 && binding.type == "uniform_buffer") {
+            factors = &binding;
+            break;
+        }
+    }
+    if (factors == nullptr) {
+        return std::unexpected(std::vector<shaderc::CompileError>{
+            {.file = "",
+             .line = 0,
+             .message = "binding interface: set 1 has no uniform buffer for material factors",
+             .secondStage = false}});
+    }
+
+    rhi::Ptr<rhi::ShaderModule> fragmentModule = device_->createShaderModule({
+        .stage = rhi::ShaderStage::Fragment,
+        .language = rhi::ShaderSourceLanguage::MSL,
+        .source = compiled->msl,
+        .entryPoint = compiled->mslEntryPoint,
+    });
+    if (!fragmentModule) {
+        return std::unexpected(
+            std::vector<shaderc::CompileError>{{.file = "",
+                                                .line = 0,
+                                                .message = "fragment shader module creation failed",
+                                                .secondStage = true}});
+    }
+
+    const detail::StageReflection layoutStages[] = {
+        {&pbrVertReflection_, rhi::ShaderStage::Vertex},
+        {&compiled->reflection, rhi::ShaderStage::Fragment}};
+    std::vector<rhi::Ptr<rhi::BindGroupLayout>> layouts =
+        detail::layoutsFromReflection(*device_, layoutStages);
+    if (layouts.size() < 2 || !layouts[1]) {
+        return std::unexpected(std::vector<shaderc::CompileError>{
+            {.file = "",
+             .line = 0,
+             .message = "binding interface: failed to derive the set 1 layout",
+             .secondStage = false}});
+    }
+    rhi::Ptr<rhi::BindGroupLayout> materialLayout = std::move(layouts[1]);
+
+    rhi::Ptr<rhi::RenderPipeline> pipeline = device_->createRenderPipeline(pbrPipelineDesc(
+        pbrVertModule_, fragmentModule, {frameLayout_, materialLayout, iblLayout_}, pushSize));
+    if (!pipeline) {
+        return std::unexpected(
+            std::vector<shaderc::CompileError>{{.file = "",
+                                                .line = 0,
+                                                .message = "custom pipeline creation failed",
+                                                .secondStage = true}});
+    }
+
+    // Buffer is sized from reflection so custom MaterialFactors members past
+    // the 48B CPU struct exist on the GPU side; only the known 48B prefix is
+    // ever written, the rest stays zero (M6-B exposes a way to author it).
+    const std::uint32_t bufferSize =
+        std::max(factors->bufferSize, static_cast<std::uint32_t>(sizeof(MaterialFactorsData)));
+    const MaterialFactorsData factorsData = toFactors(materialParams_[materialIndex]);
+    std::vector<std::byte> payload(bufferSize, std::byte{0});
+    std::memcpy(payload.data(), &factorsData, sizeof(factorsData));
+
+    const MaterialTextures& textures = materialTextures_[materialIndex];
+    std::array<rhi::Ptr<rhi::Buffer>, kFrameSlots> buffers;
+    std::array<rhi::Ptr<rhi::BindGroup>, kFrameSlots> groups;
+    for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
+        buffers[slot] = device_->createBuffer({
+            .size = bufferSize,
+            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+        });
+        if (!buffers[slot]) {
+            return std::unexpected(
+                std::vector<shaderc::CompileError>{{.file = "",
+                                                    .line = 0,
+                                                    .message = "material buffer creation failed",
+                                                    .secondStage = true}});
+        }
+        device_->queue().writeBuffer(*buffers[slot], 0, payload.data(), payload.size());
+        groups[slot] = device_->createBindGroup({
+            .layout = materialLayout,
+            .entries = {{.binding = 0, .texture = textures.baseColor},
+                        {.binding = 1, .texture = textures.metallicRoughness},
+                        {.binding = 2, .texture = textures.normal},
+                        {.binding = 3, .texture = textures.occlusion},
+                        {.binding = 4, .texture = textures.emissive},
+                        {.binding = 5, .sampler = materialSampler_},
+                        {.binding = factors->binding, .buffer = buffers[slot]}},
+        });
+        if (!groups[slot]) {
+            return std::unexpected(std::vector<shaderc::CompileError>{
+                {.file = "",
+                 .line = 0,
+                 .message = "material bind group creation failed",
+                 .secondStage = true}});
+        }
+    }
+
+    materialFactorBuffers_[materialIndex] = std::move(buffers);
+    materialGroups_[materialIndex] = std::move(groups);
+    materialDirty_[materialIndex] = {};
+    materialShaders_[materialIndex] = MaterialShaderRecord{
+        .fragmentSource = std::string(source),
+        .pipeline = std::move(pipeline),
+        .materialLayout = std::move(materialLayout),
+        .factorBufferBinding = factors->binding,
+        .factorBufferSize = bufferSize,
+    };
+    return {};
 }
 
 bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
@@ -283,7 +533,11 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
     const std::string signature = detail::layoutSignature(pbrStages) + "|" +
                                   detail::layoutSignature(skyboxStages) + "|" +
                                   detail::layoutSignature(tonemapStages);
-    if (deriveLayouts) {
+    // A hot reload (deriveLayouts == false) that changes the binding table
+    // rebuilds every dependent resource below instead of rejecting the reload
+    // (ADR 0043): existing bind groups reference the layouts being replaced.
+    const bool layoutChanged = !deriveLayouts && signature != layoutSignature_;
+    if (deriveLayouts || layoutChanged) {
         auto pbrLayouts = detail::layoutsFromReflection(*device_, pbrStages);
         auto skyboxLayouts = detail::layoutsFromReflection(*device_, skyboxStages);
         auto tonemapLayouts = detail::layoutsFromReflection(*device_, tonemapStages);
@@ -299,34 +553,12 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
         skyboxLayout_ = skyboxLayouts[1];
         tonemapLayout_ = tonemapLayouts[1];
         layoutSignature_ = signature;
-    } else if (signature != layoutSignature_) {
-        // Existing bind groups were created against the original layouts; a
-        // binding-table change needs a restart, not a hot reload.
-        logError("shader reload changed the binding layout; keeping current pipelines");
-        return false;
     }
 
     const std::uint32_t pushSize =
         std::max(pbrVert->reflection.pushConstantSize, pbrFrag->reflection.pushConstantSize);
-    rhi::Ptr<rhi::RenderPipeline> pbr = device_->createRenderPipeline({
-        .vertexShader = pbrVert->module,
-        .fragmentShader = pbrFrag->module,
-        .vertexBuffers =
-            {{.stride = sizeof(asset::Vertex),
-              .attributes =
-                  {{.format = rhi::VertexFormat::Float32x3, .offset = 0, .shaderLocation = 0},
-                   {.format = rhi::VertexFormat::Float32x3, .offset = 12, .shaderLocation = 1},
-                   {.format = rhi::VertexFormat::Float32x4, .offset = 24, .shaderLocation = 2},
-                   {.format = rhi::VertexFormat::Float32x2, .offset = 40, .shaderLocation = 3}}}},
-        .bindGroupLayouts = {frameLayout_, materialLayout_, iblLayout_},
-        .pushConstantSize = pushSize,
-        .colorFormats = {kHdrFormat},
-        .depthStencil = {.format = kDepthFormat,
-                         .depthWriteEnabled = true,
-                         .depthCompare = rhi::CompareFunction::GreaterEqual},
-        .cullMode = rhi::CullMode::Back,
-        .sampleCount = kSampleCount,
-    });
+    rhi::Ptr<rhi::RenderPipeline> pbr = device_->createRenderPipeline(pbrPipelineDesc(
+        pbrVert->module, pbrFrag->module, {frameLayout_, materialLayout_, iblLayout_}, pushSize));
     rhi::Ptr<rhi::RenderPipeline> skybox = device_->createRenderPipeline({
         .vertexShader = skyboxVert->module,
         .fragmentShader = skyboxFrag->module,
@@ -349,7 +581,96 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
     pbrPipeline_ = std::move(pbr);
     skyboxPipeline_ = std::move(skybox);
     tonemapPipeline_ = std::move(tonemap);
+    pbrVertModule_ = pbrVert->module;
+    pbrVertReflection_ = pbrVert->reflection;
+    pbrFragReflection_ = pbrFrag->reflection;
+    pbrPushConstantSize_ = pushSize;
+
+    if (layoutChanged) {
+        rebuildMaterialResources();
+        logInfo("shader reload rebuilt material resources");
+    }
     return true;
+}
+
+void ForwardRenderer::rebuildMaterialResources() {
+    KUMO_ASSERT(device_ != nullptr);
+
+    // Frame uniform buffer size follows reflection (declared size can only grow
+    // relative to the fixed CPU struct, which is written as a prefix each frame).
+    const std::uint32_t frameBufferSize =
+        std::max(bindingBufferSize(pbrVertReflection_, 0, 0,
+                                   static_cast<std::uint32_t>(sizeof(FrameUniformsData))),
+                 static_cast<std::uint32_t>(sizeof(FrameUniformsData)));
+    for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
+        if (!frameUniforms_[slot] || frameUniforms_[slot]->size() != frameBufferSize) {
+            frameUniforms_[slot] = device_->createBuffer({
+                .size = frameBufferSize,
+                .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+            });
+            if (!frameUniforms_[slot]) {
+                logError("shader reload: frame uniform buffer rebuild failed (slot {})", slot);
+                continue;
+            }
+        }
+        // Always recreated: bind groups cache per-entry stage visibility at
+        // creation, and the signature that got us here includes visibility.
+        frameGroups_[slot] = device_->createBindGroup({
+            .layout = frameLayout_,
+            .entries = {{.binding = 0, .buffer = frameUniforms_[slot]}},
+        });
+        if (!frameGroups_[slot]) {
+            logError("shader reload: frame bind group rebuild failed (slot {})", slot);
+        }
+    }
+
+    for (std::size_t i = 0; i < materialParams_.size(); ++i) {
+        bool rebuilt = false;
+        if (materialShaders_[i]) {
+            const std::string source = materialShaders_[i]->fragmentSource;
+            if (auto result = compileMaterialShader(i, source); result.has_value()) {
+                rebuilt = true;
+            } else {
+                for (const shaderc::CompileError& error : result.error()) {
+                    logError("material {} custom shader incompatible after reload, reverting to "
+                             "the shared pipeline: {}",
+                             i, error.message);
+                }
+                materialShaders_[i] = std::nullopt;
+            }
+        }
+        if (!rebuilt && !buildSharedMaterialSlots(i)) {
+            logError("shader reload: material {} buffer/bind group rebuild failed", i);
+        }
+    }
+
+    if (environment_.valid()) {
+        iblGroup_ = device_->createBindGroup({
+            .layout = iblLayout_,
+            .entries = {{.binding = 0, .texture = environment_.irradiance},
+                        {.binding = 1, .texture = environment_.prefiltered},
+                        {.binding = 2, .texture = environment_.brdfLut},
+                        {.binding = 3, .sampler = iblSampler_}},
+        });
+        skyboxGroup_ = device_->createBindGroup({
+            .layout = skyboxLayout_,
+            .entries = {{.binding = 0, .texture = environment_.environment},
+                        {.binding = 1, .sampler = iblSampler_}},
+        });
+        if (!iblGroup_ || !skyboxGroup_) {
+            logError("shader reload: ibl/skybox bind group rebuild failed");
+        }
+    }
+    if (hdrResolve_) {
+        tonemapGroup_ = device_->createBindGroup({
+            .layout = tonemapLayout_,
+            .entries = {{.binding = 0, .texture = hdrResolve_},
+                        {.binding = 1, .sampler = tonemapSampler_}},
+        });
+        if (!tonemapGroup_) {
+            logError("shader reload: tonemap bind group rebuild failed");
+        }
+    }
 }
 
 bool ForwardRenderer::reloadPipelines() {
@@ -420,7 +741,10 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
 
     materialFactorBuffers_.clear();
     materialGroups_.clear();
+    materialDirty_.clear();
     materialParams_.clear();
+    materialTextures_.clear();
+    materialShaders_.clear();
     for (const asset::MaterialData& mat : sceneAsset.materials) {
         const MaterialTextures textures{.baseColor = textureOr(mat.baseColorTexture, defaultWhite_),
                                         .metallicRoughness =
@@ -505,6 +829,19 @@ void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene) {
     device_->queue().writeBuffer(*frameUniforms_[frameSlot_], 0, &data, sizeof(data));
 }
 
+void ForwardRenderer::flushDirtyMaterials() {
+    for (std::size_t i = 0; i < materialParams_.size(); ++i) {
+        if (!materialDirty_[i][frameSlot_]) {
+            continue;
+        }
+        const MaterialFactorsData factors = toFactors(materialParams_[i]);
+        if (rhi::Ptr<rhi::Buffer>& buffer = materialFactorBuffers_[i][frameSlot_]) {
+            device_->queue().writeBuffer(*buffer, 0, &factors, sizeof(factors));
+        }
+        materialDirty_[i][frameSlot_] = false;
+    }
+}
+
 void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& scene,
                              rhi::Texture* output, const Overlay& overlay) {
     KUMO_ASSERT(device_ != nullptr);
@@ -516,6 +853,35 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
     // races the buffer the GPU is still reading.
     frameSlot_ = (frameSlot_ + 1) % kFrameSlots;
     updateFrameUniforms(scene);
+    flushDirtyMaterials();
+
+    draws_.clear();
+    scene.entities.forEach([&](scene::EntityId, const scene::Entity& entity) {
+        if (entity.meshIndex < 0 || static_cast<std::size_t>(entity.meshIndex) >= meshes_.size()) {
+            return;
+        }
+        const std::size_t materialIndex =
+            entity.materialIndex >= 0 &&
+                    static_cast<std::size_t>(entity.materialIndex) < materialGroups_.size()
+                ? static_cast<std::size_t>(entity.materialIndex)
+                : defaultMaterialIndex_;
+        draws_.push_back({.meshIndex = static_cast<std::size_t>(entity.meshIndex),
+                          .materialIndex = materialIndex,
+                          .model = entity.transform.matrix()});
+    });
+    // Shared-pipeline draws first, in their original relative order (a scene
+    // with no custom materials never reorders, keeping the command stream and
+    // golden output bit-identical); custom-pipeline draws then group by
+    // material so setPipeline only switches on an actual pipeline change.
+    const auto usesCustomPipeline = [&](const DrawItem& draw) {
+        return materialShaders_[draw.materialIndex].has_value();
+    };
+    const auto customBegin =
+        std::stable_partition(draws_.begin(), draws_.end(),
+                              [&](const DrawItem& draw) { return !usesCustomPipeline(draw); });
+    std::stable_sort(customBegin, draws_.end(), [](const DrawItem& a, const DrawItem& b) {
+        return a.materialIndex < b.materialIndex;
+    });
 
     rhi::RenderPassEncoder& scenePass = encoder.beginRenderPass({
         .colorAttachments = {{.texture = hdrMsaa_.get(),
@@ -531,27 +897,31 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
     scenePass.setPipeline(*pbrPipeline_);
     scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
     scenePass.setBindGroup(2, *iblGroup_);
-    scene.entities.forEach([&](scene::EntityId, const scene::Entity& entity) {
-        if (entity.meshIndex < 0 || static_cast<std::size_t>(entity.meshIndex) >= meshes_.size()) {
-            return;
+    rhi::RenderPipeline* currentPipeline = pbrPipeline_.get();
+    for (const DrawItem& drawItem : draws_) {
+        rhi::RenderPipeline* pipeline =
+            usesCustomPipeline(drawItem) ? materialShaders_[drawItem.materialIndex]->pipeline.get()
+                                         : pbrPipeline_.get();
+        if (pipeline != currentPipeline) {
+            // Metal's argument table state survives a pipeline switch, but
+            // re-binding on switch is the safe contract across backends.
+            scenePass.setPipeline(*pipeline);
+            scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
+            scenePass.setBindGroup(2, *iblGroup_);
+            currentPipeline = pipeline;
         }
-        const GpuMesh& mesh = meshes_[static_cast<std::size_t>(entity.meshIndex)];
-        const std::size_t materialIndex =
-            entity.materialIndex >= 0 &&
-                    static_cast<std::size_t>(entity.materialIndex) < materialGroups_.size()
-                ? static_cast<std::size_t>(entity.materialIndex)
-                : defaultMaterialIndex_;
-        scenePass.setBindGroup(1, *materialGroups_[materialIndex]);
+        scenePass.setBindGroup(1, *materialGroups_[drawItem.materialIndex][frameSlot_]);
 
+        const GpuMesh& mesh = meshes_[drawItem.meshIndex];
         PerDrawData draw;
-        draw.model = entity.transform.matrix();
+        draw.model = drawItem.model;
         draw.normalMatrix = math::transpose(math::inverse(draw.model));
         scenePass.setPushConstants(rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment, &draw,
                                    sizeof(draw));
         scenePass.setVertexBuffer(0, *mesh.vertexBuffer);
         scenePass.setIndexBuffer(*mesh.indexBuffer, rhi::IndexFormat::Uint32);
         scenePass.drawIndexed(mesh.indexCount);
-    });
+    }
     if (skyboxGroup_) {
         scenePass.setPipeline(*skyboxPipeline_);
         scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);

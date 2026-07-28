@@ -1,6 +1,6 @@
-binding set=0 binding=0 type=sampled_texture name=environmentMap
-binding set=0 binding=1 type=sampler name=environmentSampler
-binding set=0 binding=2 type=storage_texture name=dstFace
+binding set=0 binding=0 type=sampled_texture name=environmentMap bufferSize=0
+binding set=0 binding=1 type=sampler name=environmentSampler bufferSize=0
+binding set=0 binding=2 type=storage_texture name=dstFace bufferSize=0
 push_constant_size=4
 vertex_input_locations=
 workgroup_size=8,8,1

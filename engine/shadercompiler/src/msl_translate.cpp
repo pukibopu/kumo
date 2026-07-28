@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <exception>
 #include <format>
+#include <string_view>
 #include <tuple>
 
 namespace kumo::shaderc::detail {
@@ -34,11 +35,20 @@ spv::ExecutionModel toExecutionModel(Stage stage) {
 void collect(spirv_cross::CompilerMSL& compiler,
              const spirv_cross::SmallVector<spirv_cross::Resource>& list, const char* type,
              spv::ExecutionModel model, Reflection& reflection, bool isSampler = false) {
+    const bool isBuffer =
+        std::string_view(type) == "uniform_buffer" || std::string_view(type) == "storage_buffer";
     for (const spirv_cross::Resource& res : list) {
         const std::uint32_t set = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
         const std::uint32_t binding = compiler.get_decoration(res.id, spv::DecorationBinding);
-        reflection.bindings.push_back(
-            {.set = set, .binding = binding, .type = type, .name = res.name});
+        const std::uint32_t bufferSize =
+            isBuffer ? static_cast<std::uint32_t>(
+                           compiler.get_declared_struct_size(compiler.get_type(res.base_type_id)))
+                     : 0;
+        reflection.bindings.push_back({.set = set,
+                                       .binding = binding,
+                                       .type = type,
+                                       .name = res.name,
+                                       .bufferSize = bufferSize});
 
         const std::uint32_t flat = set * kMaxBindingsPerSet + binding;
         spirv_cross::MSLResourceBinding remap{};

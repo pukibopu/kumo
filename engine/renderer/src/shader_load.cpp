@@ -47,6 +47,7 @@ std::optional<rhi::BindingType> toBindingType(const std::string& type) {
 struct MergedBinding {
     rhi::BindingType type = rhi::BindingType::UniformBuffer;
     rhi::ShaderStage visibility = rhi::ShaderStage::None;
+    std::uint32_t bufferSize = 0;
 };
 
 std::map<std::pair<std::uint32_t, std::uint32_t>, MergedBinding>
@@ -63,6 +64,7 @@ mergeBindings(std::span<const StageReflection> stages) {
             MergedBinding& entry = merged[{binding.set, binding.binding}];
             entry.type = *type;
             entry.visibility = entry.visibility | stage.stage;
+            entry.bufferSize = binding.bufferSize;
         }
     }
     return merged;
@@ -132,11 +134,51 @@ layoutsFromReflection(rhi::Device& device, std::span<const StageReflection> stag
 std::string layoutSignature(std::span<const StageReflection> stages) {
     std::string out;
     for (const auto& [key, binding] : mergeBindings(stages)) {
-        out += std::format("{}:{}:{}:{};", key.first, key.second,
+        out += std::format("{}:{}:{}:{}:{};", key.first, key.second,
                            static_cast<std::uint32_t>(binding.type),
-                           static_cast<std::uint32_t>(binding.visibility));
+                           static_cast<std::uint32_t>(binding.visibility), binding.bufferSize);
     }
     return out;
+}
+
+std::optional<std::string> setMismatch(const shaderc::Reflection& custom,
+                                       const shaderc::Reflection& shared, std::uint32_t set) {
+    std::map<std::uint32_t, const shaderc::ReflectionBinding*> customBindings;
+    std::map<std::uint32_t, const shaderc::ReflectionBinding*> sharedBindings;
+    for (const shaderc::ReflectionBinding& binding : custom.bindings) {
+        if (binding.set == set) {
+            customBindings[binding.binding] = &binding;
+        }
+    }
+    for (const shaderc::ReflectionBinding& binding : shared.bindings) {
+        if (binding.set == set) {
+            sharedBindings[binding.binding] = &binding;
+        }
+    }
+
+    for (const auto& [bindingIndex, sharedBinding] : sharedBindings) {
+        const auto it = customBindings.find(bindingIndex);
+        if (it == customBindings.end()) {
+            return std::format("set {} binding {} ({}) is missing", set, bindingIndex,
+                               sharedBinding->type);
+        }
+        const shaderc::ReflectionBinding* customBinding = it->second;
+        if (customBinding->type != sharedBinding->type) {
+            return std::format("set {} binding {} type changed from {} to {}", set, bindingIndex,
+                               sharedBinding->type, customBinding->type);
+        }
+        if (sharedBinding->bufferSize != customBinding->bufferSize) {
+            return std::format("set {} binding {} buffer size changed from {} to {}", set,
+                               bindingIndex, sharedBinding->bufferSize, customBinding->bufferSize);
+        }
+    }
+    for (const auto& [bindingIndex, customBinding] : customBindings) {
+        if (!sharedBindings.contains(bindingIndex)) {
+            return std::format("set {} binding {} ({}) is not part of the shared pipeline", set,
+                               bindingIndex, customBinding->type);
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace kumo::renderer::detail

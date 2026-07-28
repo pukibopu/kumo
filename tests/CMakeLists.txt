@@ -9,6 +9,7 @@ add_executable(kumo_tests
     test_primitives.cpp
     test_shaderc.cpp
     test_shader_snapshots.cpp
+    test_renderer_compat.cpp
     test_agent_tool_registry.cpp
     test_agent_scene_tools.cpp
     test_agent_session.cpp
@@ -19,12 +20,16 @@ add_executable(kumo_tests
     test_agent_config.cpp
 )
 target_link_libraries(kumo_tests PRIVATE doctest::doctest kumo_core kumo_math kumo_shaderc
-    kumo_scene kumo_asset kumo_agent nlohmann_json::nlohmann_json)
+    kumo_scene kumo_asset kumo_agent kumo_renderer nlohmann_json::nlohmann_json)
 target_compile_definitions(kumo_tests PRIVATE
     KUMO_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders"
     KUMO_SNAPSHOT_DIR="${CMAKE_SOURCE_DIR}/tests/snapshots"
     KUMO_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
     KUMO_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
+# test_renderer_compat.cpp reaches into kumo_renderer's private detail:: helpers
+# (shader_load.h is not a public header); kumo_agent already links kumo_renderer
+# PRIVATE, which does not propagate the include path.
+target_include_directories(kumo_tests PRIVATE ${CMAKE_SOURCE_DIR}/engine/renderer/src)
 kumo_target_warnings(kumo_tests)
 if(MSVC)
     # doctest 2.4.12 specializes std::tuple, which recent MSVC flags as C5285.

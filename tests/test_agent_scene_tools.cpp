@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <format>
 #include <string>
 
 using namespace kumo;
@@ -30,11 +31,11 @@ struct Fixture {
 
 } // namespace
 
-TEST_CASE("scene tools register all seven with object schemas") {
+TEST_CASE("scene tools register all eight with object schemas") {
     Fixture f;
-    const char* expected[] = {"scene_list",          "scene_add_entity", "scene_remove_entity",
-                              "scene_set_transform", "camera_set",       "light_set",
-                              "material_set_param"};
+    const char* expected[] = {"scene_list",          "scene_add_entity",    "scene_add_entities",
+                              "scene_remove_entity", "scene_set_transform", "camera_set",
+                              "light_set",           "material_set_param"};
     for (const char* name : expected) {
         const ToolDef* def = f.registry.find(name);
         REQUIRE_MESSAGE(def != nullptr, name);
@@ -46,6 +47,7 @@ TEST_CASE("scene tools register all seven with object schemas") {
     }
     CHECK(f.registry.find("scene_remove_entity")->destructive);
     CHECK(!f.registry.find("scene_add_entity")->destructive);
+    CHECK(!f.registry.find("scene_add_entities")->destructive);
 }
 
 TEST_CASE("registerSceneListTool registers exactly scene_list") {
@@ -79,9 +81,30 @@ TEST_CASE("scene_add_entity inserts an entity and returns its id") {
     CHECK(entity->primitiveSize == doctest::Approx(1.0f));
 }
 
+TEST_CASE("scene_add_entity accepts every one of the seven primitive names") {
+    Fixture f;
+    const char* names[] = {"sphere", "cube", "plane", "cylinder", "cone", "torus", "capsule"};
+    for (const char* name : names) {
+        const json result =
+            f.invoke("scene_add_entity", std::format(R"({{"primitive":"{}"}})", name));
+        REQUIRE_MESSAGE(result["status"] == "ok", name);
+    }
+    REQUIRE(f.scene.entities.size() == 7);
+    // "cylinder" is the fourth insert (index 3), provenance recorded verbatim.
+    const scene::Entity* cylinder = f.scene.entities.get({3, 0});
+    REQUIRE(cylinder != nullptr);
+    CHECK(cylinder->primitive == "cylinder");
+    CHECK(cylinder->primitiveSize == doctest::Approx(1.0f));
+}
+
 TEST_CASE("scene_add_entity validates primitive and field types") {
     Fixture f;
-    CHECK(f.invoke("scene_add_entity", R"({"primitive":"torus"})")["status"] == "error");
+    const json unknown = f.invoke("scene_add_entity", R"({"primitive":"torus_knot"})");
+    CHECK(unknown["status"] == "error");
+    // The error must name every supported primitive so the model can self-correct.
+    for (const char* name : {"sphere", "cube", "plane", "cylinder", "cone", "torus", "capsule"}) {
+        CHECK_MESSAGE(unknown["message"].get<std::string>().find(name) != std::string::npos, name);
+    }
     CHECK(f.invoke("scene_add_entity", R"({})")["status"] == "error");
     CHECK(f.invoke("scene_add_entity", R"({"primitive":"cube","position":[1,2]})")["status"] ==
           "error");
@@ -94,6 +117,71 @@ TEST_CASE("scene_add_entity validates primitive and field types") {
     CHECK(badName["status"] == "error");
     CHECK(badName["message"].get<std::string>().find("json.exception") == std::string::npos);
     CHECK(badName["message"].get<std::string>().find("name") != std::string::npos);
+    CHECK(f.scene.entities.empty());
+}
+
+TEST_CASE("scene_add_entities inserts every item in order and returns their ids") {
+    Fixture f;
+    const json result = f.invoke("scene_add_entities",
+                                 R"({"entities":[
+{"name":"a","primitive":"sphere","position":[1,0,0]},
+{"name":"b","primitive":"cylinder","position":[2,0,0]},
+{"name":"c","primitive":"capsule","position":[3,0,0]}
+]})");
+    REQUIRE(result["status"] == "ok");
+    REQUIRE(result["entity_ids"].size() == 3);
+    CHECK(result["entity_ids"][0] == "0:0");
+    CHECK(result["entity_ids"][1] == "1:0");
+    CHECK(result["entity_ids"][2] == "2:0");
+    REQUIRE(f.scene.entities.size() == 3);
+
+    const scene::Entity* a = f.scene.entities.get({0, 0});
+    const scene::Entity* b = f.scene.entities.get({1, 0});
+    const scene::Entity* c = f.scene.entities.get({2, 0});
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    REQUIRE(c != nullptr);
+    CHECK(a->name == "a");
+    CHECK(a->primitive == "sphere");
+    CHECK(b->name == "b");
+    CHECK(b->primitive == "cylinder");
+    CHECK(b->transform.position.x == doctest::Approx(2.0f));
+    CHECK(c->name == "c");
+    CHECK(c->primitive == "capsule");
+}
+
+TEST_CASE("scene_add_entities is atomic: one bad item creates nothing") {
+    Fixture f;
+    const json result = f.invoke("scene_add_entities",
+                                 R"({"entities":[
+{"primitive":"cube"},
+{"primitive":"cube","scale":[1,-1,1]},
+{"primitive":"cube"}
+]})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("entities[1]") != std::string::npos);
+    CHECK(f.scene.entities.empty());
+}
+
+TEST_CASE("scene_add_entities rejects an empty array") {
+    Fixture f;
+    const json result = f.invoke("scene_add_entities", R"({"entities":[]})");
+    CHECK(result["status"] == "error");
+    CHECK(f.scene.entities.empty());
+}
+
+TEST_CASE("scene_add_entities rejects more than 128 entities") {
+    Fixture f;
+    std::string args = R"({"entities":[)";
+    for (int i = 0; i < 129; ++i) {
+        if (i > 0) {
+            args += ",";
+        }
+        args += R"({"primitive":"cube"})";
+    }
+    args += "]}";
+    const json result = f.invoke("scene_add_entities", args);
+    CHECK(result["status"] == "error");
     CHECK(f.scene.entities.empty());
 }
 

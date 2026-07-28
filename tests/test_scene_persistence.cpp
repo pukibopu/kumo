@@ -47,6 +47,24 @@ TEST_CASE("save/parse round trip preserves entities, camera and lights") {
     gltfNode.materialIndex = -1;
     scene.entities.insert(gltfNode);
 
+    scene::Entity capsule;
+    capsule.name = "capsule";
+    capsule.transform.position = {2.0f, 0.0f, -1.0f};
+    capsule.meshIndex = 1;
+    capsule.materialIndex = -1;
+    capsule.primitive = "capsule";
+    capsule.primitiveSize = 1.5f;
+    scene.entities.insert(capsule);
+
+    scene::Entity cylinder;
+    cylinder.name = "cylinder";
+    cylinder.transform.position = {0.0f, 0.0f, 2.0f};
+    cylinder.meshIndex = 2;
+    cylinder.materialIndex = -1;
+    cylinder.primitive = "cylinder";
+    cylinder.primitiveSize = 0.8f;
+    scene.entities.insert(cylinder);
+
     CHECK(scene.addLight({.type = scene::LightType::Directional, .intensity = 2.0f}));
     CHECK(scene.addLight({.type = scene::LightType::Point,
                           .color = {1.0f, 0.0f, 0.0f},
@@ -70,7 +88,7 @@ TEST_CASE("save/parse round trip preserves entities, camera and lights") {
     const scene::SavedScene& saved = *parsed;
 
     CHECK(saved.modelPath == "assets/model.glb");
-    REQUIRE(saved.entities.size() == 2);
+    REQUIRE(saved.entities.size() == 4);
 
     const scene::SavedEntity& savedBall = saved.entities[0];
     CHECK(savedBall.entity.name == "ball");
@@ -96,6 +114,21 @@ TEST_CASE("save/parse round trip preserves entities, camera and lights") {
     CHECK(savedNode.entity.meshIndex == 3);
     CHECK(savedNode.entity.materialIndex == -1);
     CHECK(!savedNode.material.has_value());
+
+    const scene::SavedEntity& savedCapsule = saved.entities[2];
+    CHECK(savedCapsule.entity.name == "capsule");
+    CHECK(savedCapsule.entity.primitive == "capsule");
+    CHECK(savedCapsule.entity.primitiveSize == 1.5f);
+    CHECK(savedCapsule.entity.transform.position.x == 2.0f);
+    CHECK(savedCapsule.entity.transform.position.z == -1.0f);
+    CHECK(!savedCapsule.material.has_value());
+
+    const scene::SavedEntity& savedCylinder = saved.entities[3];
+    CHECK(savedCylinder.entity.name == "cylinder");
+    CHECK(savedCylinder.entity.primitive == "cylinder");
+    CHECK(savedCylinder.entity.primitiveSize == 0.8f);
+    CHECK(savedCylinder.entity.transform.position.z == 2.0f);
+    CHECK(!savedCylinder.material.has_value());
 
     CHECK(saved.camera.position.y == 1.0f);
     CHECK(saved.camera.rotation.w == scene.camera.rotation.w);

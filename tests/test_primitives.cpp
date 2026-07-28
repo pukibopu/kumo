@@ -3,9 +3,12 @@
 #include <kumo/asset/primitives.h>
 #include <kumo/math/math.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 using namespace kumo;
@@ -243,4 +246,203 @@ TEST_CASE("primitive builders clamp degenerate arguments") {
     asset::MeshData dense = asset::makeSphere(1.0f, 4096, 4096);
     CHECK(dense.vertices.size() == static_cast<std::size_t>(257) * 129);
     CHECK(indicesInRange(dense));
+}
+
+TEST_CASE("makeCylinder is a capped tube facing outward and up/down") {
+    const float radius = 0.6f;
+    const float halfHeight = 0.9f;
+    const std::uint32_t segments = 20;
+    asset::MeshData mesh = asset::makeCylinder(radius, halfHeight, segments);
+
+    // Side (2 rows) + two disk caps (1 center + segments+1 rim each).
+    CHECK(mesh.vertices.size() == static_cast<std::size_t>(4 * segments + 6));
+    CHECK(mesh.indices.size() == static_cast<std::size_t>(12 * segments));
+    CHECK(mesh.indices.size() % 3 == 0);
+    CHECK(indicesInRange(mesh));
+    CHECK(allFinite(mesh));
+    CHECK(uvInUnitRange(mesh));
+    CHECK(unitNormalsAndTangents(mesh));
+    CHECK(windsOutward(mesh));
+    CHECK(mesh.materialIndex == -1);
+
+    bool sideOnCylinder = true;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(2) * (segments + 1); ++i) {
+        const asset::Vertex& v = mesh.vertices[i];
+        if (std::abs(std::sqrt(v.px * v.px + v.pz * v.pz) - radius) > 1e-4f) {
+            sideOnCylinder = false;
+        }
+        if (std::abs(std::abs(v.py) - halfHeight) > 1e-4f) {
+            sideOnCylinder = false;
+        }
+    }
+    CHECK(sideOnCylinder);
+
+    checkAabb(mesh.localAabb, {-radius, -halfHeight, -radius}, {radius, halfHeight, radius});
+}
+
+TEST_CASE("makeCone is a capped mantle with per-generator normals") {
+    const float radius = 0.4f;
+    const float halfHeight = 0.7f;
+    const std::uint32_t segments = 16;
+    asset::MeshData mesh = asset::makeCone(radius, halfHeight, segments);
+
+    // Side (apex row + rim row) + one bottom disk cap.
+    CHECK(mesh.vertices.size() == static_cast<std::size_t>(3 * segments + 4));
+    CHECK(mesh.indices.size() == static_cast<std::size_t>(6 * segments));
+    CHECK(mesh.indices.size() % 3 == 0);
+    CHECK(indicesInRange(mesh));
+    CHECK(allFinite(mesh));
+    CHECK(uvInUnitRange(mesh));
+    CHECK(unitNormalsAndTangents(mesh));
+    CHECK(windsOutward(mesh));
+    CHECK(mesh.materialIndex == -1);
+
+    // Every apex-row vertex sits at the same point even though its normal
+    // differs by column (the mantle's normal varies with phi at the apex).
+    bool apexAtPeak = true;
+    for (std::size_t i = 0; i <= segments; ++i) {
+        const asset::Vertex& v = mesh.vertices[i];
+        if (std::abs(v.px) > 1e-5f || std::abs(v.py - halfHeight) > 1e-5f ||
+            std::abs(v.pz) > 1e-5f) {
+            apexAtPeak = false;
+        }
+    }
+    CHECK(apexAtPeak);
+
+    checkAabb(mesh.localAabb, {-radius, -halfHeight, -radius}, {radius, halfHeight, radius});
+}
+
+TEST_CASE("makeTorus is a fully periodic tube with no poles") {
+    const float majorRadius = 0.5f;
+    const float minorRadius = 0.2f;
+    const std::uint32_t segments = 24;
+    const std::uint32_t rings = 12;
+    asset::MeshData mesh = asset::makeTorus(majorRadius, minorRadius, segments, rings);
+
+    CHECK(mesh.vertices.size() == static_cast<std::size_t>(segments + 1) * (rings + 1));
+    CHECK(mesh.indices.size() == static_cast<std::size_t>(segments) * rings * 6);
+    CHECK(mesh.indices.size() % 3 == 0);
+    CHECK(indicesInRange(mesh));
+    CHECK(allFinite(mesh));
+    CHECK(uvInUnitRange(mesh));
+    CHECK(unitNormalsAndTangents(mesh));
+    CHECK(windsOutward(mesh));
+    CHECK(mesh.materialIndex == -1);
+
+    bool onTorus = true;
+    for (const asset::Vertex& v : mesh.vertices) {
+        const float radial = std::sqrt(v.px * v.px + v.pz * v.pz);
+        const float tubeDistance =
+            std::sqrt((radial - majorRadius) * (radial - majorRadius) + v.py * v.py);
+        if (std::abs(tubeDistance - minorRadius) > 1e-3f) {
+            onTorus = false;
+        }
+    }
+    CHECK(onTorus);
+
+    const float outer = majorRadius + minorRadius;
+    checkAabb(mesh.localAabb, {-outer, -minorRadius, -outer}, {outer, minorRadius, outer});
+}
+
+TEST_CASE("makeTorus clamps the minor radius below the major radius") {
+    asset::MeshData mesh = asset::makeTorus(0.2f, 5.0f, 12, 6);
+    CHECK(allFinite(mesh));
+    CHECK(unitNormalsAndTangents(mesh));
+    CHECK(windsOutward(mesh));
+    // A self-intersecting tube would push the AABB well past 2x majorRadius.
+    CHECK(mesh.localAabb.max.x < 0.4f);
+}
+
+TEST_CASE("makeCapsule is a cylinder body with hemisphere caps sharing the rim rings") {
+    const float radius = 0.3f;
+    const float halfHeight = 0.5f;
+    const std::uint32_t segments = 16;
+    const std::uint32_t rings = 6;
+    asset::MeshData mesh = asset::makeCapsule(radius, halfHeight, segments, rings);
+
+    CHECK(mesh.vertices.size() == static_cast<std::size_t>(segments + 1) * (2 * rings + 2));
+    CHECK(mesh.indices.size() == static_cast<std::size_t>(12) * segments * rings);
+    CHECK(mesh.indices.size() % 3 == 0);
+    CHECK(indicesInRange(mesh));
+    CHECK(allFinite(mesh));
+    CHECK(uvInUnitRange(mesh));
+    CHECK(unitNormalsAndTangents(mesh));
+    CHECK(windsOutward(mesh));
+    CHECK(mesh.materialIndex == -1);
+
+    bool onCapsule = true;
+    for (const asset::Vertex& v : mesh.vertices) {
+        const float clampedY = std::clamp(v.py, -halfHeight, halfHeight);
+        const float dx = v.px;
+        const float dy = v.py - clampedY;
+        const float dz = v.pz;
+        const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (std::abs(distance - radius) > 1e-4f) {
+            onCapsule = false;
+        }
+    }
+    CHECK(onCapsule);
+
+    checkAabb(mesh.localAabb, {-radius, -(halfHeight + radius), -radius},
+              {radius, halfHeight + radius, radius});
+}
+
+TEST_CASE("primitive builders (4-7) clamp degenerate arguments") {
+    asset::MeshData cylinder = asset::makeCylinder(0.0f, 0.0f, 0);
+    CHECK(allFinite(cylinder));
+    CHECK(indicesInRange(cylinder));
+    CHECK(unitNormalsAndTangents(cylinder));
+    CHECK(cylinder.localAabb.max.x > cylinder.localAabb.min.x);
+
+    asset::MeshData cone = asset::makeCone(-1.0f, -1.0f, 1);
+    CHECK(allFinite(cone));
+    CHECK(indicesInRange(cone));
+    CHECK(unitNormalsAndTangents(cone));
+    CHECK(cone.localAabb.max.y > cone.localAabb.min.y);
+
+    asset::MeshData torus = asset::makeTorus(0.0f, 0.0f, 0, 0);
+    CHECK(allFinite(torus));
+    CHECK(indicesInRange(torus));
+    CHECK(unitNormalsAndTangents(torus));
+    CHECK(torus.localAabb.max.x > torus.localAabb.min.x);
+
+    asset::MeshData capsule = asset::makeCapsule(0.0f, 0.0f, 0, 0);
+    CHECK(allFinite(capsule));
+    CHECK(indicesInRange(capsule));
+    CHECK(unitNormalsAndTangents(capsule));
+    CHECK(capsule.localAabb.max.y > capsule.localAabb.min.y);
+}
+
+TEST_CASE("makePrimitive maps all seven names and rejects unknown ones") {
+    const std::string_view names[] = {"sphere", "cube",  "plane",  "cylinder",
+                                      "cone",   "torus", "capsule"};
+    for (std::string_view name : names) {
+        const std::optional<asset::MeshData> mesh = asset::makePrimitive(name, 2.0f);
+        REQUIRE_MESSAGE(mesh.has_value(), name);
+        CHECK(!mesh->vertices.empty());
+        CHECK(!mesh->indices.empty());
+    }
+    CHECK(!asset::makePrimitive("torus_knot", 1.0f).has_value());
+    CHECK(!asset::makePrimitive("", 1.0f).has_value());
+}
+
+TEST_CASE("makePrimitive's size parameter flows into the AABB extent") {
+    const float size = 2.4f;
+    // sphere/cube/plane: overall extent equals size on every non-flat axis.
+    CHECK(asset::makePrimitive("sphere", size)->localAabb.max.x * 2.0f ==
+          doctest::Approx(size).epsilon(0.01));
+    CHECK(asset::makePrimitive("cube", size)->localAabb.max.x * 2.0f ==
+          doctest::Approx(size).epsilon(0.01));
+    CHECK(asset::makePrimitive("plane", size)->localAabb.max.x * 2.0f ==
+          doctest::Approx(size).epsilon(0.01));
+    // cylinder/cone/capsule: `size` is the overall height.
+    const asset::MeshData cylinder = *asset::makePrimitive("cylinder", size);
+    CHECK(cylinder.localAabb.max.y - cylinder.localAabb.min.y == doctest::Approx(size));
+    const asset::MeshData cone = *asset::makePrimitive("cone", size);
+    CHECK(cone.localAabb.max.y - cone.localAabb.min.y == doctest::Approx(size));
+    const asset::MeshData capsule = *asset::makePrimitive("capsule", size);
+    CHECK(capsule.localAabb.max.y - capsule.localAabb.min.y == doctest::Approx(size));
+    // torus: `size` is the overall footprint diameter (major loop + tube).
+    const asset::MeshData torus = *asset::makePrimitive("torus", size);
+    CHECK(torus.localAabb.max.x - torus.localAabb.min.x == doctest::Approx(size));
 }

@@ -24,9 +24,10 @@ struct SceneToolContext {
 // must outlive the registry.
 void registerSceneListTool(ToolRegistry& registry, SceneToolContext context);
 
-// Registers the seven scene tools (ADR 0028): scene_list plus the six mutating
-// tools. The context is copied into the handlers; the scene and renderer it
-// points to must outlive the registry.
+// Registers the eight scene tools (ADR 0028): scene_list plus the seven
+// mutating tools (scene_add_entity, scene_add_entities and five more). The
+// context is copied into the handlers; the scene and renderer it points to
+// must outlive the registry.
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context);
 
 } // namespace kumo::agent

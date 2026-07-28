@@ -47,7 +47,10 @@ constexpr const char* kSceneSystemPrompt =
     "You are the scene assistant inside kumo, a physically based Metal renderer. "
     "You can only affect the scene through the provided tools; never invent tool names or "
     "entity ids. Coordinates are right-handed with Y up and the camera looking down -Z; "
-    "distances are in meters, angles in degrees, colors linear. "
+    "distances are in meters, angles in degrees, colors linear. Available primitives are "
+    "sphere, cube, plane, cylinder, cone, torus and capsule. "
+    "For multi-entity builds use scene_add_entities (one call, up to 128 entities) instead of "
+    "repeated single adds. "
     "Call scene_list before spatial reasoning or edits that depend on current state. "
     "Tool errors come back as JSON with status \"error\": read the message, correct the "
     "call and retry. Keep replies short. Always reply in the user's language.";
@@ -764,19 +767,14 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
     for (const scene::SavedEntity& savedEntity : saved.entities) {
         scene::Entity entity = savedEntity.entity;
         if (!entity.primitive.empty()) {
-            asset::MeshData mesh;
-            const float half = entity.primitiveSize * 0.5f;
-            if (entity.primitive == "sphere") {
-                mesh = asset::makeSphere(half);
-            } else if (entity.primitive == "cube") {
-                mesh = asset::makeCube(half);
-            } else if (entity.primitive == "plane") {
-                mesh = asset::makePlane(half);
-            } else {
+            std::optional<asset::MeshData> built =
+                asset::makePrimitive(entity.primitive, entity.primitiveSize);
+            if (!built.has_value()) {
                 logError("scene load: unknown primitive '{}' on entity '{}', skipping",
                          entity.primitive, entity.name);
                 continue;
             }
+            asset::MeshData mesh = std::move(*built);
             const MaterialParams material = savedEntity.material.has_value()
                                                 ? toMaterialParams(*savedEntity.material)
                                                 : MaterialParams{};

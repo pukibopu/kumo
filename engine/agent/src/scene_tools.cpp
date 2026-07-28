@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -20,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace kumo::agent {
 
@@ -268,63 +270,155 @@ std::string sceneList(const SceneToolContext& context) {
     return dumpSafe(out);
 }
 
-std::string sceneAddEntity(const SceneToolContext& context, const json& args) {
+// The seven names asset::makePrimitive understands; kept alongside it only for
+// the human-readable error message (asset::makePrimitive itself is the single
+// source of truth for which names actually resolve to geometry).
+constexpr std::array<std::string_view, 7> kPrimitiveNames{"sphere", "cube",  "plane",  "cylinder",
+                                                          "cone",   "torus", "capsule"};
+
+std::string primitiveNameList() {
+    std::string out;
+    for (std::size_t i = 0; i < kPrimitiveNames.size(); ++i) {
+        if (i > 0) {
+            out += ", ";
+        }
+        out += kPrimitiveNames[i];
+    }
+    return out;
+}
+
+// One parsed-and-validated scene_add_entity(ies) item, not yet uploaded to the
+// GPU or inserted into the scene.
+struct EntityInput {
+    scene::Entity entity;
+    ForwardRenderer::MaterialParams material;
+};
+
+// Shared by scene_add_entity and scene_add_entities: validates one item's
+// primitive name, size, transform and material without touching the scene or
+// renderer. The error string is a plain message, not yet wrapped by errorJson,
+// so a caller building an indexed batch error can prefix it first.
+std::expected<EntityInput, std::string> parseEntityInput(const json& args) {
     std::string error;
     std::string primitive;
     if (!readString(args, "primitive", primitive, error)) {
-        return errorJson(error);
+        return std::unexpected(error);
     }
-    if (primitive != "sphere" && primitive != "cube" && primitive != "plane") {
-        return errorJson("primitive must be one of: sphere, cube, plane");
+    if (!asset::makePrimitive(primitive, 1.0f).has_value()) {
+        return std::unexpected(std::format("unknown primitive '{}': must be one of: {}", primitive,
+                                           primitiveNameList()));
     }
     float size = 1.0f;
     if (!readNumber(args, "size", size, error)) {
-        return errorJson(error);
+        return std::unexpected(error);
     }
     if (args.contains("size") && size <= 0.0f) {
-        return errorJson("size must be positive");
+        return std::unexpected(std::string("size must be positive"));
     }
 
-    scene::Entity entity;
-    entity.name = primitive;
-    if (!readString(args, "name", entity.name, error)) {
-        return errorJson(error);
+    EntityInput input;
+    input.entity.name = primitive;
+    if (!readString(args, "name", input.entity.name, error)) {
+        return std::unexpected(error);
     }
-    if (!readTransform(args, entity.transform, error)) {
-        return errorJson(error);
+    if (!readTransform(args, input.entity.transform, error)) {
+        return std::unexpected(error);
     }
-    entity.primitive = primitive;
-    entity.primitiveSize = size;
-    ForwardRenderer::MaterialParams material;
+    input.entity.primitive = primitive;
+    input.entity.primitiveSize = size;
     if (args.contains("material")) {
         if (!args["material"].is_object()) {
-            return errorJson("material must be an object");
+            return std::unexpected(std::string("material must be an object"));
         }
-        if (!readMaterial(args["material"], material, error)) {
-            return errorJson(error);
+        if (!readMaterial(args["material"], input.material, error)) {
+            return std::unexpected(error);
         }
     }
+    return input;
+}
 
+// Builds the mesh, uploads mesh+material (when a renderer is attached) and
+// inserts the entity. The error string is a plain message, matching
+// parseEntityInput, for the same batch-prefixing reason.
+std::expected<scene::EntityId, std::string> buildAndInsertEntity(const SceneToolContext& context,
+                                                                 EntityInput input) {
     if (context.renderer != nullptr) {
-        asset::MeshData mesh;
-        if (primitive == "sphere") {
-            mesh = asset::makeSphere(size * 0.5f);
-        } else if (primitive == "cube") {
-            mesh = asset::makeCube(size * 0.5f);
-        } else {
-            mesh = asset::makePlane(size * 0.5f);
-        }
+        // parseEntityInput already confirmed the name resolves.
+        asset::MeshData mesh =
+            *asset::makePrimitive(input.entity.primitive, input.entity.primitiveSize);
         const std::int32_t meshIndex = context.renderer->addMesh(mesh);
-        const std::int32_t materialIndex = context.renderer->addMaterial(material);
+        const std::int32_t materialIndex = context.renderer->addMaterial(input.material);
         if (meshIndex < 0 || materialIndex < 0) {
-            return errorJson("gpu upload failed");
+            return std::unexpected(std::string("gpu upload failed"));
         }
-        entity.meshIndex = meshIndex;
-        entity.materialIndex = materialIndex;
+        input.entity.meshIndex = meshIndex;
+        input.entity.materialIndex = materialIndex;
+    }
+    return context.scene->entities.insert(input.entity);
+}
+
+std::string sceneAddEntity(const SceneToolContext& context, const json& args) {
+    std::expected<EntityInput, std::string> input = parseEntityInput(args);
+    if (!input.has_value()) {
+        return errorJson(input.error());
+    }
+    std::expected<scene::EntityId, std::string> id =
+        buildAndInsertEntity(context, std::move(*input));
+    if (!id.has_value()) {
+        return errorJson(id.error());
+    }
+    return json{{"status", "ok"}, {"entity_id", formatEntityId(*id)}}.dump();
+}
+
+// Non-destructive: creation only, so it needs none of scene_remove_entity's
+// confirmation gating. Validates every item before creating anything; if a GPU
+// upload fails partway through, the entities this call already inserted are
+// removed again (their GPU resources leak per ADR 0016, same as
+// scene_remove_entity) so a failed call never leaves a partial scene behind.
+std::string sceneAddEntities(const SceneToolContext& context, const json& args) {
+    const auto it = args.find("entities");
+    if (it == args.end() || !it->is_array()) {
+        return errorJson("entities (array) is required");
+    }
+    if (it->empty()) {
+        return errorJson("entities must not be empty");
+    }
+    if (it->size() > 128) {
+        return errorJson(std::format("entities: at most 128 allowed per call, got {}", it->size()));
     }
 
-    const scene::EntityId id = context.scene->entities.insert(entity);
-    return json{{"status", "ok"}, {"entity_id", formatEntityId(id)}}.dump();
+    std::vector<EntityInput> parsed;
+    parsed.reserve(it->size());
+    for (std::size_t i = 0; i < it->size(); ++i) {
+        if (!(*it)[i].is_object()) {
+            return errorJson(std::format("entities[{}]: must be an object", i));
+        }
+        std::expected<EntityInput, std::string> input = parseEntityInput((*it)[i]);
+        if (!input.has_value()) {
+            return errorJson(std::format("entities[{}]: {}", i, input.error()));
+        }
+        parsed.push_back(std::move(*input));
+    }
+
+    std::vector<scene::EntityId> ids;
+    ids.reserve(parsed.size());
+    for (std::size_t i = 0; i < parsed.size(); ++i) {
+        std::expected<scene::EntityId, std::string> id =
+            buildAndInsertEntity(context, std::move(parsed[i]));
+        if (!id.has_value()) {
+            for (scene::EntityId created : ids) {
+                context.scene->entities.remove(created);
+            }
+            return errorJson(std::format("entities[{}]: {}", i, id.error()));
+        }
+        ids.push_back(*id);
+    }
+
+    json idsJson = json::array();
+    for (scene::EntityId id : ids) {
+        idsJson.push_back(formatEntityId(id));
+    }
+    return json{{"status", "ok"}, {"entity_ids", std::move(idsJson)}}.dump();
 }
 
 std::string sceneRemoveEntity(const SceneToolContext& context, const json& args) {
@@ -501,6 +595,22 @@ json parseArgs(std::string_view argsJson) {
     return json::parse(argsJson, nullptr, false);
 }
 
+// The object-schema properties for one entity, shared verbatim between
+// scene_add_entity's top-level schema and scene_add_entities' array items so
+// the two tools can never drift apart.
+constexpr const char* kEntityPropertiesSchema =
+    R"("name":{"type":"string","description":"Optional display name"},
+"primitive":{"type":"string","enum":["sphere","cube","plane","cylinder","cone","torus","capsule"]},
+"size":{"type":"number","description":"Overall extent in meters (default 1); use scale for non-uniform sizing"},
+"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"World position [x,y,z]"},
+"rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Euler XYZ rotation in degrees"},
+"scale":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+"material":{"type":"object","properties":{
+"base_color":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Linear RGBA"},
+"metallic":{"type":"number"},
+"roughness":{"type":"number"},
+"emissive":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}})";
+
 } // namespace
 
 void registerSceneListTool(ToolRegistry& registry, SceneToolContext context) {
@@ -520,8 +630,8 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
 
     registerSceneListTool(registry, context);
 
-    auto add = [&](const char* name, const char* description, const char* schema, bool destructive,
-                   auto handler) {
+    auto add = [&](const char* name, const char* description, const std::string& schema,
+                   bool destructive, auto handler) {
         registry.add({.name = name,
                       .description = description,
                       .parametersSchema = schema,
@@ -532,22 +642,21 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
     };
 
     add("scene_add_entity",
-        "Add a procedural primitive entity to the scene; returns its entity_id.",
-        R"({"type":"object","properties":{
-"name":{"type":"string","description":"Optional display name"},
-"primitive":{"type":"string","enum":["sphere","cube","plane"]},
-"size":{"type":"number","description":"Overall extent in meters (default 1); use scale for non-uniform sizing"},
-"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"World position [x,y,z]"},
-"rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Euler XYZ rotation in degrees"},
-"scale":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
-"material":{"type":"object","properties":{
-"base_color":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Linear RGBA"},
-"metallic":{"type":"number"},
-"roughness":{"type":"number"},
-"emissive":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}}},
-"required":["primitive"]})",
+        "Add a procedural primitive entity to the scene; returns its entity_id. For multiple "
+        "entities prefer scene_add_entities.",
+        std::string(R"({"type":"object","properties":{)") + kEntityPropertiesSchema +
+            R"(},"required":["primitive"]})",
         false,
         [](const SceneToolContext& ctx, const json& args) { return sceneAddEntity(ctx, args); });
+
+    add("scene_add_entities",
+        "Add up to 128 entities in ONE call; prefer this over repeated scene_add_entity when "
+        "building scenes. Returns entity_ids in input order.",
+        std::string(
+            R"({"type":"object","properties":{"entities":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","properties":{)") +
+            kEntityPropertiesSchema + R"(},"required":["primitive"]}}},"required":["entities"]})",
+        false,
+        [](const SceneToolContext& ctx, const json& args) { return sceneAddEntities(ctx, args); });
 
     add("scene_remove_entity", "Remove an entity from the scene permanently.",
         R"({"type":"object","properties":{

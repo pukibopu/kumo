@@ -141,4 +141,44 @@ std::string layoutSignature(std::span<const StageReflection> stages) {
     return out;
 }
 
+std::optional<std::string> setMismatch(const shaderc::Reflection& custom,
+                                       const shaderc::Reflection& shared, std::uint32_t set) {
+    std::map<std::uint32_t, const shaderc::ReflectionBinding*> customBindings;
+    std::map<std::uint32_t, const shaderc::ReflectionBinding*> sharedBindings;
+    for (const shaderc::ReflectionBinding& binding : custom.bindings) {
+        if (binding.set == set) {
+            customBindings[binding.binding] = &binding;
+        }
+    }
+    for (const shaderc::ReflectionBinding& binding : shared.bindings) {
+        if (binding.set == set) {
+            sharedBindings[binding.binding] = &binding;
+        }
+    }
+
+    for (const auto& [bindingIndex, sharedBinding] : sharedBindings) {
+        const auto it = customBindings.find(bindingIndex);
+        if (it == customBindings.end()) {
+            return std::format("set {} binding {} ({}) is missing", set, bindingIndex,
+                               sharedBinding->type);
+        }
+        const shaderc::ReflectionBinding* customBinding = it->second;
+        if (customBinding->type != sharedBinding->type) {
+            return std::format("set {} binding {} type changed from {} to {}", set, bindingIndex,
+                               sharedBinding->type, customBinding->type);
+        }
+        if (sharedBinding->bufferSize != customBinding->bufferSize) {
+            return std::format("set {} binding {} buffer size changed from {} to {}", set,
+                               bindingIndex, sharedBinding->bufferSize, customBinding->bufferSize);
+        }
+    }
+    for (const auto& [bindingIndex, customBinding] : customBindings) {
+        if (!sharedBindings.contains(bindingIndex)) {
+            return std::format("set {} binding {} ({}) is not part of the shared pipeline", set,
+                               bindingIndex, customBinding->type);
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace kumo::renderer::detail

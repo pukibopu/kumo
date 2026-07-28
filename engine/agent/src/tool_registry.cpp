@@ -21,6 +21,10 @@ bool ToolRegistry::add(ToolDef def, ToolHandler handler) {
     return true;
 }
 
+void ToolRegistry::setBeforeInvoke(BeforeInvoke hook) {
+    beforeInvoke_ = std::move(hook);
+}
+
 std::span<const ToolDef> ToolRegistry::defs() const {
     return defs_;
 }
@@ -35,6 +39,9 @@ const ToolDef* ToolRegistry::find(std::string_view name) const {
 }
 
 std::string ToolRegistry::invoke(std::string_view name, std::string_view argsJson) const {
+    if (beforeInvoke_) {
+        beforeInvoke_(name);
+    }
     for (std::size_t i = 0; i < defs_.size(); ++i) {
         if (defs_[i].name != name) {
             continue;

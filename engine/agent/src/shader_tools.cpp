@@ -1,5 +1,6 @@
 #include <kumo/agent/shader_tools.h>
 
+#include <kumo/agent/entity_id.h>
 #include <kumo/core/assert.h>
 #include <kumo/core/file.h>
 #include <kumo/core/log.h>
@@ -7,7 +8,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -27,26 +27,6 @@ using nlohmann::json;
 
 constexpr int kMaxAttempts = 5;
 
-// Mirrors scene_tools.cpp's entity id helpers; kept local (not exported) since
-// both tool sets need the same "index:generation" shape but nothing else.
-std::optional<scene::EntityId> parseId(std::string_view text) {
-    const std::size_t colon = text.find(':');
-    if (colon == std::string_view::npos) {
-        return std::nullopt;
-    }
-    scene::EntityId id;
-    const std::string_view index = text.substr(0, colon);
-    const std::string_view generation = text.substr(colon + 1);
-    const auto indexResult = std::from_chars(index.begin(), index.end(), id.index);
-    const auto generationResult =
-        std::from_chars(generation.begin(), generation.end(), id.generation);
-    if (indexResult.ec != std::errc{} || indexResult.ptr != index.end() ||
-        generationResult.ec != std::errc{} || generationResult.ptr != generation.end()) {
-        return std::nullopt;
-    }
-    return id;
-}
-
 struct EntityLookup {
     scene::EntityId id;
     scene::Entity* entity = nullptr;
@@ -58,7 +38,7 @@ std::expected<EntityLookup, std::string> findEntity(scene::Scene& scene, const j
         return std::unexpected(errorJson("entity_id (string) is required"));
     }
     const std::string text = it->get<std::string>();
-    const std::optional<scene::EntityId> id = parseId(text);
+    const std::optional<scene::EntityId> id = parseEntityId(text);
     if (!id.has_value()) {
         return std::unexpected(
             errorJson(std::format("entity_id '{}' is not of the form 'index:generation'", text)));

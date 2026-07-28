@@ -27,9 +27,17 @@ std::string errorJson(std::string_view message);
 
 class ToolRegistry {
 public:
+    // Fires at the top of every invoke(), before the name is even resolved
+    // against defs_. The composition root uses this to record an undo point
+    // ahead of every tool call, scene_list/shader_read/viewer_screenshot
+    // excepted (ADR 0044); null by default.
+    using BeforeInvoke = std::function<void(std::string_view name)>;
+
     // False when the name is empty or already taken; defs() reports registrations
     // in the order they were added.
     bool add(ToolDef def, ToolHandler handler);
+
+    void setBeforeInvoke(BeforeInvoke hook);
 
     std::span<const ToolDef> defs() const;
     const ToolDef* find(std::string_view name) const;
@@ -45,6 +53,7 @@ public:
 private:
     std::vector<ToolDef> defs_;
     std::vector<ToolHandler> handlers_;
+    BeforeInvoke beforeInvoke_;
 };
 
 } // namespace kumo::agent

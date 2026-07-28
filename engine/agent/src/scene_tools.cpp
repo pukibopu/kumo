@@ -1,5 +1,6 @@
 #include <kumo/agent/scene_tools.h>
 
+#include <kumo/agent/entity_id.h>
 #include <kumo/asset/primitives.h>
 #include <kumo/core/assert.h>
 #include <kumo/math/math.h>
@@ -21,6 +22,28 @@
 #include <utility>
 
 namespace kumo::agent {
+
+std::string formatEntityId(scene::EntityId id) {
+    return std::format("{}:{}", id.index, id.generation);
+}
+
+std::optional<scene::EntityId> parseEntityId(std::string_view text) {
+    const std::size_t colon = text.find(':');
+    if (colon == std::string_view::npos) {
+        return std::nullopt;
+    }
+    scene::EntityId id;
+    const std::string_view index = text.substr(0, colon);
+    const std::string_view generation = text.substr(colon + 1);
+    const auto indexResult = std::from_chars(index.begin(), index.end(), id.index);
+    const auto generationResult =
+        std::from_chars(generation.begin(), generation.end(), id.generation);
+    if (indexResult.ec != std::errc{} || indexResult.ptr != index.end() ||
+        generationResult.ec != std::errc{} || generationResult.ptr != generation.end()) {
+        return std::nullopt;
+    }
+    return id;
+}
 
 namespace {
 
@@ -54,28 +77,6 @@ json numberArray(const float* values, std::size_t count) {
 json numberArray(const math::float3& v) {
     const float values[3] = {v.x, v.y, v.z};
     return numberArray(values, 3);
-}
-
-std::string formatId(scene::EntityId id) {
-    return std::format("{}:{}", id.index, id.generation);
-}
-
-std::optional<scene::EntityId> parseId(std::string_view text) {
-    const std::size_t colon = text.find(':');
-    if (colon == std::string_view::npos) {
-        return std::nullopt;
-    }
-    scene::EntityId id;
-    const std::string_view index = text.substr(0, colon);
-    const std::string_view generation = text.substr(colon + 1);
-    const auto indexResult = std::from_chars(index.begin(), index.end(), id.index);
-    const auto generationResult =
-        std::from_chars(generation.begin(), generation.end(), id.generation);
-    if (indexResult.ec != std::errc{} || indexResult.ptr != index.end() ||
-        generationResult.ec != std::errc{} || generationResult.ptr != generation.end()) {
-        return std::nullopt;
-    }
-    return id;
 }
 
 // Readers return false only on a present-but-invalid field, with `error` set; an
@@ -189,7 +190,7 @@ std::expected<EntityLookup, std::string> findEntity(scene::Scene& scene, const j
         return std::unexpected(errorJson("entity_id (string) is required"));
     }
     const std::string text = it->get<std::string>();
-    const std::optional<scene::EntityId> id = parseId(text);
+    const std::optional<scene::EntityId> id = parseEntityId(text);
     if (!id.has_value()) {
         return std::unexpected(errorJson(std::format("entity_id '{}' is not of the form "
                                                      "'index:generation'",
@@ -213,7 +214,7 @@ std::string sceneList(const SceneToolContext& context) {
     const scene::Scene& scene = *context.scene;
     json entities = json::array();
     scene.entities.forEach([&](scene::EntityId id, const scene::Entity& entity) {
-        json e{{"id", formatId(id)},
+        json e{{"id", formatEntityId(id)},
                {"name", entity.name},
                {"position", numberArray(entity.transform.position)},
                {"rotation_euler_deg", numberArray(math::eulerDegrees(entity.transform.rotation))},
@@ -323,7 +324,7 @@ std::string sceneAddEntity(const SceneToolContext& context, const json& args) {
     }
 
     const scene::EntityId id = context.scene->entities.insert(entity);
-    return json{{"status", "ok"}, {"entity_id", formatId(id)}}.dump();
+    return json{{"status", "ok"}, {"entity_id", formatEntityId(id)}}.dump();
 }
 
 std::string sceneRemoveEntity(const SceneToolContext& context, const json& args) {

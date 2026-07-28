@@ -6,6 +6,7 @@
 #include <kumo/agent/tool_registry.h>
 #include <kumo/core/main_thread_queue.h>
 #include <kumo/facade/frame_dirty.h>
+#include <kumo/facade/orbit_camera.h>
 #include <kumo/facade/undo_stack.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
@@ -123,6 +124,14 @@ public:
                 const renderer::ForwardRenderer::Overlay& overlay = {});
     void resize(rhi::Extent2D size);
 
+    // Orbit camera input (ADR 0039), shared by every shell: dx/dy are in the
+    // GLFW convention (cursor y grows downward); a shell whose input is
+    // y-up (e.g. AppKit) must flip the sign before calling. Both mark the
+    // camera moved this frame so pump()'s arbitration applies it instead of
+    // syncing from the scene camera, and both call markDirty().
+    void orbitRotate(float dx, float dy);
+    void orbitZoom(float delta);
+
     // Render-on-demand (product shell only; the GLFW viewer ignores this and
     // renders unconditionally). Every state change the runtime can observe
     // calls markDirty(); the shell's tick calls consumeRenderNeeded() to
@@ -164,6 +173,13 @@ private:
     renderer::ForwardRenderer renderer_;
     scene::Scene world_;
     rhi::Extent2D extent_{};
+
+    // Orbit camera arbitration (ADR 0039): orbitMoved_ tracks whether input
+    // moved the camera this frame; pump() applies orbit_ onto world_.camera
+    // when it did, otherwise syncs orbit_ from whatever the scene camera
+    // holds (agent camera_set, scene load, ...).
+    OrbitCamera orbit_;
+    bool orbitMoved_ = false;
 
     // Unified undo (ADR 0044), pending-commit model: agent tool calls open a
     // pending point in the ToolRegistry BeforeInvoke hook below and resolve it

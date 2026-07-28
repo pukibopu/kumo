@@ -1,8 +1,12 @@
 #import "KumoEngine.h"
 
+#include <kumo/agent/confirmation_gate.h>
+#include <kumo/agent/session.h>
 #include <kumo/facade/engine_runtime.h>
 #include <kumo/rhi/rhi.h>
 #include <kumo/rhi_metal/rhi_metal.h>
+
+#import <Security/Security.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -10,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 using namespace kumo;
 
@@ -37,6 +42,82 @@ NSString* toNSString(const std::string& s) {
 
 std::string toStdString(NSString* s) {
     return s.UTF8String != nullptr ? std::string(s.UTF8String) : std::string();
+}
+
+// Chinese hints mirroring apps/viewer/ui.cpp's drawAgentPanels (ADR 0028: UI
+// copy is Chinese, engine strings stay English).
+NSString* const kSceneUnavailableHint =
+    @"未配置模型：在 kumo.config.json 填写 provider（参考 kumo.config.example.json），或用 "
+    @"--offline 运行离线演示脚本。";
+NSString* const kShaderUnavailableHint =
+    @"未配置 shader 模型：在 kumo.config.json 的 agents.shader 填 model（云端如 OpenAI 需同时填 "
+    @"base_url 与 api_key）。";
+
+agent::AgentSession* sessionFor(facade::EngineRuntime& runtime, KumoAgentKind kind) {
+    return kind == KumoAgentKindScene ? runtime.sceneSession() : runtime.shaderSession();
+}
+
+facade::EngineRuntime::Notice& noticeFor(facade::EngineRuntime& runtime, KumoAgentKind kind) {
+    return kind == KumoAgentKindScene ? runtime.sceneRetryNotice() : runtime.shaderRetryNotice();
+}
+
+// Mirrors apps/viewer/ui.cpp's statusText.
+const char* statusText(agent::AgentSession::Status status) {
+    switch (status) {
+    case agent::AgentSession::Status::WaitingForModel:
+        return "思考中…";
+    case agent::AgentSession::Status::RunningTool:
+        return "执行工具中…";
+    case agent::AgentSession::Status::WaitingForConfirmation:
+        return "等待确认…";
+    case agent::AgentSession::Status::Idle:
+        break;
+    }
+    return "输入消息，回车发送";
+}
+
+KumoTranscriptKind toKumoTranscriptKind(agent::AgentSession::TranscriptEntry::Kind kind) {
+    using Kind = agent::AgentSession::TranscriptEntry::Kind;
+    switch (kind) {
+    case Kind::User:
+        return KumoTranscriptKindUser;
+    case Kind::Assistant:
+        return KumoTranscriptKindAssistant;
+    case Kind::ToolCall:
+        return KumoTranscriptKindToolCall;
+    case Kind::ToolResult:
+        return KumoTranscriptKindToolResult;
+    case Kind::Error:
+        return KumoTranscriptKindError;
+    case Kind::Info:
+        break;
+    }
+    return KumoTranscriptKindInfo;
+}
+
+// Reads a Settings-saved key from the Keychain (service "dev.kumo.app",
+// account = env-var name) and seeds the process env with it, `0` meaning
+// "do not overwrite a real env var" already set: the config loader's
+// env-over-file precedence (ADR 0012) then applies it the same as if the
+// user had exported it themselves.
+void applyKeychainEnv(NSString* account, const char* envName) {
+    NSDictionary* query = @{
+        (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService : @"dev.kumo.app",
+        (__bridge id)kSecAttrAccount : account,
+        (__bridge id)kSecReturnData : @YES,
+        (__bridge id)kSecMatchLimit : (__bridge id)kSecMatchLimitOne,
+    };
+    CFTypeRef result = nullptr;
+    const OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (status != errSecSuccess || result == nullptr) {
+        return;
+    }
+    NSData* data = (__bridge_transfer NSData*)result;
+    NSString* value = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (value.length > 0) {
+        setenv(envName, value.UTF8String, 0);
+    }
 }
 
 } // namespace
@@ -102,6 +183,46 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
 
 } // namespace
 
+@interface KumoTranscriptEntry ()
+@property(nonatomic, readwrite) KumoTranscriptKind kind;
+@property(nonatomic, readwrite) NSString* text;
+@property(nonatomic, readwrite) NSString* toolName;
+@property(nonatomic, readwrite) NSString* json;
+@end
+
+@implementation KumoTranscriptEntry
+@end
+
+@interface KumoConfirmPrompt ()
+@property(nonatomic, readwrite) uint64_t promptId;
+@property(nonatomic, readwrite) NSString* toolName;
+@property(nonatomic, readwrite) NSString* argumentsJson;
+@end
+
+@implementation KumoConfirmPrompt
+@end
+
+namespace {
+
+KumoTranscriptEntry* toKumoEntry(const agent::AgentSession::TranscriptEntry& entry) {
+    KumoTranscriptEntry* out = [[KumoTranscriptEntry alloc] init];
+    out.kind = toKumoTranscriptKind(entry.kind);
+    out.text = toNSString(entry.text);
+    out.toolName = toNSString(entry.toolName);
+    out.json = toNSString(entry.json);
+    return out;
+}
+
+KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
+    KumoConfirmPrompt* out = [[KumoConfirmPrompt alloc] init];
+    out.promptId = prompt.id;
+    out.toolName = toNSString(prompt.toolName);
+    out.argumentsJson = toNSString(prompt.argumentsJson);
+    return out;
+}
+
+} // namespace
+
 @interface KumoEngine () {
     // Declaration order is the destruction contract, mirroring EngineRuntime:
     // the runtime is torn down first (dealloc resets it explicitly below),
@@ -113,6 +234,7 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
     // an idle scene, but the scripted-exit smoke test must still terminate.
     int _ticks;
     int _maxFrames;
+    NSString* _configPath;
 }
 @end
 
@@ -130,6 +252,7 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
 
     _maxFrames = scriptedExitFrameCount();
     _ticks = 0;
+    _configPath = [configPath copy];
 
     _device = rhi::metal::createDevice({});
     if (!_device) {
@@ -143,6 +266,13 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
     const auto width = static_cast<std::uint32_t>(std::max(1.0, layer.bounds.size.width * scale));
     const auto height = static_cast<std::uint32_t>(std::max(1.0, layer.bounds.size.height * scale));
     configureSurface(*_surface, width, height);
+
+    // Settings-saved keys live only in the Keychain (ADR 0044 slice G4); seed
+    // the process env from them before the config layer resolves providers, so
+    // its existing env-over-file precedence (ADR 0012) picks them up unchanged.
+    // `setenv(..., 0)` never overwrites a real env var the user already set.
+    applyKeychainEnv(@"OPENAI_API_KEY", "OPENAI_API_KEY");
+    applyKeychainEnv(@"ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY");
 
     const std::string assetDirStd = assetDir.UTF8String;
     const facade::EngineRuntime::Desc desc{
@@ -203,6 +333,14 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
     }
     configureSurface(*_surface, width, height);
     _runtime->resize({.width = width, .height = height});
+}
+
+- (void)orbitRotateDX:(float)dx dy:(float)dy {
+    _runtime->orbitRotate(dx, dy);
+}
+
+- (void)orbitZoom:(float)delta {
+    _runtime->orbitZoom(delta);
 }
 
 - (NSArray<KumoEntityInfo*>*)listEntities {
@@ -294,6 +432,78 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
 
 - (BOOL)redo {
     return _runtime->redo() ? YES : NO;
+}
+
+- (BOOL)agentAvailable:(KumoAgentKind)kind {
+    return sessionFor(*_runtime, kind) != nullptr ? YES : NO;
+}
+
+- (NSString*)agentHint:(KumoAgentKind)kind {
+    if (sessionFor(*_runtime, kind) != nullptr) {
+        return @"";
+    }
+    return kind == KumoAgentKindScene ? kSceneUnavailableHint : kShaderUnavailableHint;
+}
+
+- (BOOL)agentBusy:(KumoAgentKind)kind {
+    agent::AgentSession* session = sessionFor(*_runtime, kind);
+    return session != nullptr && session->busy() ? YES : NO;
+}
+
+- (NSString*)agentStatusLine:(KumoAgentKind)kind {
+    agent::AgentSession* session = sessionFor(*_runtime, kind);
+    if (session == nullptr) {
+        return @"";
+    }
+    const agent::AgentSession::Status status = session->status();
+    std::string line = statusText(status);
+    facade::EngineRuntime::Notice& notice = noticeFor(*_runtime, kind);
+    if (status == agent::AgentSession::Status::WaitingForModel) {
+        if (const std::string retry = notice.get(); !retry.empty()) {
+            line = retry;
+        }
+    } else {
+        notice.clear();
+    }
+    return toNSString(line);
+}
+
+- (BOOL)submit:(KumoAgentKind)kind text:(NSString*)text {
+    agent::AgentSession* session = sessionFor(*_runtime, kind);
+    return session != nullptr && session->submit(toStdString(text)) ? YES : NO;
+}
+
+- (NSArray<KumoTranscriptEntry*>*)drainTranscript:(KumoAgentKind)kind {
+    NSMutableArray<KumoTranscriptEntry*>* out = [NSMutableArray array];
+    agent::AgentSession* session = sessionFor(*_runtime, kind);
+    if (session == nullptr) {
+        return out;
+    }
+    for (const agent::AgentSession::TranscriptEntry& entry : session->drainTranscript()) {
+        [out addObject:toKumoEntry(entry)];
+    }
+    return out;
+}
+
+- (nullable KumoConfirmPrompt*)pendingConfirm {
+    agent::ConfirmationGate* gate = _runtime->confirmGate();
+    if (gate == nullptr) {
+        return nil;
+    }
+    const std::optional<agent::ConfirmationGate::Prompt> prompt = gate->pending();
+    return prompt.has_value() ? toKumoPrompt(*prompt) : nil;
+}
+
+- (void)resolveConfirm:(uint64_t)promptId approved:(BOOL)approved {
+    agent::ConfirmationGate* gate = _runtime->confirmGate();
+    if (gate == nullptr) {
+        return;
+    }
+    gate->resolve(promptId, approved == YES);
+}
+
+- (NSString*)configPath {
+    return _configPath;
 }
 
 - (void)dealloc {

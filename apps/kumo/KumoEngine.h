@@ -1,6 +1,7 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdint.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -33,6 +34,38 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) BOOL hasCustomShader;
 @end
 
+// Which agent session a chat call targets (ADR 0044 slice G4): mirrors
+// EngineRuntime::sceneSession()/shaderSession().
+typedef NS_ENUM(NSInteger, KumoAgentKind) {
+    KumoAgentKindScene = 0,
+    KumoAgentKindShader = 1,
+};
+
+// Flattened mirror of kumo::agent::AgentSession::TranscriptEntry::Kind.
+typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
+    KumoTranscriptKindUser,
+    KumoTranscriptKindAssistant,
+    KumoTranscriptKindToolCall,
+    KumoTranscriptKindToolResult,
+    KumoTranscriptKindError,
+    KumoTranscriptKindInfo,
+};
+
+// One transcript line (ADR 0044): value-typed mirror of
+// kumo::agent::AgentSession::TranscriptEntry. `toolName`/`json` are only
+// meaningful for the ToolCall/ToolResult kinds, matching the C++ struct.
+@interface KumoTranscriptEntry : NSObject
+@property(nonatomic, readonly) KumoTranscriptKind kind;
+@property(nonatomic, readonly) NSString *text, *toolName, *json;
+@end
+
+// A destructive-tool confirmation awaiting a decision (ADR 0022): mirror of
+// kumo::agent::ConfirmationGate::Prompt.
+@interface KumoConfirmPrompt : NSObject
+@property(nonatomic, readonly) uint64_t promptId;
+@property(nonatomic, readonly) NSString *toolName, *argumentsJson;
+@end
+
 // ObjC++ facade over kumo::facade::EngineRuntime (ADR 0044): the only seam the
 // Swift shell talks to. All methods must be called on the main thread.
 @interface KumoEngine : NSObject
@@ -52,6 +85,11 @@ NS_ASSUME_NONNULL_BEGIN
 // Pumps tool work and renders one frame. NO means the runtime asked to quit.
 - (BOOL)tick;
 - (void)resizeWidth:(uint32_t)width height:(uint32_t)height;
+
+// Orbit camera input (ADR 0039): dx/dy are in the GLFW convention (y grows
+// downward); AppKit's mouse events are y-up, so the caller flips the sign.
+- (void)orbitRotateDX:(float)dx dy:(float)dy;
+- (void)orbitZoom:(float)delta;
 
 // Scene tree + inspector (ADR 0044).
 - (NSArray<KumoEntityInfo*>*)listEntities;
@@ -91,6 +129,28 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString*)redoLabel; // empty when none
 - (BOOL)undo;
 - (BOOL)redo;
+
+// Chat, tool log and destructive-confirmation surface (ADR 0044 slice G4).
+// UI copy returned here is Chinese (app-side, ADR 0028); engine-facing
+// strings stay English and never cross this seam.
+- (BOOL)agentAvailable:(KumoAgentKind)kind;
+// Chinese configuration hint when unavailable; empty string otherwise.
+- (NSString*)agentHint:(KumoAgentKind)kind;
+- (BOOL)agentBusy:(KumoAgentKind)kind;
+// Chinese status line (思考中…/执行工具中…/等待确认…/idle hint), with the
+// provider retry notice overriding it while WaitingForModel.
+- (NSString*)agentStatusLine:(KumoAgentKind)kind;
+- (BOOL)submit:(KumoAgentKind)kind text:(NSString*)text;
+// Moves the session's pending entries out; call every poll tick for both
+// kinds regardless of which tab is visible, or the engine-side transcript
+// accumulates unbounded.
+- (NSArray<KumoTranscriptEntry*>*)drainTranscript:(KumoAgentKind)kind;
+- (nullable KumoConfirmPrompt*)pendingConfirm;
+- (void)resolveConfirm:(uint64_t)promptId approved:(BOOL)approved;
+
+// Full path to kumo.config.json, for the settings form to read/overlay/write
+// (api_key fields excluded; those live in the Keychain only).
+- (NSString*)configPath;
 
 @end
 

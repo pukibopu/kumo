@@ -1,20 +1,15 @@
 {
     "provider": {
         "type": "openai",
-        "base_url": "http://127.0.0.1:11434",
+        "base_url": "https://api.openai.com",
         "api_key": "",
-        "model": "qwen2.5:14b",
+        "model": "gpt-5.4",
         "max_tokens": 4096,
         "request_timeout_seconds": 120
     },
     "agents": {
         "scene": { "type": "", "base_url": "", "api_key": "", "model": "" },
-        "shader": {
-            "type": "openai",
-            "base_url": "https://api.openai.com",
-            "api_key": "",
-            "model": ""
-        },
+        "shader": { "type": "", "base_url": "", "api_key": "", "model": "" },
         "confirm_destructive": false,
         "summary_threshold_tokens": 8000
     }

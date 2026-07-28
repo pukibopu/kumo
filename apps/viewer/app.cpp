@@ -4,6 +4,7 @@
 #include <kumo/agent/confirmation_gate.h>
 #include <kumo/agent/fake_provider.h>
 #include <kumo/agent/http_provider.h>
+#include <kumo/agent/mcp_server.h>
 #include <kumo/agent/scene_tools.h>
 #include <kumo/agent/session.h>
 #include <kumo/agent/shader_tools.h>
@@ -27,16 +28,23 @@
 
 #include <imgui.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
+#include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 void* attachMetalLayer(GLFWwindow* window);
@@ -435,7 +443,7 @@ std::unique_ptr<agent::ILLMProvider> makeHttpProvider(const agent::AgentEndpoint
 
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
            const std::filesystem::path& envPath, bool demoPrimitives, bool offline,
-           bool confirmDestructive) {
+           bool confirmDestructive, bool mcp) {
     auto sceneAsset = asset::loadGltf(modelPath);
     if (!sceneAsset) {
         kumo::logError("{}", sceneAsset.error());
@@ -522,6 +530,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     kumo::MainThreadQueue mainQueue;
     agent::ToolRegistry sceneToolRegistry;
     agent::ToolRegistry shaderToolRegistry;
+    agent::ToolRegistry mcpToolRegistry;
     agent::registerSceneTools(sceneToolRegistry, {.scene = &world, .renderer = &renderer});
     agent::registerSceneListTool(shaderToolRegistry, {.scene = &world, .renderer = &renderer});
     agent::ShaderToolContext shaderTools;
@@ -534,7 +543,67 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     };
     shaderTools.templatePath = std::filesystem::path(KUMO_SHADER_DIR) / "pbr.frag";
     shaderTools.generatedDir = std::filesystem::path(KUMO_SHADER_DIR) / "generated";
+    // Shared across the chat registry and the MCP registry below, so the
+    // 5-attempt shader_write cap is a single per-material counter regardless
+    // of which caller is driving it.
+    shaderTools.failureCounts = std::make_shared<std::unordered_map<std::int32_t, int>>();
     agent::registerShaderTools(shaderToolRegistry, shaderTools);
+
+    // The MCP registry exposes the full scene tool set (unlike the shader
+    // assistant's registry above, which only gets scene_list) plus the shader
+    // tools and a screenshot tool for visual verification (ADR 0041). Tool
+    // semantics stay single-sourced: the same contexts back both this
+    // registry and the embedded assistants' registries above.
+    if (mcp) {
+        agent::registerSceneTools(mcpToolRegistry, {.scene = &world, .renderer = &renderer});
+        agent::registerShaderTools(mcpToolRegistry, shaderTools);
+        mcpToolRegistry.add(
+            {.name = "viewer_screenshot",
+             .description = "Render the current scene offscreen and save it as a PNG; the "
+                            "image is attached to the result.",
+             .parametersSchema = R"({"type":"object","properties":{}})",
+             .destructive = false},
+            [&device, &renderer, &world, &fbWidth, &fbHeight](std::string_view) -> std::string {
+                const rhi::Extent2D extent{static_cast<std::uint32_t>(fbWidth),
+                                           static_cast<std::uint32_t>(fbHeight)};
+                rhi::Ptr<rhi::Texture> target = device->createTexture({
+                    .size = extent,
+                    .format = kSwapchainFormat,
+                    .usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::CopySrc,
+                });
+                if (!target) {
+                    return agent::errorJson("failed to create offscreen render target");
+                }
+                rhi::Ptr<rhi::CommandEncoder> encoder = device->queue().createCommandEncoder();
+                renderer.render(*encoder, world, target.get());
+                encoder->finishAndSubmit(nullptr);
+                device->queue().waitIdle();
+
+                std::vector<std::uint8_t> pixels(static_cast<std::size_t>(extent.width) *
+                                                 extent.height * 4);
+                if (!device->queue().readTexture(*target, pixels.data(),
+                                                 static_cast<std::uint64_t>(extent.width) * 4,
+                                                 extent)) {
+                    return agent::errorJson("screenshot readback failed");
+                }
+                // Swapchain is BGRA; PNG wants RGBA.
+                for (std::size_t i = 0; i < pixels.size(); i += 4) {
+                    std::swap(pixels[i], pixels[i + 2]);
+                }
+                const std::filesystem::path path =
+                    std::filesystem::current_path() / "mcp_screenshot.png";
+                if (!asset::writePng(path, extent.width, extent.height, pixels.data())) {
+                    return agent::errorJson(
+                        std::format("screenshot write failed: {}", path.string()));
+                }
+                return nlohmann::json{{"status", "ok"},
+                                      {"path", path.string()},
+                                      {"image_path", path.string()},
+                                      {"width", extent.width},
+                                      {"height", extent.height}}
+                    .dump();
+            });
+    }
 
     ui::RetryNotice sceneRetryNotice;
     ui::RetryNotice shaderRetryNotice;
@@ -628,6 +697,30 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         lightSettings.apply(*light);
     }
 
+    // MCP stdio pump (ADR 0041): one JSON-RPC line in, at most one line out.
+    // handleMessage runs on the main thread by being posted through mainQueue,
+    // same as every other tool callback, so it never races the render loop.
+    agent::McpServer mcpServer(mcpToolRegistry, "kumo", KUMO_VERSION_STRING);
+    std::atomic<bool> mcpEof{false};
+    std::thread mcpReader;
+    if (mcp) {
+        mcpReader = std::thread([&] {
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                const std::string response =
+                    mainQueue
+                        .post([&mcpServer, line] {
+                            return mcpServer.handleMessage(line).value_or(std::string());
+                        })
+                        .get();
+                if (!response.empty()) {
+                    std::cout << response << '\n' << std::flush;
+                }
+            }
+            mcpEof.store(true);
+        });
+    }
+
     int frame = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -635,6 +728,10 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         // Tool callbacks land here, outside any command encoder lifetime, so
         // scene changes are frame-atomic (ADR 0005).
         mainQueue.drain();
+        if (mcpEof.load()) {
+            // The MCP client hung up (stdin closed); shut down cleanly.
+            break;
+        }
 
         shaderWatcher.poll();
         if (reloadPending) {
@@ -716,6 +813,13 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         if (maxFrames >= 0 && frame >= maxFrames) {
             break;
         }
+    }
+
+    if (mcpReader.joinable()) {
+        // Unblocks the reader thread's std::getline; must happen before
+        // mainQueue (and everything the reader might post to) is torn down.
+        ::close(0);
+        mcpReader.join();
     }
 
     device->queue().waitIdle();

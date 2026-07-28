@@ -57,6 +57,14 @@ viewer 以 Cook-Torrance PBR + IBL 渲染 glTF 场景（MSAA 4x、ACES tone mapp
 
 `viewer --offline` 运行零网络的内置演示脚本。未配置时渲染功能不受影响。细节（工具清单、绑定契约、历史压缩、确认弹窗）见 [docs/agents.md](docs/agents.md)。
 
+### MCP
+
+`viewer --mcp` 经 stdio 提供 MCP 端点，工具面与内嵌助手同源（场景七工具 + shader 双工具 + 离屏截图工具 `viewer_screenshot`）：
+
+```sh
+claude mcp add kumo -- "$(pwd)/build/macos-debug/apps/viewer/viewer" --mcp
+```
+
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。

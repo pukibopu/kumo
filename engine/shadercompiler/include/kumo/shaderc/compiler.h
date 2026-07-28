@@ -25,6 +25,8 @@ struct ReflectionBinding {
     // "uniform_buffer" | "storage_buffer" | "sampled_texture" | "sampler"
     std::string type;
     std::string name;
+    // Declared byte size for uniform_buffer/storage_buffer bindings, 0 otherwise.
+    std::uint32_t bufferSize = 0;
 };
 
 struct Reflection {

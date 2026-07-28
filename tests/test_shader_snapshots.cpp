@@ -21,7 +21,7 @@ std::string serializeReflection(const shaderc::Reflection& reflection, shaderc::
     for (const shaderc::ReflectionBinding& binding : reflection.bindings) {
         out += "binding set=" + std::to_string(binding.set) +
                " binding=" + std::to_string(binding.binding) + " type=" + binding.type +
-               " name=" + binding.name + "\n";
+               " name=" + binding.name + " bufferSize=" + std::to_string(binding.bufferSize) + "\n";
     }
     out += "push_constant_size=" + std::to_string(reflection.pushConstantSize) + "\n";
     out += "vertex_input_locations=";

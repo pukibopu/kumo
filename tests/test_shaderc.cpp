@@ -1,7 +1,10 @@
 #include <doctest/doctest.h>
 
+#include <kumo/core/file.h>
 #include <kumo/shaderc/compiler.h>
 
+#include <algorithm>
+#include <filesystem>
 #include <string>
 
 using namespace kumo;
@@ -135,4 +138,34 @@ void main() { gl_Position = vec4(pos + normal, 1.0); }
     REQUIRE(result->reflection.vertexInputLocations.size() == 2);
     CHECK(result->reflection.vertexInputLocations[0] == 0);
     CHECK(result->reflection.vertexInputLocations[1] == 1);
+}
+
+TEST_CASE("pbr.frag reflects the MaterialFactors uniform buffer size") {
+    const std::filesystem::path path = std::filesystem::path(KUMO_SHADER_DIR) / "pbr.frag";
+    auto source = readTextFile(path);
+    REQUIRE_MESSAGE(source.has_value(), source.error());
+
+    const auto result = shaderc::compileGlsl(
+        *source, shaderc::Stage::Fragment,
+        {.sourceName = "pbr.frag",
+         .includeDirs = {(std::filesystem::path(KUMO_SHADER_DIR) / "include").string()}});
+    REQUIRE(result.has_value());
+
+    const auto& bindings = result->reflection.bindings;
+    const auto materialFactors =
+        std::find_if(bindings.begin(), bindings.end(), [](const shaderc::ReflectionBinding& b) {
+            return b.set == 1 && b.binding == 6;
+        });
+    REQUIRE(materialFactors != bindings.end());
+    CHECK(materialFactors->type == "uniform_buffer");
+    // std140: 3 vec4 members (baseColor, metallicRoughness, emissive), 16 bytes each.
+    CHECK(materialFactors->bufferSize == 48);
+
+    const auto baseColorTex =
+        std::find_if(bindings.begin(), bindings.end(), [](const shaderc::ReflectionBinding& b) {
+            return b.set == 1 && b.binding == 0;
+        });
+    REQUIRE(baseColorTex != bindings.end());
+    CHECK(baseColorTex->type == "sampled_texture");
+    CHECK(baseColorTex->bufferSize == 0);
 }

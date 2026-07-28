@@ -47,6 +47,7 @@ std::optional<rhi::BindingType> toBindingType(const std::string& type) {
 struct MergedBinding {
     rhi::BindingType type = rhi::BindingType::UniformBuffer;
     rhi::ShaderStage visibility = rhi::ShaderStage::None;
+    std::uint32_t bufferSize = 0;
 };
 
 std::map<std::pair<std::uint32_t, std::uint32_t>, MergedBinding>
@@ -63,6 +64,7 @@ mergeBindings(std::span<const StageReflection> stages) {
             MergedBinding& entry = merged[{binding.set, binding.binding}];
             entry.type = *type;
             entry.visibility = entry.visibility | stage.stage;
+            entry.bufferSize = binding.bufferSize;
         }
     }
     return merged;
@@ -132,9 +134,9 @@ layoutsFromReflection(rhi::Device& device, std::span<const StageReflection> stag
 std::string layoutSignature(std::span<const StageReflection> stages) {
     std::string out;
     for (const auto& [key, binding] : mergeBindings(stages)) {
-        out += std::format("{}:{}:{}:{};", key.first, key.second,
+        out += std::format("{}:{}:{}:{}:{};", key.first, key.second,
                            static_cast<std::uint32_t>(binding.type),
-                           static_cast<std::uint32_t>(binding.visibility));
+                           static_cast<std::uint32_t>(binding.visibility), binding.bufferSize);
     }
     return out;
 }

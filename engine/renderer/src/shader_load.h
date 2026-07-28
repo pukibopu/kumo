@@ -30,8 +30,12 @@ struct StageReflection {
 std::vector<rhi::Ptr<rhi::BindGroupLayout>>
 layoutsFromReflection(rhi::Device& device, std::span<const StageReflection> stages);
 
-// Stable text form of the merged binding tables; a hot reload that changes it
-// would orphan existing bind groups, so callers compare before swapping.
+// Stable text form of the merged binding tables ("set:binding:type:visibility:size;"
+// per binding); a hot reload that changes it would orphan existing bind groups, so
+// callers compare before swapping. Buffer size is part of the signature (ADR 0043)
+// so a shader edit that resizes a uniform/storage block without touching its
+// set/binding/type still invalidates cached layouts instead of silently mismatching
+// the CPU-side buffer.
 std::string layoutSignature(std::span<const StageReflection> stages);
 
 } // namespace kumo::renderer::detail

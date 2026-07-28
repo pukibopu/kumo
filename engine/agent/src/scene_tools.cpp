@@ -450,30 +450,6 @@ ForwardRenderer::MaterialParams toMaterialParams(const GroupMaterialSpec& spec) 
     return out;
 }
 
-// Reads a scale field that accepts either a single number (uniform) or a
-// 3-element array (per-axis); absent leaves `out` untouched, same contract as
-// readFloat3/readNumber.
-bool readScale(const json& args, const char* key, math::float3& out, std::string& error) {
-    const auto it = args.find(key);
-    if (it == args.end()) {
-        return true;
-    }
-    if (it->is_number()) {
-        const float value = it->get<float>();
-        if (!std::isfinite(value)) {
-            error = std::format("{} must be finite", key);
-            return false;
-        }
-        out = {value, value, value};
-        return true;
-    }
-    if (it->is_array()) {
-        return readFloat3(args, key, out, error);
-    }
-    error = std::format("{} must be a number or an array of 3 numbers", key);
-    return false;
-}
-
 // Integer fields arrive as JSON numbers (an LLM may send 5.0 for an integer);
 // mirrors light_set's index handling rather than requiring is_number_integer().
 bool readInt(const json& args, const char* key, std::int64_t& out, std::string& error) {
@@ -552,10 +528,9 @@ std::string sceneDefineGroup(const SceneToolContext& context, const json& args) 
     return json{{"status", "ok"}, {"group", *name}, {"members", members}}.dump();
 }
 
-// world = instanceTRS ∘ memberTRS, no shear: the instance's rotation and
-// uniform-or-per-axis scale are applied to the member's local offset before
-// translating by the instance position (ADR 0038-adjacent composition, no new
-// type needed since scene::Transform already holds TRS).
+// world = instanceTRS ∘ memberTRS. Exact only because instance scale is
+// uniform (enforced at parse time): uniform scale commutes with the member
+// rotation, so the product stays a shear-free TRS.
 scene::Transform composeGroupMember(const scene::Transform& instance,
                                     const scene::Transform& member) {
     scene::Transform out;
@@ -586,11 +561,20 @@ std::expected<scene::Transform, std::string> parseInstanceTransform(const json& 
         }
         t.rotation = math::quatFromEulerDegrees(euler);
     }
-    if (!readScale(item, "scale", t.scale, error)) {
-        return std::unexpected(error);
-    }
-    if (t.scale.x <= 1e-6f || t.scale.y <= 1e-6f || t.scale.z <= 1e-6f) {
-        return std::unexpected(std::string("scale components must be positive"));
+    if (item.contains("scale")) {
+        const json& s = item["scale"];
+        // A per-axis instance scale over a rotated member needs shear, which
+        // TRS cannot represent; instances scale uniformly (members keep their
+        // own per-axis scale inside the group definition).
+        if (!s.is_number()) {
+            return std::unexpected(
+                std::string("scale must be a single uniform number for instances"));
+        }
+        const float value = s.get<float>();
+        if (!std::isfinite(value) || value <= 1e-6f) {
+            return std::unexpected(std::string("scale must be a positive finite number"));
+        }
+        t.scale = {value, value, value};
     }
     return t;
 }
@@ -1073,7 +1057,7 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
 "transforms":{"type":"array","description":"Explicit instance transforms; mutually exclusive with scatter","items":{"type":"object","properties":{
 "position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
 "rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
-"scale":{"description":"Uniform scale factor or [x,y,z]","oneOf":[{"type":"number"},{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}]}},
+"scale":{"type":"number","description":"Uniform scale factor; per-axis scale on instances would shear rotated members"}},
 "required":["position"]}},
 "scatter":{"type":"object","description":"Deterministic random placement; mutually exclusive with transforms","properties":{
 "count":{"type":"integer","minimum":1,"maximum":64},

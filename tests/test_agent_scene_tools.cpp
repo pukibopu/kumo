@@ -481,6 +481,49 @@ TEST_CASE("scene_instance_group composes instance and member transforms") {
     CHECK(e->transform.scale.x == doctest::Approx(2.0f));
 }
 
+TEST_CASE("scene_instance_group composition is exact for rotated members") {
+    Fixture f;
+    // A member with its own local rotation: uniform instance scale must make
+    // the composed TRS match the true matrix product with zero shear.
+    f.invoke(
+        "scene_define_group",
+        R"({"name":"g","entities":[{"name":"m","primitive":"cube","position":[1,0,0],"rotation_euler_deg":[0,0,90],"scale":[1,2,1]}]})");
+    const json result = f.invoke("scene_instance_group", R"({"name":"g","transforms":[
+{"position":[5,0,0],"rotation_euler_deg":[0,90,0],"scale":2}
+]})");
+    REQUIRE(result["status"] == "ok");
+    const scene::Entity* e = f.scene.entities.get({0, 0});
+    REQUIRE(e != nullptr);
+
+    scene::Transform instance;
+    instance.position = {5.0f, 0.0f, 0.0f};
+    instance.rotation = math::quatFromEulerDegrees({0.0f, 90.0f, 0.0f});
+    instance.scale = {2.0f, 2.0f, 2.0f};
+    scene::Transform member;
+    member.position = {1.0f, 0.0f, 0.0f};
+    member.rotation = math::quatFromEulerDegrees({0.0f, 0.0f, 90.0f});
+    member.scale = {1.0f, 2.0f, 1.0f};
+
+    const math::float4x4 truth = instance.matrix() * member.matrix();
+    const math::float4x4 composed = e->transform.matrix();
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+            CHECK(composed[c][r] == doctest::Approx(truth[c][r]).epsilon(0.001));
+        }
+    }
+}
+
+TEST_CASE("scene_instance_group rejects per-axis instance scale") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"g","entities":[{"name":"m","primitive":"cube"}]})");
+    const json result = f.invoke("scene_instance_group", R"({"name":"g","transforms":[
+{"position":[0,0,0],"scale":[1,1,0.5]}
+]})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("uniform") != std::string::npos);
+    CHECK(f.scene.entities.empty());
+}
+
 TEST_CASE("scene_instance_group scatter is deterministic for a fixed seed") {
     auto samplePositions = [](std::int64_t seed) {
         Fixture fx;

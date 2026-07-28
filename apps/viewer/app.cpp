@@ -187,6 +187,10 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
+        // Input deltas must reach the runtime before pump() runs the orbit
+        // arbitration, or the rendered camera lags the drag by one frame.
+        updateOrbit(window, input, *runtime);
+
         if (!runtime->pump()) {
             // The MCP client hung up (stdin closed); shut down cleanly.
             break;
@@ -211,7 +215,6 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
                 {static_cast<std::uint32_t>(fbWidth), static_cast<std::uint32_t>(fbHeight)});
         }
 
-        updateOrbit(window, input, *runtime);
         // Sliders mirror the light; the panel applies user edits itself in the
         // same frame, so agent light_set changes are never overwritten here.
         if (scene::Light* light = runtime->world().light(0)) {

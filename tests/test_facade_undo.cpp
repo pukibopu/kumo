@@ -17,15 +17,22 @@ struct Fixture {
 
     float x() const { return current.world.camera.position.x; }
     void setX(float v) { current.world.camera.position.x = v; }
+
+    // beginPending + commitPending, the common case where the change is
+    // known to have happened.
+    void commitChange(const char* label, float newX) {
+        stack.beginPending(label);
+        setX(newX);
+        stack.commitPending();
+    }
 };
 
 } // namespace
 
-TEST_CASE("UndoStack: undo restores the pre-change snapshot, redo reapplies the change") {
+TEST_CASE("UndoStack: begin+commit records the pre-change snapshot; undo/redo move across it") {
     Fixture f;
     f.setX(1.0f);
-    f.stack.recordBefore("move");
-    f.setX(2.0f);
+    f.commitChange("move", 2.0f);
 
     CHECK(f.stack.canUndo());
     CHECK(!f.stack.canRedo());
@@ -41,6 +48,94 @@ TEST_CASE("UndoStack: undo restores the pre-change snapshot, redo reapplies the 
     CHECK(!f.stack.canRedo());
 }
 
+TEST_CASE("UndoStack: beginPending captures immediately; commitPending is what makes it a step") {
+    Fixture f;
+    f.setX(1.0f);
+    f.stack.beginPending("move");
+    CHECK(f.stack.hasPending());
+    CHECK(!f.stack.canUndo()); // not a step yet
+
+    f.setX(2.0f);
+    f.stack.commitPending();
+    CHECK(!f.stack.hasPending());
+    REQUIRE(f.stack.canUndo());
+
+    REQUIRE(f.stack.undo());
+    CHECK(f.x() == doctest::Approx(1.0f)); // captured at beginPending, before the mutation
+}
+
+TEST_CASE("UndoStack: commitPending without a pending snapshot is a no-op") {
+    Fixture f;
+    f.setX(5.0f);
+    f.stack.commitPending();
+    CHECK(!f.stack.hasPending());
+    CHECK(!f.stack.canUndo());
+    CHECK(f.x() == doctest::Approx(5.0f));
+}
+
+TEST_CASE("UndoStack: begin+discard produces no undo step and leaves current state untouched") {
+    Fixture f;
+    f.setX(1.0f);
+    f.stack.beginPending("move");
+    f.setX(2.0f);
+
+    f.stack.discardPending();
+    CHECK(!f.stack.hasPending());
+    CHECK(!f.stack.canUndo());
+    CHECK(f.x() == doctest::Approx(2.0f)); // discardPending never touches current state
+}
+
+TEST_CASE("UndoStack: a new beginPending discards a stale, uncommitted pending snapshot") {
+    Fixture f;
+    f.setX(1.0f);
+    f.stack.beginPending("abandoned"); // would capture x=1 if committed
+    f.setX(2.0f);
+
+    f.stack.beginPending("kept"); // supersedes "abandoned" without committing it
+    f.setX(3.0f);
+    f.stack.commitPending();
+
+    CHECK(!f.stack.canRedo());
+    REQUIRE(f.stack.undoLabel() != nullptr);
+    CHECK(*f.stack.undoLabel() == "kept");
+    REQUIRE(f.stack.undo());
+    CHECK(f.x() == doctest::Approx(2.0f)); // the "kept" capture, not the "abandoned" one
+    CHECK(!f.stack.canUndo());
+}
+
+TEST_CASE("UndoStack: undo() discards a pending snapshot before undoing") {
+    Fixture f;
+    f.setX(1.0f);
+    f.commitChange("committed", 2.0f); // undo stack: [committed] snapshot x=1
+
+    f.setX(3.0f);
+    f.stack.beginPending("abandoned"); // captures x=3, never committed
+    f.setX(4.0f);
+
+    REQUIRE(f.stack.undo());
+    CHECK(!f.stack.hasPending());
+    CHECK(f.x() == doctest::Approx(1.0f)); // the committed snapshot, not the abandoned x=3
+    CHECK(!f.stack.canUndo());
+    REQUIRE(f.stack.canRedo());
+    CHECK(*f.stack.redoLabel() == "committed");
+}
+
+TEST_CASE("UndoStack: redo() discards a pending snapshot before redoing") {
+    Fixture f;
+    f.setX(1.0f);
+    f.commitChange("committed", 2.0f);
+    REQUIRE(f.stack.undo());
+    CHECK(f.stack.canRedo());
+
+    f.stack.beginPending("abandoned");
+    CHECK(f.stack.hasPending());
+
+    REQUIRE(f.stack.redo());
+    CHECK(!f.stack.hasPending());
+    CHECK(f.x() == doctest::Approx(2.0f));
+    CHECK(!f.stack.canRedo());
+}
+
 TEST_CASE("UndoStack: undo()/redo() on an empty stack fail without side effects") {
     Fixture f;
     f.setX(5.0f);
@@ -50,28 +145,13 @@ TEST_CASE("UndoStack: undo()/redo() on an empty stack fail without side effects"
     CHECK(f.x() == doctest::Approx(5.0f));
 }
 
-TEST_CASE("UndoStack: a new recordBefore clears the redo stack") {
-    Fixture f;
-    f.setX(1.0f);
-    f.stack.recordBefore("a");
-    f.setX(2.0f);
-    REQUIRE(f.stack.undo());
-    CHECK(f.stack.canRedo());
-
-    f.setX(3.0f);
-    f.stack.recordBefore("b");
-    CHECK(!f.stack.canRedo());
-}
-
 TEST_CASE("UndoStack: labels track the top of each stack and move between them") {
     Fixture f;
     CHECK(f.stack.undoLabel() == nullptr);
     CHECK(f.stack.redoLabel() == nullptr);
 
-    f.stack.recordBefore("first");
-    f.setX(1.0f);
-    f.stack.recordBefore("second");
-    f.setX(2.0f);
+    f.commitChange("first", 1.0f);
+    f.commitChange("second", 2.0f);
 
     REQUIRE(f.stack.undoLabel() != nullptr);
     CHECK(*f.stack.undoLabel() == "second");
@@ -90,12 +170,15 @@ TEST_CASE("UndoStack: depth caps the undo history, dropping the oldest entries")
                     /*depth=*/2);
 
     current.world.camera.position.x = 0.0f;
-    stack.recordBefore("r0"); // snapshot x=0; undo depth: [r0]
+    stack.beginPending("r0");
     current.world.camera.position.x = 1.0f;
-    stack.recordBefore("r1"); // snapshot x=1; undo depth: [r0, r1]
+    stack.commitPending(); // snapshot x=0; undo depth: [r0]
+    stack.beginPending("r1");
     current.world.camera.position.x = 2.0f;
-    stack.recordBefore("r2"); // snapshot x=2; size 3 > depth 2, evicts r0: [r1, r2]
+    stack.commitPending(); // snapshot x=1; undo depth: [r0, r1]
+    stack.beginPending("r2");
     current.world.camera.position.x = 3.0f;
+    stack.commitPending(); // snapshot x=2; size 3 > depth 2, evicts r0: [r1, r2]
 
     REQUIRE(stack.undo()); // reverts the r2-labeled change: 3 -> 2
     CHECK(current.world.camera.position.x == doctest::Approx(2.0f));
@@ -108,10 +191,8 @@ TEST_CASE("UndoStack: depth caps the undo history, dropping the oldest entries")
 TEST_CASE("UndoStack: redo mirrors undo, moving state forward and back to undo") {
     Fixture f;
     f.setX(1.0f);
-    f.stack.recordBefore("a");
-    f.setX(2.0f);
-    f.stack.recordBefore("b");
-    f.setX(3.0f);
+    f.commitChange("a", 2.0f);
+    f.commitChange("b", 3.0f);
 
     REQUIRE(f.stack.undo());
     CHECK(f.x() == doctest::Approx(2.0f));

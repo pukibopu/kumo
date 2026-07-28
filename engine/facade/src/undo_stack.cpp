@@ -7,12 +7,28 @@ namespace kumo::facade {
 UndoStack::UndoStack(Capture capture, Apply apply, std::size_t depth)
     : capture_(std::move(capture)), apply_(std::move(apply)), depth_(depth) {}
 
-void UndoStack::recordBefore(std::string label) {
-    undo_.push_back({std::move(label), capture_()});
+void UndoStack::beginPending(std::string label) {
+    pending_ = Entry{std::move(label), capture_()};
+}
+
+void UndoStack::commitPending() {
+    if (!pending_.has_value()) {
+        return;
+    }
+    undo_.push_back(std::move(*pending_));
+    pending_.reset();
     if (undo_.size() > depth_) {
         undo_.erase(undo_.begin());
     }
     redo_.clear();
+}
+
+void UndoStack::discardPending() {
+    pending_.reset();
+}
+
+bool UndoStack::hasPending() const {
+    return pending_.has_value();
 }
 
 bool UndoStack::canUndo() const {
@@ -32,6 +48,7 @@ const std::string* UndoStack::redoLabel() const {
 }
 
 bool UndoStack::undo() {
+    discardPending();
     if (undo_.empty()) {
         return false;
     }
@@ -43,6 +60,7 @@ bool UndoStack::undo() {
 }
 
 bool UndoStack::redo() {
+    discardPending();
     if (redo_.empty()) {
         return false;
     }

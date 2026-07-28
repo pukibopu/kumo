@@ -444,18 +444,41 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
     // Undo capture (ADR 0044): fires for every tool invocation on all three
     // registries (chat sessions and, when enabled, MCP), so agent-driven
     // changes are undoable regardless of which caller issued them. Read-only
-    // tools are excluded so they never push a no-op checkpoint.
+    // tools are excluded so they never open a pending checkpoint. The pending
+    // point opened here is only ever resolved by the paired AfterInvoke hook
+    // below, once the handler's result is known: BeforeInvoke and AfterInvoke
+    // always fire in the same invoke() call, so no gesture is left dangling
+    // across separate tool calls.
     {
-        agent::ToolRegistry::BeforeInvoke hook = [runtime = self.get()](std::string_view name) {
+        agent::ToolRegistry::BeforeInvoke before = [runtime = self.get()](std::string_view name) {
             if (std::find(kReadOnlyTools.begin(), kReadOnlyTools.end(), name) !=
                 kReadOnlyTools.end()) {
                 return;
             }
-            runtime->undo_.recordBefore(std::string(name));
+            runtime->undo_.beginPending(std::string(name));
         };
-        self->sceneToolRegistry_.setBeforeInvoke(hook);
-        self->shaderToolRegistry_.setBeforeInvoke(hook);
-        self->mcpToolRegistry_.setBeforeInvoke(hook);
+        // Conservative on ambiguous results: only an explicit {"status":"ok"}
+        // commits; a missing/non-"ok" status, a non-object, or unparseable
+        // JSON all discard (error, cancelled_by_user, and unparseable results
+        // must not leave a phantom undo step).
+        agent::ToolRegistry::AfterInvoke after =
+            [runtime = self.get()](std::string_view, std::string_view resultJson) {
+                const nlohmann::json result = nlohmann::json::parse(resultJson, nullptr, false);
+                const bool ok = !result.is_discarded() && result.is_object() &&
+                                result.contains("status") && result["status"].is_string() &&
+                                result["status"].get<std::string>() == "ok";
+                if (ok) {
+                    runtime->undo_.commitPending();
+                } else {
+                    runtime->undo_.discardPending();
+                }
+            };
+        self->sceneToolRegistry_.setBeforeInvoke(before);
+        self->shaderToolRegistry_.setBeforeInvoke(before);
+        self->mcpToolRegistry_.setBeforeInvoke(before);
+        self->sceneToolRegistry_.setAfterInvoke(after);
+        self->shaderToolRegistry_.setAfterInvoke(after);
+        self->mcpToolRegistry_.setAfterInvoke(after);
     }
 
     std::optional<agent::ConfirmationGate> confirmGate;
@@ -783,7 +806,7 @@ EngineRuntime::EntityDetail EngineRuntime::entityDetail(const std::string& id) c
 }
 
 void EngineRuntime::beginEdit(const std::string& label) {
-    undo_.recordBefore(label);
+    undo_.beginPending(label);
 }
 
 bool EngineRuntime::setEntityTransform(const std::string& id, math::float3 position,
@@ -805,6 +828,9 @@ bool EngineRuntime::setEntityTransform(const std::string& id, math::float3 posit
     entity->transform.position = position;
     entity->transform.rotation = math::quatFromEulerDegrees(eulerDeg);
     entity->transform.scale = scale;
+    // Harmless no-op when an earlier call in the same gesture already
+    // committed the pending point opened by beginEdit.
+    undo_.commitPending();
     return true;
 }
 
@@ -829,9 +855,17 @@ bool EngineRuntime::setEntityMaterial(const std::string& id, const MaterialParam
             return false;
         }
         entity->materialIndex = newIndex;
+        undo_.commitPending();
         return true;
     }
-    return renderer_.setMaterialParams(static_cast<std::uint32_t>(entity->materialIndex), params);
+    const bool applied =
+        renderer_.setMaterialParams(static_cast<std::uint32_t>(entity->materialIndex), params);
+    if (applied) {
+        // Harmless no-op when an earlier call in the same gesture already
+        // committed the pending point opened by beginEdit.
+        undo_.commitPending();
+    }
+    return applied;
 }
 
 std::optional<std::string> EngineRuntime::entityShaderSource(const std::string& id) const {
@@ -861,8 +895,12 @@ bool EngineRuntime::clearEntityShader(const std::string& id) {
     if (renderer_.materialShaderSource(materialIndex) == nullptr) {
         return false;
     }
-    undo_.recordBefore("clear_shader");
-    return renderer_.clearMaterialShader(materialIndex);
+    undo_.beginPending("clear_shader");
+    const bool cleared = renderer_.clearMaterialShader(materialIndex);
+    if (cleared) {
+        undo_.commitPending();
+    }
+    return cleared;
 }
 
 std::filesystem::path EngineRuntime::generatedShaderPath(const std::string& id) const {

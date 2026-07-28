@@ -25,6 +25,10 @@ void ToolRegistry::setBeforeInvoke(BeforeInvoke hook) {
     beforeInvoke_ = std::move(hook);
 }
 
+void ToolRegistry::setAfterInvoke(AfterInvoke hook) {
+    afterInvoke_ = std::move(hook);
+}
+
 std::span<const ToolDef> ToolRegistry::defs() const {
     return defs_;
 }
@@ -39,9 +43,6 @@ const ToolDef* ToolRegistry::find(std::string_view name) const {
 }
 
 std::string ToolRegistry::invoke(std::string_view name, std::string_view argsJson) const {
-    if (beforeInvoke_) {
-        beforeInvoke_(name);
-    }
     for (std::size_t i = 0; i < defs_.size(); ++i) {
         if (defs_[i].name != name) {
             continue;
@@ -52,12 +53,22 @@ std::string ToolRegistry::invoke(std::string_view name, std::string_view argsJso
                 return errorJson("tool arguments must be a JSON object");
             }
         }
+        // Name resolved, arguments valid: the handler is actually about to
+        // run, so this is where BeforeInvoke/AfterInvoke bracket it.
+        if (beforeInvoke_) {
+            beforeInvoke_(name);
+        }
+        std::string result;
         try {
-            return handlers_[i](argsJson);
+            result = handlers_[i](argsJson);
         } catch (const std::exception& e) {
             // Dependency exceptions stop at the module boundary (ADR 0035).
-            return errorJson(e.what());
+            result = errorJson(e.what());
         }
+        if (afterInvoke_) {
+            afterInvoke_(name, result);
+        }
+        return result;
     }
     return errorJson(std::string("unknown tool: ").append(name));
 }

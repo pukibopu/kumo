@@ -30,9 +30,10 @@ struct SceneTreeView: View {
 }
 
 // Inspector (ADR 0044): transform/material editing plus a read-only shader
-// viewer for the selected entity. Every committed edit records exactly one
-// undo point via EngineRuntime::beginEdit before the corresponding
-// setEntity*/clearEntityShader call.
+// viewer for the selected entity. EngineRuntime::beginEdit opens a pending
+// undo point ahead of the corresponding setEntity*/clearEntityShader call,
+// which commits it only on success (EngineRuntime's pending-commit model), so
+// a rejected edit never leaves a phantom undo step.
 struct InspectorView: View {
     @ObservedObject var holder: EngineHolder
     let entityId: String?
@@ -61,6 +62,14 @@ struct InspectorView: View {
     @State private var shaderSource = ""
     @State private var generatedPath: String?
 
+    // Debounces ColorPicker's continuous onChange stream (one event per drag
+    // step in its popover) into a single undo gesture: edits within 0.75s of
+    // each other coalesce, same idea as the metallic/roughness slider gating.
+    @State private var lastColorEditAt: Date?
+    // Set when a commit setter returns false; cleared by the next successful
+    // edit or by selecting a different entity.
+    @State private var inspectorError: String?
+
     var body: some View {
         Group {
             if holder.engine == nil {
@@ -84,6 +93,13 @@ struct InspectorView: View {
                     if detail.hasMaterial {
                         materialSection
                     }
+                    if let inspectorError {
+                        Section {
+                            Text(inspectorError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
                     if detail.hasCustomShader {
                         shaderSection
                     }
@@ -97,7 +113,10 @@ struct InspectorView: View {
         }
         .frame(minWidth: 280, idealWidth: 300, maxWidth: 340)
         .onAppear { loadDetail() }
-        .onChange(of: entityId) { _, _ in loadDetail() }
+        .onChange(of: entityId) { _, _ in
+            inspectorError = nil
+            loadDetail()
+        }
         .onChange(of: refreshToken) { _, _ in loadDetail() }
     }
 
@@ -105,7 +124,13 @@ struct InspectorView: View {
     private var materialSection: some View {
         Section("材质") {
             ColorPicker("基础色", selection: $baseColor, supportsOpacity: true)
-                .onChange(of: baseColor) { _, _ in commitMaterial(beginNewEdit: true) }
+                .onChange(of: baseColor) { _, _ in
+                    let now = Date()
+                    let isNewGesture = lastColorEditAt.map { now.timeIntervalSince($0) > 0.75 }
+                        ?? true
+                    lastColorEditAt = now
+                    commitMaterial(beginNewEdit: isNewGesture)
+                }
             LabeledContent("金属度") {
                 Slider(value: $metallic, in: 0...1) { began in
                     if began { holder.engine?.beginEdit("inspector") }
@@ -200,10 +225,14 @@ struct InspectorView: View {
     private func commitTransform() {
         guard let engine = holder.engine, let entityId else { return }
         engine.beginEdit("inspector")
-        _ = engine.setEntityTransform(entityId, px: Float(positionX), py: Float(positionY),
-                                      pz: Float(positionZ), rx: Float(eulerX), ry: Float(eulerY),
-                                      rz: Float(eulerZ), sx: Float(scaleX), sy: Float(scaleY),
-                                      sz: Float(scaleZ))
+        // With the pending-commit model a failed set never commits an undo
+        // step on its own (EngineRuntime::setEntityTransform); the discarded
+        // boolean is still fine to ignore for undo purposes, but surface it.
+        let ok = engine.setEntityTransform(entityId, px: Float(positionX), py: Float(positionY),
+                                           pz: Float(positionZ), rx: Float(eulerX),
+                                           ry: Float(eulerY), rz: Float(eulerZ), sx: Float(scaleX),
+                                           sy: Float(scaleY), sz: Float(scaleZ))
+        inspectorError = ok ? nil : "变换设置失败"
         onChanged()
     }
 
@@ -213,16 +242,21 @@ struct InspectorView: View {
             engine.beginEdit("inspector")
         }
         let rgba = rgbaComponents(of: baseColor)
-        _ = engine.setEntityMaterial(entityId, r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a,
-                                     metallic: Float(metallic), roughness: Float(roughness),
-                                     er: Float(emissiveR), eg: Float(emissiveG), eb: Float(emissiveB))
+        // With the pending-commit model a failed set never commits an undo
+        // step on its own (EngineRuntime::setEntityMaterial); surface it.
+        let ok = engine.setEntityMaterial(entityId, r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a,
+                                          metallic: Float(metallic), roughness: Float(roughness),
+                                          er: Float(emissiveR), eg: Float(emissiveG),
+                                          eb: Float(emissiveB))
+        inspectorError = ok ? nil : "材质设置失败"
         onChanged()
     }
 
     private func clearShader() {
         guard let engine = holder.engine, let entityId else { return }
-        // Records its own undo point (EngineRuntime::clearEntityShader).
-        _ = engine.clearEntityShader(entityId)
+        // Opens and commits its own undo point (EngineRuntime::clearEntityShader).
+        let ok = engine.clearEntityShader(entityId)
+        inspectorError = ok ? nil : "还原失败"
         loadDetail()
         onChanged()
     }

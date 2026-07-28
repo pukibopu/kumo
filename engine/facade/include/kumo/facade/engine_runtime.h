@@ -89,18 +89,23 @@ public:
     std::vector<EntityInfo> listEntities() const;
     EntityDetail entityDetail(const std::string& id) const;
 
-    // beginEdit records one undo point; subsequent setEntity* calls until the
-    // next beginEdit/agent tool call belong to that gesture.
+    // beginEdit opens a pending undo point; the first setEntity*/clearEntityShader
+    // call that succeeds after it commits that snapshot into an undo step, so
+    // multi-field edits (and repeated calls during one drag gesture) collapse
+    // into a single step. A failed call leaves the pending snapshot open for
+    // the next attempt.
     void beginEdit(const std::string& label);
     // Validates like the scene tools (positive scale, finite); returns false and
-    // leaves the entity untouched on bad input. Does not record undo itself.
+    // leaves the entity untouched on bad input. Commits the pending undo point
+    // opened by beginEdit on success; leaves it pending on failure.
     bool setEntityTransform(const std::string& id, math::float3 position, math::float3 eulerDeg,
                             math::float3 scale);
-    // Validates finiteness; does not record undo itself.
+    // Validates finiteness; commits the pending undo point opened by beginEdit
+    // on success, leaves it pending on failure.
     bool setEntityMaterial(const std::string& id,
                            const renderer::ForwardRenderer::MaterialParams& params);
     std::optional<std::string> entityShaderSource(const std::string& id) const; // custom only
-    bool clearEntityShader(const std::string& id); // records its own undo point
+    bool clearEntityShader(const std::string& id); // opens and commits its own undo point
     std::filesystem::path generatedShaderPath(const std::string& id) const; // empty when none
 
     bool undoAvailable() const;
@@ -152,9 +157,11 @@ private:
     scene::Scene world_;
     rhi::Extent2D extent_{};
 
-    // Unified undo (ADR 0044): recordBefore is called both by the ToolRegistry
-    // BeforeInvoke hook below (agent-driven changes) and by beginEdit
-    // (inspector-driven changes).
+    // Unified undo (ADR 0044), pending-commit model: agent tool calls open a
+    // pending point in the ToolRegistry BeforeInvoke hook below and resolve it
+    // (commit/discard) in the paired AfterInvoke hook once the result is
+    // known; inspector-driven edits open one in beginEdit and commit it from
+    // the setEntity*/clearEntityShader call that actually succeeds.
     UndoStack undo_;
 
     MainThreadQueue mainQueue_;

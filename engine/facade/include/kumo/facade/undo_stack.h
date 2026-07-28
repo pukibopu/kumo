@@ -28,14 +28,22 @@ public:
 
     UndoStack(Capture capture, Apply apply, std::size_t depth = 100);
 
-    // Records the current state as the undo point for a labeled change.
-    void recordBefore(std::string label);
+    // Captures now; the snapshot only becomes an undo step on commitPending().
+    // A stale pending snapshot (one begun but never committed or discarded) is
+    // silently discarded first, so a gesture abandoned before commit never
+    // leaks into a later one.
+    void beginPending(std::string label);
+    void commitPending(); // no-op without a pending snapshot; clears redo
+    void discardPending();
+    bool hasPending() const;
 
     bool canUndo() const;
     bool canRedo() const;
     const std::string* undoLabel() const;
     const std::string* redoLabel() const;
 
+    // Both discard any pending snapshot first: a gesture abandoned before
+    // commit must not leak into a later commit.
     bool undo(); // captures current for redo, applies the snapshot
     bool redo();
 
@@ -50,6 +58,7 @@ private:
     std::size_t depth_;
     std::vector<Entry> undo_;
     std::vector<Entry> redo_;
+    std::optional<Entry> pending_;
 };
 
 } // namespace kumo::facade

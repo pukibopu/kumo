@@ -1,8 +1,8 @@
 import SwiftUI
 
 // Product shell entry point (ADR 0044): NavigationSplitView with a scene-tree
-// sidebar, the engine viewport, and an inspector on the right. Chat arrives in
-// a later M6.75 slice.
+// sidebar, the engine viewport with a collapsible chat pane, and an inspector
+// on the right; plus a Settings scene for per-agent endpoints and API keys.
 @main
 struct KumoApp: App {
     @StateObject private var holder = EngineHolder()
@@ -14,6 +14,7 @@ struct KumoApp: App {
     @State private var canRedo = false
     @State private var undoLabel = ""
     @State private var redoLabel = ""
+    @State private var showChat = true
 
     // The timer only needs to catch MCP/agent-driven changes made off the
     // toolbar/inspector; edits and undo/redo already refresh immediately via
@@ -26,7 +27,13 @@ struct KumoApp: App {
                 SceneTreeView(holder: holder, entities: entities, selection: $selectedEntityId)
             } detail: {
                 HStack(spacing: 0) {
-                    Viewport(holder: holder)
+                    VSplitView {
+                        Viewport(holder: holder)
+                        if showChat {
+                            ChatView(holder: holder)
+                                .frame(minHeight: 160, idealHeight: 220)
+                        }
+                    }
                     Divider()
                     InspectorView(holder: holder, entityId: selectedEntityId,
                                  refreshToken: refreshToken, onChanged: handleEdit)
@@ -36,6 +43,8 @@ struct KumoApp: App {
             .frame(minWidth: 960, minHeight: 540)
             .toolbar {
                 ToolbarItemGroup {
+                    Button("聊天") { showChat.toggle() }
+                        .keyboardShortcut("j", modifiers: [.command, .shift])
                     Button("撤销", action: performUndo)
                         .disabled(!canUndo)
                         .help(undoLabel)
@@ -48,6 +57,9 @@ struct KumoApp: App {
             }
             .onReceive(refreshTimer) { _ in refresh() }
             .onChange(of: holder.engine == nil) { _, _ in refresh() }
+        }
+        Settings {
+            SettingsView(holder: holder)
         }
     }
 

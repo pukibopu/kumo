@@ -42,9 +42,18 @@ descriptor set 语义固定：
 
 ## 热重载（开发期）
 
-viewer 以 `FileWatcher`（500ms 轮询）监听 `shaders/` 源文件：变化即重编译全部渲染 shader，全部成功且绑定布局未变才整体替换 pipeline；编译失败输出带行号的结构化错误并保留旧 pipeline，画面不中断。绑定布局变化（增删 binding）需要重启——已创建的 bind group 无法迁移。
+viewer 以 `FileWatcher`（500ms 轮询）监听 `shaders/` 源文件：变化即重编译全部渲染 shader，编译失败输出带行号的结构化错误并保留旧 pipeline，画面不中断。**M6 起重载为重建式**：绑定布局签名（set:binding:type:visibility:**bufferSize**，尺寸维度防 uniform 块成员变化静默越界）变化时不再拒绝，而是重推导全部 layout 并重建帧/材质/IBL/天空盒/tonemap 的 buffer 与 bind group；定制材质 shader 在新模板上重编译，不再兼容则回退共享管线并记日志。
 
 `KUMO_SHADER_DIR` 把 shader 源码目录的绝对路径烘进开发期二进制，故构建产物不可重定位；可重定位打包推迟到 M7。
+
+## 材质级定制 shader（M6）
+
+shader 助手（见 agents.md）经 `ForwardRenderer::setMaterialShader` 为单个材质安装专属 fragment shader（ADR 0011）：
+
+- 复用共享 pbr 顶点级；set 0/2 的声明必须与模板反射逐项一致（引擎侧强制校验，不兼容以结构化编译错误回灌模型），push constant 布局不可变；
+- set 1 允许在 `MaterialFactors`（binding 6）尾部追加成员：该材质的 layout / 系数 buffer（按新反射尺寸重建，引擎写入前 48 字节，追加成员读到零值）/ bind group 就地重建；
+- 绘制循环按 pipeline 分组（共享管线在前），材质系数 UBO 按帧槽双缓冲；
+- 生效源码可由 `materialShaderSource` 读回，接受的结果落盘 `shaders/generated/material_<N>.frag`（gitignored）。
 
 ## 测试
 

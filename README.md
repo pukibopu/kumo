@@ -36,23 +36,26 @@ viewer 以 Cook-Torrance PBR + IBL 渲染 glTF 场景（MSAA 4x、ACES tone mapp
 
 - **鼠标左键拖拽**旋转相机，**滚轮**缩放（轨道相机）；
 - ImGui 面板实时调整平行光方向/强度/颜色与材质 metallic/roughness 系数；
-- 「助手」聊天面板用自然语言操控场景（见下），「工具日志」面板完整记录每次工具调用；
+- 「助手」窗口双页签：**场景**（自然语言操控场景）与 **Shader**（自然语言生成/修改材质 shader，编译错误自修正），「工具日志」面板完整记录每次工具调用；
 - **S** 键截图；**K** / **L** 保存 / 载入场景（`kumo_scene.json`，含 agent 建的实体与材质改动）；
 - 修改 `shaders/` 下的 GLSL 源码即热重载，编译错误保留旧画面不中断。
 
-## 场景助手
+## 助手
 
-自然语言增删实体、调整变换/材质/灯光/相机。两种接入协议（`provider.type`）：
+场景助手：自然语言增删实体、调整变换/材质/灯光/相机。Shader 助手：「让头盔变成肥皂泡彩虹色」级别的自然语言描述 → 生成该材质专属的 fragment shader，编译错误自动修正，只影响目标物体。
 
-- **本地模型（OpenAI 兼容，推荐起步）**：Ollama / LM Studio / llama.cpp 等，本机端点无需 key：
+接入协议双轨（`provider.type`），且两个助手可各配端点（`agents.scene.*` / `agents.shader.*` 按字段覆盖全局）：
+
+- **OpenAI 云端（模板默认）**：`cp kumo.config.example.json kumo.config.json`，改 `provider.model` 为你可用的 GPT 型号，key 放 `.env` 的 `OPENAI_API_KEY`；
+- **本地模型（OpenAI 兼容，零成本）**：Ollama / LM Studio / llama.cpp，本机端点无需 key：
 
   ```sh
   KUMO_PROVIDER_TYPE=openai KUMO_PROVIDER_MODEL=qwen2.5:14b ./build/macos-debug/apps/viewer/viewer
   ```
 
-- **Anthropic Messages API**（官方或兼容中转）：复制 `kumo.config.example.json` 为 `kumo.config.json` 填入 `model`，API key 放环境变量 `ANTHROPIC_API_KEY` 或 `.env` 文件（参考 `.env.example`）。
+- **Anthropic Messages API**（官方或兼容中转）：`type` 填 `anthropic`，key 用 `ANTHROPIC_API_KEY`。
 
-`viewer --offline` 运行零网络的内置演示脚本。未配置时渲染功能不受影响。细节（工具清单、历史压缩、确认弹窗）见 [docs/agents.md](docs/agents.md)。
+`viewer --offline` 运行零网络的内置演示脚本。未配置时渲染功能不受影响。细节（工具清单、绑定契约、历史压缩、确认弹窗）见 [docs/agents.md](docs/agents.md)。
 
 ## 许可证
 

@@ -1,6 +1,6 @@
 # 架构
 
-（随里程碑推进持续补充，当前对应 M5。）
+（随里程碑推进持续补充，当前对应 M6。）
 
 ## 应用与平台层（macOS）
 
@@ -11,7 +11,7 @@ viewer（`apps/viewer/app.cpp`，组合根）：
 1. 装载 glTF 场景与等距柱状 HDR（`kumo_asset`），失败即干净退出；
 2. 创建 RHI 设备与 surface，`renderer::ibl::bake` 烘焙 IBL（compute，含耗时日志）；
 3. `ForwardRenderer::loadScene` 上传网格/材质，glTF 节点展开为 `scene::Scene` 实体（世界变换分解为 TRS，agent 可动实体变换）；
-4. 装配 agent 栈（M5）：`MainThreadQueue` + `ToolRegistry`（七个场景工具）+ 按 `kumo.config.json` 选择的 provider（或 `--offline` 的脚本回放）+ `AgentSession`——声明顺序保证 session 先于其依赖析构（栈逆序）；
+4. 装配 agent 栈（M5/M6）：`MainThreadQueue` + 两个 `ToolRegistry`（场景工具 / scene_list+shader 工具）+ 按 `kumo.config.json` 的 per-agent 端点装配的两个 provider 与 `AgentSession`（场景 / shader，或 `--offline` 的脚本回放单会话）——声明顺序保证 session 先于其依赖析构（栈逆序）；
 5. 每帧：`glfwPollEvents` 后排空 `MainThreadQueue`（工具回调对帧原子）→ 轨道相机（用户输入时写相机、否则从相机反向同步，agent 的 camera_set 不被覆盖；灯光滑条同理）→ ImGui 面板（帧率、灯光、材质覆盖、聊天、工具日志、确认弹窗）→ `ForwardRenderer::render`；
 6. `S` 键截图；`K`/`L` 存/读场景 JSON（`kumo_scene.json`）；`--frames N` 渲染 N 帧后退出供脚本化验证。
 
@@ -47,8 +47,8 @@ math ← scene ← asset
 - `engine/shadercompiler`——GLSL→SPIR-V→MSL 进程内编译（见 shaders.md）
 - `engine/scene`——场景数据模型：实体 slot map（generational id）、相机、光源、场景 JSON 持久化（ADR 0016）
 - `engine/asset`——glTF/HDR/PNG 装载（cgltf + stb）、程序化图元、per-mesh AABB
-- `engine/renderer`——前向 PBR 渲染器与 IBL 烘焙：`ForwardRenderer` 类 + `renderer::ibl` 自由函数，bind group layout 由 shader 反射生成（ADR 0040），增量上传接口供 agent 建实体
-- `engine/agent`——LLM 场景助手（见 agents.md）：provider 栈（NSURLSession shim + 重试退避 + OpenAI/Claude 双 codec）、工具注册表、场景工具、worker 线程会话（历史压缩、确认门）
+- `engine/renderer`——前向 PBR 渲染器与 IBL 烘焙：`ForwardRenderer` 类 + `renderer::ibl` 自由函数，bind group layout 由 shader 反射生成（ADR 0040），增量上传接口供 agent 建实体；M6 起支持材质级定制 fragment pipeline 与重建式热重载（见 shaders.md）
+- `engine/agent`——LLM 助手（见 agents.md）：provider 栈（NSURLSession shim + 重试退避 + OpenAI/Claude 双 codec、per-agent 端点）、工具注册表（场景七工具 + shader 双工具，按助手收窄）、worker 线程会话（历史压缩、队列化确认门）
 
 （M3 的 Vulkan 后端已于 M4 移除，项目聚焦 Metal。）
 

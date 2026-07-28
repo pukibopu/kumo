@@ -4,6 +4,7 @@ add_library(kumo_agent STATIC
     src/confirmation_gate.cpp
     src/fake_provider.cpp
     src/http_provider.cpp
+    src/mcp_server.cpp
     src/openai_codec.cpp
     src/scene_tools.cpp
     src/session.cpp

@@ -10,6 +10,9 @@ enum class LogLevel { Debug, Info, Warn, Error };
 
 void logMessage(LogLevel level, std::string_view message);
 
+// Routes every level to stderr; stdout then belongs to a wire protocol (MCP).
+void setLogAllToStderr(bool enabled);
+
 template <typename... Args> void logDebug(std::format_string<Args...> fmt, Args&&... args) {
     logMessage(LogLevel::Debug, std::format(fmt, std::forward<Args>(args)...));
 }

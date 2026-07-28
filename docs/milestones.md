@@ -11,7 +11,7 @@
 | v0.5.0 | M4 | PBR、glTF 静态场景、IBL、HDR / MSAA / ACES | 完成 |
 | v0.6.0 | M5 | 场景助手：LLM 框架 + 场景控制工具 + 聊天面板 | 完成 |
 | v0.7.0 | M6 | Shader 助手：生成、自修正、热重载 | 完成 |
-| v0.8.0 | M6.5 | MCP server：外部客户端操控 viewer + 截图工具 | — |
+| v0.8.0 | M6.5 | MCP server：外部客户端操控 viewer + 截图工具 | 完成 |
 | v0.9.0 | M6.75 | SwiftUI 产品界面（场景树 / 视口 / 检查器 / 聊天），macOS 先行 | — |
 | v0.10.0 | M4.5 | 平行光阴影（PCF shadow map） | — |
 | v0.11.0 | M7 | iPad 版 | — |

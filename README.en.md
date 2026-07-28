@@ -57,6 +57,14 @@ Two wire protocols (`provider.type`), and each assistant can point at its own en
 
 `viewer --offline` replays a built-in scripted demo with zero network. Rendering works fine without any assistant configuration. Details (tool set, binding contract, history compression, confirmation dialog) live in [docs/agents.md](docs/agents.md).
 
+### MCP
+
+`viewer --mcp` serves an MCP endpoint over stdio, with the same tool set as the embedded assistants (the seven scene tools, the two shader tools, and an offscreen `viewer_screenshot` tool):
+
+```sh
+claude mcp add kumo -- "$(pwd)/build/macos-debug/apps/viewer/viewer" --mcp
+```
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

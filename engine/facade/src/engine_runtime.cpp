@@ -72,10 +72,10 @@ constexpr const char* kSceneSystemPrompt =
     "reply — build it.\n\n"
     "Default scene richness. Unless the user asks for something minimal, a scene includes: "
     "a ground plane or platform; one clear main subject; two to five supporting elements; "
-    "an environment chosen with environment_set to match the theme; a key light plus at "
-    "least one fill or rim light; at least two clearly distinct materials; a camera framed "
-    "on the subject. Every element must serve the theme or composition — never scatter "
-    "filler objects.\n\n"
+    "an environment (an HDR file when one fits, else a procedural preset) matching the "
+    "theme; a key light plus at least one fill or rim light; at least two clearly distinct "
+    "materials; textured ground and structures; a camera framed on the subject. Every "
+    "element must serve the theme or composition — never scatter filler objects.\n\n"
     "Composition. Place the subject near the frame center or a rule-of-thirds point. "
     "Compute framing from data, not intuition: take the subject's aabb_world from "
     "scene_list, aim camera_set look_at at its center, and position the camera at 1.5-2.5 "
@@ -100,6 +100,14 @@ constexpr const char* kSceneSystemPrompt =
     "deliberately across the scene and avoid saturated pure primaries — real surfaces are "
     "mixed. For effects factors cannot express — iridescence, patterns, glass, procedural "
     "texture — tell the user to ask the shader assistant.\n\n"
+    "Assets. Call asset_list once per conversation before building: real assets beat "
+    "primitives. Prefer scene_add_model for organic or detailed things (trees, props) when "
+    "a fitting model exists; use primitives for simple geometry (walls, platforms, "
+    "panels). Dress every large surface with material_set_texture (ground gets sand or "
+    "grass or rock, structures get planks or bark) and set tiling so texels stay roughly "
+    "square — a 20 m ground with a 1 m texture wants tiling around 20. Prefer an HDR file "
+    "environment (environment_set file) over the procedural sky when one matches the "
+    "scene's mood; fall back to procedural for stylized looks.\n\n"
     "Placement. Rest objects on their support: the AABB bottom sits on the ground or the "
     "surface below, sunk 1-2 cm so nothing floats. Elevated objects need visible support — "
     "build the structure before its attachments (a sign mounts on a building wall, a lamp "
@@ -322,8 +330,9 @@ EnvironmentSource toEnvironmentSource(const scene::SavedEnvironment& saved) {
 // (M6.9), which only stores a validated assembly and never touches the scene.
 // environment_set is NOT here: it mutates environmentSky_/the renderer and
 // gets its undo checkpoint from this same hook like every other scene tool.
-constexpr std::array<std::string_view, 5> kReadOnlyTools{
-    "scene_list", "shader_read", "viewer_screenshot", "scene_define_group", "scene_validate"};
+constexpr std::array<std::string_view, 6> kReadOnlyTools{"scene_list",        "shader_read",
+                                                         "viewer_screenshot", "scene_define_group",
+                                                         "scene_validate",    "asset_list"};
 
 bool isFinite3(const math::float3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -629,6 +638,31 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     };
     sceneTools.viewportSize = [runtime = self.get()] {
         return std::make_pair(runtime->extent_.width, runtime->extent_.height);
+    };
+    // Asset tools (M6.98 PR-2): assetDir empty makes asset_list/material_set_texture/
+    // scene_add_model report themselves unsupported instead of touching the
+    // filesystem (SceneToolContext's own contract).
+    sceneTools.assetDir = self->assetDir_;
+    sceneTools.textureSets =
+        std::make_shared<std::unordered_map<std::string, agent::TextureSetIndices>>();
+    sceneTools.instantiateModel =
+        [runtime = self.get()](
+            const scene::Transform& root,
+            std::string_view name) -> std::expected<std::vector<std::string>, std::string> {
+        std::expected<EngineRuntime::ModelInstance, std::string> instance =
+            runtime->instantiateModel(name, root);
+        if (!instance.has_value()) {
+            return std::unexpected(instance.error());
+        }
+        std::vector<std::string> ids;
+        ids.reserve(instance->entities.size());
+        for (scene::EntityId id : instance->entities) {
+            ids.push_back(agent::formatEntityId(id));
+        }
+        return ids;
+    };
+    sceneTools.applyEnvironmentFile = [runtime = self.get()](const std::string& file) {
+        return runtime->applyEnvironmentFile(file);
     };
     agent::registerSceneTools(self->sceneToolRegistry_, sceneTools);
     agent::registerSceneListTool(self->shaderToolRegistry_, sceneTools);

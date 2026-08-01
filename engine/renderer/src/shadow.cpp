@@ -44,12 +44,19 @@ math::float4x4 fitDirectionalShadow(const math::Aabb& sceneBounds, const math::f
         maxV.z = std::max(maxV.z, viewPos.z);
     }
 
-    const float padX = padding * (maxV.x - minV.x);
-    const float padY = padding * (maxV.y - minV.y);
+    // Every extent gets an absolute floor: a flat scene (a lone ground plane)
+    // lit along its normal collapses the depth range to zero, and an
+    // unfloored pad would divide by zero inside orthographic().
+    constexpr float kMinPad = 1e-3f;
+    const float padX = std::max(padding * (maxV.x - minV.x), kMinPad);
+    const float padY = std::max(padding * (maxV.y - minV.y), kMinPad);
     // RH view looks down -Z: the closest corner (largest view-space z) is the
     // near plane, the farthest (smallest z) is the far plane.
+    const float nearZ = -maxV.z;
+    const float farZ = -minV.z;
+    const float padZ = std::max(padding * (farZ - nearZ), kMinPad);
     const math::float4x4 proj = math::orthographic(minV.x - padX, maxV.x + padX, minV.y - padY,
-                                                   maxV.y + padY, -maxV.z, -minV.z);
+                                                   maxV.y + padY, nearZ - padZ, farZ + padZ);
     return proj * view;
 }
 

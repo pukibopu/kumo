@@ -3,6 +3,8 @@
 // Private kumo_renderer header (engine/renderer/src), not a public interface.
 #include "shadow.h"
 
+#include <cmath>
+
 using namespace kumo;
 
 namespace {
@@ -51,6 +53,31 @@ TEST_CASE("fitDirectionalShadow: straight-down light does not hit the up-vector 
         CHECK(ndc.x <= 1.0f + 1e-3f);
         CHECK(ndc.y >= -1.0f - 1e-3f);
         CHECK(ndc.y <= 1.0f + 1e-3f);
+    }
+}
+
+TEST_CASE("fitDirectionalShadow: a flat AABB lit along its normal stays finite") {
+    // A lone ground plane has zero Y extent; a straight-down light collapses
+    // the view-space depth range, which must not divide the ortho by zero.
+    const math::Aabb bounds{.min = {-5.0f, 0.0f, -5.0f}, .max = {5.0f, 0.0f, 5.0f}};
+    const math::float4x4 m =
+        renderer::detail::fitDirectionalShadow(bounds, math::float3{0.0f, -1.0f, 0.0f});
+    CHECK(m != math::float4x4(1.0f));
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            CAPTURE(col);
+            CAPTURE(row);
+            CHECK(std::isfinite(m[col][row]));
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        const math::float3 corner{(i & 1) != 0 ? bounds.max.x : bounds.min.x, 0.0f,
+                                  (i & 4) != 0 ? bounds.max.z : bounds.min.z};
+        const math::float3 ndc = ndcOf(m, corner);
+        CAPTURE(i);
+        CHECK(ndc.z >= 0.0f - 1e-3f);
+        CHECK(ndc.z <= 1.0f + 1e-3f);
     }
 }
 

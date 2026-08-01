@@ -40,6 +40,17 @@ json materialJson(const SavedMaterial& material) {
             {"emissive", numberArray(material.emissive, 3)}};
 }
 
+json environmentJson(const SavedEnvironment& env) {
+    return {{"zenith_color", numberArray(env.zenithColor, 3)},
+            {"horizon_color", numberArray(env.horizonColor, 3)},
+            {"ground_color", numberArray(env.groundColor, 3)},
+            {"sun_direction", numberArray(env.sunDirection, 3)},
+            {"sun_color", numberArray(env.sunColor, 3)},
+            {"sun_intensity", env.sunIntensity},
+            {"sun_angular_radius_deg", env.sunAngularRadiusDeg},
+            {"exposure", env.exposure}};
+}
+
 json lightJson(const Light& light) {
     return {{"type", light.type == LightType::Point ? "point" : "directional"},
             {"color", numberArray(light.color)},
@@ -146,6 +157,17 @@ bool readMaterial(const json& obj, SavedMaterial& material, std::string& error) 
            readNumbers(obj, "emissive", material.emissive, 3, error);
 }
 
+bool readEnvironment(const json& obj, SavedEnvironment& env, std::string& error) {
+    return readNumbers(obj, "zenith_color", env.zenithColor, 3, error) &&
+           readNumbers(obj, "horizon_color", env.horizonColor, 3, error) &&
+           readNumbers(obj, "ground_color", env.groundColor, 3, error) &&
+           readNumbers(obj, "sun_direction", env.sunDirection, 3, error) &&
+           readNumbers(obj, "sun_color", env.sunColor, 3, error) &&
+           readFloat(obj, "sun_intensity", env.sunIntensity, error) &&
+           readFloat(obj, "sun_angular_radius_deg", env.sunAngularRadiusDeg, error) &&
+           readFloat(obj, "exposure", env.exposure, error);
+}
+
 std::expected<Camera, std::string> readCamera(const json& obj) {
     if (!obj.is_object()) {
         return std::unexpected("camera must be an object");
@@ -223,7 +245,8 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
 } // namespace
 
 std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
-                          const MaterialLookup& materials) {
+                          const MaterialLookup& materials,
+                          const std::optional<SavedEnvironment>& environment) {
     json entities = json::array();
     scene.entities.forEach([&](EntityId, const Entity& entity) {
         json e{{"name", entity.name},
@@ -251,15 +274,18 @@ std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
     }
 
     const Camera& camera = scene.camera;
-    const json out{{"version", kSceneFormatVersion},
-                   {"model", std::string(modelPath)},
-                   {"camera",
-                    {{"position", numberArray(camera.position)},
-                     {"rotation", quatArray(camera.rotation)},
-                     {"fov_y", camera.fovY},
-                     {"near", camera.nearZ}}},
-                   {"lights", std::move(lights)},
-                   {"entities", std::move(entities)}};
+    json out{{"version", kSceneFormatVersion},
+             {"model", std::string(modelPath)},
+             {"camera",
+              {{"position", numberArray(camera.position)},
+               {"rotation", quatArray(camera.rotation)},
+               {"fov_y", camera.fovY},
+               {"near", camera.nearZ}}},
+             {"lights", std::move(lights)},
+             {"entities", std::move(entities)}};
+    if (environment.has_value()) {
+        out["environment"] = environmentJson(*environment);
+    }
     // Invalid UTF-8 (e.g. legacy-encoded glTF node names carried in entity
     // names) must degrade to U+FFFD, never to a dump() throw.
     return out.dump(2, ' ', false, json::error_handler_t::replace);
@@ -317,6 +343,16 @@ std::expected<SavedScene, std::string> parseSceneJson(std::string_view text) {
             }
             scene.entities.push_back(std::move(*entity));
         }
+    }
+    if (parsed.contains("environment")) {
+        if (!parsed["environment"].is_object()) {
+            return std::unexpected("environment must be an object");
+        }
+        SavedEnvironment env;
+        if (!readEnvironment(parsed["environment"], env, error)) {
+            return std::unexpected(error);
+        }
+        scene.environment = env;
     }
     return scene;
 }

@@ -2,6 +2,7 @@
 
 #include <kumo/agent/entity_id.h>
 #include <kumo/asset/primitives.h>
+#include <kumo/asset/procedural_sky.h>
 #include <kumo/core/assert.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
@@ -155,10 +156,25 @@ bool readString(const json& args, const char* key, std::string& out, std::string
 }
 
 bool readMaterial(const json& args, ForwardRenderer::MaterialParams& params, std::string& error) {
-    return readNumbers(args, "base_color", params.baseColor, 4, error) &&
-           readNumber(args, "metallic", params.metallic, error) &&
-           readNumber(args, "roughness", params.roughness, error) &&
-           readNumbers(args, "emissive", params.emissive, 3, error);
+    if (!readNumbers(args, "base_color", params.baseColor, 4, error) ||
+        !readNumber(args, "metallic", params.metallic, error) ||
+        !readNumber(args, "roughness", params.roughness, error) ||
+        !readNumbers(args, "emissive", params.emissive, 3, error)) {
+        return false;
+    }
+    // PBR factors outside [0,1] are undefined for the shading model; clamped
+    // rather than rejected so a slightly-off value from the model still lands
+    // somewhere sensible.
+    params.metallic = std::clamp(params.metallic, 0.0f, 1.0f);
+    params.roughness = std::clamp(params.roughness, 0.0f, 1.0f);
+    return true;
+}
+
+// Entities without an explicit material get a plausible default instead of
+// the renderer's untextured-white/fully-metallic record (which reads as a
+// mirror ball, a bad default for freshly added geometry).
+ForwardRenderer::MaterialParams defaultEntityMaterial() {
+    return {.baseColor = {0.8f, 0.8f, 0.8f, 1.0f}, .metallic = 0.0f, .roughness = 0.6f};
 }
 
 bool readTransform(const json& args, scene::Transform& transform, std::string& error) {
@@ -214,6 +230,18 @@ json materialJson(const ForwardRenderer::MaterialParams& params) {
             {"emissive", numberArray(params.emissive, 3)}};
 }
 
+// Shared by scene_list and light_remove so the wire shape of a light entry
+// never drifts between the two.
+json lightJson(std::size_t index, const scene::Light& light) {
+    return {{"index", index},
+            {"type", light.type == scene::LightType::Point ? "point" : "directional"},
+            {"color", numberArray(light.color)},
+            {"intensity", rounded(light.intensity)},
+            {"direction", numberArray(light.direction)},
+            {"position", numberArray(light.position)},
+            {"range", rounded(light.range)}};
+}
+
 std::string sceneList(const SceneToolContext& context) {
     const scene::Scene& scene = *context.scene;
     json entities = json::array();
@@ -251,14 +279,7 @@ std::string sceneList(const SceneToolContext& context) {
 
     json lights = json::array();
     for (std::size_t i = 0; i < scene.lights().size(); ++i) {
-        const scene::Light& light = scene.lights()[i];
-        lights.push_back({{"index", i},
-                          {"type", light.type == scene::LightType::Point ? "point" : "directional"},
-                          {"color", numberArray(light.color)},
-                          {"intensity", rounded(light.intensity)},
-                          {"direction", numberArray(light.direction)},
-                          {"position", numberArray(light.position)},
-                          {"range", rounded(light.range)}});
+        lights.push_back(lightJson(i, scene.lights()[i]));
     }
 
     const scene::Camera& camera = scene.camera;
@@ -344,6 +365,8 @@ std::expected<EntityInput, std::string> parseEntityInput(const json& args) {
         if (!readMaterial(args["material"], input.material, error)) {
             return std::unexpected(error);
         }
+    } else {
+        input.material = defaultEntityMaterial();
     }
     return input;
 }
@@ -856,6 +879,37 @@ std::string lightSet(const SceneToolContext& context, const json& args) {
     return json{{"status", "ok"}, {"index", *index}}.dump();
 }
 
+// Destructive: indices are positional, so every light after `index` shifts
+// down by one; the response echoes the full remaining list so the model never
+// has to guess the new indices.
+std::string lightRemove(const SceneToolContext& context, const json& args) {
+    scene::Scene& scene = *context.scene;
+    const auto it = args.find("index");
+    if (it == args.end() || !it->is_number()) {
+        return errorJson("index (integer) is required");
+    }
+    const double value = it->get<double>();
+    if (value < 0.0 || value != std::floor(value)) {
+        return errorJson("index must be a non-negative integer");
+    }
+    const auto index = static_cast<std::size_t>(value);
+    const std::size_t count = scene.lights().size();
+    if (index >= count) {
+        return errorJson(count == 0 ? std::string("light index out of range: the scene has no "
+                                                  "lights")
+                                    : std::format("light index {} out of range: valid range is "
+                                                  "0-{}",
+                                                  index, count - 1));
+    }
+    scene.removeLight(index);
+
+    json lights = json::array();
+    for (std::size_t i = 0; i < scene.lights().size(); ++i) {
+        lights.push_back(lightJson(i, scene.lights()[i]));
+    }
+    return json{{"status", "ok"}, {"lights", std::move(lights)}}.dump();
+}
+
 std::string materialSetParam(const SceneToolContext& context, const json& args) {
     if (context.renderer == nullptr) {
         return errorJson("renderer unavailable");
@@ -911,6 +965,337 @@ std::string materialSetParam(const SceneToolContext& context, const json& args) 
     return okJson();
 }
 
+// Starting point for environment_set's preset resolution; explicit fields in
+// the call then override individual members. Values below are tuning
+// constants, not derived from anything physical.
+std::optional<asset::ProceduralSkyDesc> presetDesc(const std::string& preset) {
+    asset::ProceduralSkyDesc desc; // clear_day: the type's own defaults
+    if (preset.empty() || preset == "clear_day") {
+        return desc;
+    }
+    if (preset == "sunset") {
+        desc.zenithColor = {0.05f, 0.08f, 0.25f};
+        desc.horizonColor = {0.95f, 0.45f, 0.15f};
+        desc.groundColor = {0.15f, 0.10f, 0.08f};
+        desc.sunDirection = {-0.8f, -0.25f, -0.4f};
+        desc.sunColor = {1.0f, 0.55f, 0.25f};
+        desc.sunIntensity = 25.0f;
+        desc.sunAngularRadiusDeg = 2.0f;
+        return desc;
+    }
+    if (preset == "overcast") {
+        desc.zenithColor = {0.55f, 0.56f, 0.58f};
+        desc.horizonColor = {0.65f, 0.65f, 0.66f};
+        desc.groundColor = {0.20f, 0.20f, 0.20f};
+        desc.sunDirection = {-0.3f, -0.9f, -0.3f};
+        desc.sunColor = {0.9f, 0.9f, 0.9f};
+        desc.sunIntensity = 0.0f; // flat grey light, no visible disc
+        return desc;
+    }
+    if (preset == "night") {
+        desc.zenithColor = {0.02f, 0.03f, 0.08f};
+        desc.horizonColor = {0.05f, 0.06f, 0.12f};
+        desc.groundColor = {0.01f, 0.01f, 0.015f};
+        desc.sunDirection = {-0.3f, -0.6f, -0.4f}; // moon direction
+        desc.sunColor = {0.6f, 0.65f, 0.8f};
+        desc.sunIntensity = 0.8f;
+        desc.sunAngularRadiusDeg = 0.6f;
+        return desc;
+    }
+    if (preset == "studio") {
+        desc.zenithColor = {0.85f, 0.85f, 0.85f};
+        desc.horizonColor = {0.6f, 0.6f, 0.6f};
+        desc.groundColor = {0.25f, 0.25f, 0.25f};
+        desc.sunColor = {1.0f, 1.0f, 1.0f};
+        desc.sunIntensity = 0.0f; // neutral gradient only, no sun disc
+        return desc;
+    }
+    return std::nullopt;
+}
+
+constexpr std::array<std::string_view, 5> kEnvironmentPresets{"clear_day", "sunset", "overcast",
+                                                              "night", "studio"};
+
+std::string environmentPresetList() {
+    std::string out;
+    for (std::size_t i = 0; i < kEnvironmentPresets.size(); ++i) {
+        if (i > 0) {
+            out += ", ";
+        }
+        out += kEnvironmentPresets[i];
+    }
+    return out;
+}
+
+// Bakes and swaps in a new IBL environment. No preset means clear_day; explicit
+// fields override the preset's values one at a time (same partial-update
+// semantics as every other tool here).
+std::string environmentSet(const SceneToolContext& context, const json& args) {
+    if (!context.applyEnvironment) {
+        return errorJson("environment control is not available");
+    }
+    std::string presetName;
+    std::string error;
+    if (!readString(args, "preset", presetName, error)) {
+        return errorJson(error);
+    }
+    const std::optional<asset::ProceduralSkyDesc> resolved = presetDesc(presetName);
+    if (!resolved.has_value()) {
+        return errorJson(std::format("unknown preset '{}': must be one of: {}", presetName,
+                                     environmentPresetList()));
+    }
+    asset::ProceduralSkyDesc desc = *resolved;
+    if (!readFloat3(args, "sun_direction", desc.sunDirection, error) ||
+        !readNumber(args, "sun_intensity", desc.sunIntensity, error) ||
+        !readFloat3(args, "sun_color", desc.sunColor, error) ||
+        !readFloat3(args, "zenith_color", desc.zenithColor, error) ||
+        !readFloat3(args, "horizon_color", desc.horizonColor, error) ||
+        !readFloat3(args, "ground_color", desc.groundColor, error) ||
+        !readNumber(args, "exposure", desc.exposure, error)) {
+        return errorJson(error);
+    }
+    // Upper bounds keep the baked sky inside half-float range with margin;
+    // proceduralSky clamps as well, this layer exists so the model sees why.
+    if (args.contains("sun_intensity") &&
+        (desc.sunIntensity < 0.0f || desc.sunIntensity > 10000.0f)) {
+        return errorJson("sun_intensity must be between 0 and 10000");
+    }
+    if (args.contains("exposure") && (desc.exposure <= 0.0f || desc.exposure > 100.0f)) {
+        return errorJson("exposure must be positive and at most 100");
+    }
+    const math::float3& d = desc.sunDirection;
+    if (d.x * d.x + d.y * d.y + d.z * d.z < 1e-8f) {
+        // proceduralSky falls back silently on a zero direction; the tool
+        // rejects it instead so the model notices its own mistake.
+        return errorJson("sun_direction must be a non-zero vector");
+    }
+    if (!context.applyEnvironment(desc)) {
+        return errorJson("environment control is not available");
+    }
+    return json{{"status", "ok"},
+                {"preset", presetName.empty() ? std::string("clear_day") : presetName},
+                {"sun_direction", numberArray(desc.sunDirection)}}
+        .dump();
+}
+
+// scene_validate's per-entity world AABB, reusing exactly how scene_list
+// computes aabb_world; empty when there is no renderer to ask.
+struct AabbEntity {
+    std::string id;
+    math::Aabb box;
+};
+
+std::vector<AabbEntity> collectAabbs(const SceneToolContext& context) {
+    std::vector<AabbEntity> out;
+    context.scene->entities.forEach([&](scene::EntityId id, const scene::Entity& entity) {
+        std::optional<math::Aabb> local;
+        if (context.renderer != nullptr && entity.meshIndex >= 0) {
+            if (const math::Aabb* found =
+                    context.renderer->meshLocalAabb(static_cast<std::uint32_t>(entity.meshIndex))) {
+                local = *found;
+            }
+        }
+        if (!local.has_value() && !entity.primitive.empty()) {
+            // CPU-only fallback: procedural primitives know their local AABB
+            // without a GPU upload, so scene_validate stays useful for them
+            // even with no renderer attached (renderer-backed tests already
+            // cover the glTF/uploaded-mesh path via meshLocalAabb above).
+            if (const auto mesh = asset::makePrimitive(entity.primitive, entity.primitiveSize)) {
+                local = mesh->localAabb;
+            }
+        }
+        if (!local.has_value()) {
+            return;
+        }
+        out.push_back({formatEntityId(id), math::transformAabb(*local, entity.transform.matrix())});
+    });
+    return out;
+}
+
+struct Finding {
+    const char* check;
+    const char* severity;
+    std::string entityId; // empty when the finding names no single entity
+    std::string message;
+};
+
+json findingJson(const Finding& finding) {
+    json out{
+        {"check", finding.check}, {"severity", finding.severity}, {"message", finding.message}};
+    if (!finding.entityId.empty()) {
+        out["entity_id"] = finding.entityId;
+    }
+    return out;
+}
+
+bool xzOverlaps(const math::Aabb& a, const math::Aabb& b) {
+    return a.min.x < b.max.x && a.max.x > b.min.x && a.min.z < b.max.z && a.max.z > b.min.z;
+}
+
+// support = the highest surface directly beneath the entity's XZ footprint
+// (ground when nothing is), so a box sitting flush on another one is not
+// flagged even though its own min.y is above the world ground plane.
+void checkFloating(const std::vector<AabbEntity>& aabbs, std::vector<Finding>& findings) {
+    constexpr float kEps = 0.02f;
+    for (const AabbEntity& e : aabbs) {
+        if (e.box.min.y <= kEps) {
+            continue;
+        }
+        float support = 0.0f;
+        for (const AabbEntity& other : aabbs) {
+            if (&other == &e) {
+                continue;
+            }
+            if (other.box.max.y <= e.box.min.y + 1e-4f && xzOverlaps(other.box, e.box)) {
+                support = std::max(support, other.box.max.y);
+            }
+        }
+        const float gap = e.box.min.y - support;
+        if (gap > kEps) {
+            findings.push_back({"floating", "warning", e.id,
+                                std::format("entity is floating {:.3f}m above its support", gap)});
+        }
+    }
+}
+
+void checkOverlap(const std::vector<AabbEntity>& aabbs, std::vector<Finding>& findings) {
+    constexpr float kEps = 1e-3f;
+    if (aabbs.size() > 500) {
+        findings.push_back({"overlap", "info", "",
+                            std::format("overlap check skipped: {} entities exceeds the 500 limit",
+                                        aabbs.size())});
+        return;
+    }
+    for (std::size_t i = 0; i < aabbs.size(); ++i) {
+        for (std::size_t j = i + 1; j < aabbs.size(); ++j) {
+            const math::Aabb& a = aabbs[i].box;
+            const math::Aabb& b = aabbs[j].box;
+            const float overlapX = std::min(a.max.x, b.max.x) - std::max(a.min.x, b.min.x);
+            const float overlapY = std::min(a.max.y, b.max.y) - std::max(a.min.y, b.min.y);
+            const float overlapZ = std::min(a.max.z, b.max.z) - std::max(a.min.z, b.min.z);
+            if (overlapX > kEps && overlapY > kEps && overlapZ > kEps) {
+                findings.push_back(
+                    {"overlap", "info", aabbs[i].id,
+                     std::format("entity {} overlaps entity {}", aabbs[i].id, aabbs[j].id)});
+            }
+        }
+    }
+}
+
+void checkCameraInside(const scene::Camera& camera, const std::vector<AabbEntity>& aabbs,
+                       std::vector<Finding>& findings) {
+    const math::float3& p = camera.position;
+    for (const AabbEntity& e : aabbs) {
+        if (p.x >= e.box.min.x && p.x <= e.box.max.x && p.y >= e.box.min.y && p.y <= e.box.max.y &&
+            p.z >= e.box.min.z && p.z <= e.box.max.z) {
+            findings.push_back({"camera_inside", "warning", e.id,
+                                "the camera is inside this entity's bounding box"});
+        }
+    }
+}
+
+struct Plane {
+    math::float3 point;
+    math::float3 normal; // need not be unit length; only the dot product's sign is used
+};
+
+// Six view-frustum half-spaces built directly from the camera basis rather
+// than by extracting rows of the projection matrix: the renderer's reversed-Z
+// [0,1] depth range makes the usual near/far row extraction awkward, and the
+// side planes depend only on fovY/aspect regardless of depth convention.
+std::array<Plane, 6> frustumPlanes(const scene::Camera& camera, float aspect, float farZ) {
+    const math::float3 forward = camera.rotation * math::float3(0.0f, 0.0f, -1.0f);
+    const math::float3 up = camera.rotation * math::float3(0.0f, 1.0f, 0.0f);
+    const math::float3 right = camera.rotation * math::float3(1.0f, 0.0f, 0.0f);
+    const math::float3& p = camera.position;
+    const float halfV = farZ * std::tan(camera.fovY * 0.5f);
+    const float halfH = halfV * aspect;
+
+    return {Plane{p + forward * camera.nearZ, forward}, Plane{p + forward * farZ, -forward},
+            Plane{p, halfH * forward - farZ * right},   Plane{p, farZ * right + halfH * forward},
+            Plane{p, halfV * forward - farZ * up},      Plane{p, halfV * forward + farZ * up}};
+}
+
+bool aabbOutsidePlane(const math::Aabb& box, const Plane& plane) {
+    // The corner furthest along the plane normal; if even that one is behind
+    // the plane, the whole box is.
+    const math::float3 positive{plane.normal.x >= 0.0f ? box.max.x : box.min.x,
+                                plane.normal.y >= 0.0f ? box.max.y : box.min.y,
+                                plane.normal.z >= 0.0f ? box.max.z : box.min.z};
+    return math::dot(plane.normal, positive - plane.point) < 0.0f;
+}
+
+void checkFrustum(const SceneToolContext& context, const std::vector<AabbEntity>& aabbs,
+                  std::vector<Finding>& findings) {
+    float aspect = 16.0f / 9.0f;
+    bool assumedAspect = true;
+    if (context.viewportSize) {
+        const auto [w, h] = context.viewportSize();
+        if (w > 0 && h > 0) {
+            aspect = static_cast<float>(w) / static_cast<float>(h);
+            assumedAspect = false;
+        }
+    }
+    constexpr float kFar = 1000.0f;
+    const std::array<Plane, 6> planes = frustumPlanes(context.scene->camera, aspect, kFar);
+    for (const AabbEntity& e : aabbs) {
+        bool outside = false;
+        for (const Plane& plane : planes) {
+            if (aabbOutsidePlane(e.box, plane)) {
+                outside = true;
+                break;
+            }
+        }
+        if (!outside) {
+            continue;
+        }
+        findings.push_back(
+            {"out_of_frustum", "info", e.id,
+             assumedAspect ? std::format("entity {} is outside the camera frustum (assumed 16:9 "
+                                         "aspect ratio)",
+                                         e.id)
+                           : std::format("entity {} is outside the camera frustum", e.id)});
+    }
+}
+
+void checkLights(const scene::Scene& scene, std::vector<Finding>& findings) {
+    const auto lights = scene.lights();
+    bool anyEffective = false;
+    for (const scene::Light& light : lights) {
+        if (light.intensity > 0.0f) {
+            anyEffective = true;
+        }
+    }
+    if (lights.empty() || !anyEffective) {
+        findings.push_back({"lighting", "warning", "", "scene has no effective lighting"});
+    }
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        if (lights[i].intensity > 50.0f) {
+            findings.push_back({"lighting", "info", "",
+                                std::format("light {} intensity {:.1f} is unusually high", i,
+                                            lights[i].intensity)});
+        }
+    }
+}
+
+// Read-only: pure math over the current scene/renderer state, never mutates
+// anything and never auto-fixes what it finds.
+std::string sceneValidate(const SceneToolContext& context) {
+    std::vector<Finding> findings;
+    const std::vector<AabbEntity> aabbs = collectAabbs(context);
+    checkFloating(aabbs, findings);
+    checkOverlap(aabbs, findings);
+    checkCameraInside(context.scene->camera, aabbs, findings);
+    checkFrustum(context, aabbs, findings);
+    checkLights(*context.scene, findings);
+
+    json out{{"status", "ok"}, {"findings", json::array()}};
+    for (const Finding& finding : findings) {
+        out["findings"].push_back(findingJson(finding));
+    }
+    return dumpSafe(out);
+}
+
 json parseArgs(std::string_view argsJson) {
     if (argsJson.empty()) {
         return json::object();
@@ -929,10 +1314,10 @@ constexpr const char* kEntityPropertiesSchema =
 "position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"World position [x,y,z]"},
 "rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Euler XYZ rotation in degrees"},
 "scale":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
-"material":{"type":"object","properties":{
+"material":{"type":"object","description":"Omit for a default non-metal grey material","properties":{
 "base_color":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Linear RGBA"},
-"metallic":{"type":"number"},
-"roughness":{"type":"number"},
+"metallic":{"type":"number","description":"Clamped to the 0-1 range"},
+"roughness":{"type":"number","description":"Clamped to the 0-1 range"},
 "emissive":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}})";
 
 } // namespace
@@ -1025,13 +1410,21 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
 "range":{"type":"number"}}})",
         false, [](const SceneToolContext& ctx, const json& args) { return lightSet(ctx, args); });
 
+    add("light_remove",
+        "Remove the light at `index` permanently; every later light's index shifts down by one, "
+        "so re-check scene_list or this call's own response before addressing another light.",
+        R"({"type":"object","properties":{
+"index":{"type":"integer","minimum":0}},
+"required":["index"]})",
+        true, [](const SceneToolContext& ctx, const json& args) { return lightRemove(ctx, args); });
+
     add("material_set_param",
         "Update the material factors of an entity; omitted fields keep their current value.",
         R"({"type":"object","properties":{
 "entity_id":{"type":"string"},
 "base_color":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Linear RGBA"},
-"metallic":{"type":"number"},
-"roughness":{"type":"number"},
+"metallic":{"type":"number","description":"Clamped to the 0-1 range"},
+"roughness":{"type":"number","description":"Clamped to the 0-1 range"},
 "emissive":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},
 "required":["entity_id"]})",
         false,
@@ -1071,6 +1464,30 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         false, [](const SceneToolContext& ctx, const json& args) {
             return sceneInstanceGroup(ctx, args);
         });
+
+    add("environment_set",
+        "Set the sky environment: start from a preset (clear_day, sunset, overcast, night, "
+        "studio) and optionally override individual fields such as sun_direction or exposure. "
+        "Rebakes the IBL lighting from a deterministic analytic sky; align the scene's key light "
+        "with the returned sun_direction for consistent shading.",
+        R"({"type":"object","properties":{
+"preset":{"type":"string","enum":["clear_day","sunset","overcast","night","studio"],"description":"Default clear_day"},
+"sun_direction":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Direction the sunlight travels, must be non-zero"},
+"sun_intensity":{"type":"number","minimum":0,"maximum":10000},
+"sun_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+"zenith_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+"horizon_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+"ground_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+"exposure":{"type":"number","description":"Positive, at most 100"}}})",
+        false,
+        [](const SceneToolContext& ctx, const json& args) { return environmentSet(ctx, args); });
+
+    add("scene_validate",
+        "Check the scene for common authoring mistakes: floating or overlapping entities, the "
+        "camera stuck inside geometry, entities outside the view frustum, and missing or "
+        "extreme-intensity lighting. Read-only; never modifies the scene.",
+        R"({"type":"object","properties":{}})", false,
+        [](const SceneToolContext& ctx, const json&) { return sceneValidate(ctx); });
 }
 
 } // namespace kumo::agent

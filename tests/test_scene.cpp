@@ -76,6 +76,23 @@ TEST_CASE("Scene::addLight caps at 16") {
     CHECK(s.lights().empty());
 }
 
+TEST_CASE("Scene::removeLight shifts the remaining lights down and rejects out-of-range") {
+    scene::Scene s;
+    CHECK(s.addLight({.intensity = 1.0f}));
+    CHECK(s.addLight({.intensity = 2.0f}));
+    CHECK(s.addLight({.intensity = 3.0f}));
+    REQUIRE(s.lights().size() == 3);
+
+    CHECK(s.removeLight(1));
+    REQUIRE(s.lights().size() == 2);
+    CHECK(s.lights()[0].intensity == doctest::Approx(1.0f));
+    CHECK(s.lights()[1].intensity == doctest::Approx(3.0f));
+
+    CHECK_FALSE(s.removeLight(2));
+    CHECK_FALSE(s.removeLight(100));
+    REQUIRE(s.lights().size() == 2);
+}
+
 TEST_CASE("Camera lookAt yields a view that puts the eye at the origin") {
     scene::Camera cam;
     cam.position = {0.0f, 0.0f, 5.0f};

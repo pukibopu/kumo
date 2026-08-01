@@ -7,6 +7,7 @@ add_executable(kumo_tests
     test_scene_persistence.cpp
     test_asset.cpp
     test_primitives.cpp
+    test_procedural_sky.cpp
     test_shaderc.cpp
     test_shader_snapshots.cpp
     test_renderer_compat.cpp

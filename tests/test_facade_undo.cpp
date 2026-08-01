@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <kumo/asset/procedural_sky.h>
 #include <kumo/facade/undo_stack.h>
 
 using namespace kumo;
@@ -186,6 +187,26 @@ TEST_CASE("UndoStack: depth caps the undo history, dropping the oldest entries")
     CHECK(current.world.camera.position.x == doctest::Approx(1.0f));
     // r0's snapshot (x=0) was evicted by the depth cap: nothing left to undo.
     CHECK(!stack.canUndo());
+}
+
+TEST_CASE("SceneState::environment equality gates whether applySceneState would re-bake") {
+    // No GPU here: this only exercises the struct-level equality the facade
+    // uses to decide whether undo/redo needs to re-bake an IBL environment.
+    SceneState a;
+    SceneState b;
+    CHECK(a.environment == b.environment); // both nullopt: an unrelated edit's snapshot
+
+    asset::ProceduralSkyDesc sky;
+    a.environment = sky;
+    CHECK(a.environment != b.environment); // one has a procedural sky, the other the loaded HDR
+
+    b.environment = sky;
+    CHECK(a.environment == b.environment); // identical desc: no re-bake needed
+
+    asset::ProceduralSkyDesc changed = sky;
+    changed.sunIntensity = sky.sunIntensity + 1.0f;
+    b.environment = changed;
+    CHECK(a.environment != b.environment); // same preset shape, different tuning: re-bake needed
 }
 
 TEST_CASE("UndoStack: redo mirrors undo, moving state forward and back to undo") {

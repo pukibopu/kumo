@@ -184,3 +184,50 @@ TEST_CASE("parseSceneJson entities without primitive parse with empty provenance
     CHECK(parsed->entities[0].entity.meshIndex == 2);
     CHECK(!parsed->entities[0].material.has_value());
 }
+
+TEST_CASE("save/parse round trip preserves the environment when present") {
+    scene::Scene scene;
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+
+    scene::SavedEnvironment env;
+    env.zenithColor[0] = 0.1f;
+    env.zenithColor[1] = 0.2f;
+    env.zenithColor[2] = 0.3f;
+    env.horizonColor[0] = 0.4f;
+    env.groundColor[2] = 0.05f;
+    env.sunDirection[0] = -0.6f;
+    env.sunDirection[1] = -0.5f;
+    env.sunDirection[2] = -0.2f;
+    env.sunColor[1] = 0.8f;
+    env.sunIntensity = 12.5f;
+    env.sunAngularRadiusDeg = 2.5f;
+    env.exposure = 1.4f;
+
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", noMaterials, env);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->environment.has_value());
+    const scene::SavedEnvironment& roundTripped = *parsed->environment;
+    CHECK(roundTripped.zenithColor[0] == 0.1f);
+    CHECK(roundTripped.zenithColor[1] == 0.2f);
+    CHECK(roundTripped.zenithColor[2] == 0.3f);
+    CHECK(roundTripped.horizonColor[0] == 0.4f);
+    CHECK(roundTripped.groundColor[2] == 0.05f);
+    CHECK(roundTripped.sunDirection[0] == -0.6f);
+    CHECK(roundTripped.sunDirection[1] == -0.5f);
+    CHECK(roundTripped.sunDirection[2] == -0.2f);
+    CHECK(roundTripped.sunColor[1] == 0.8f);
+    CHECK(roundTripped.sunIntensity == 12.5f);
+    CHECK(roundTripped.sunAngularRadiusDeg == 2.5f);
+    CHECK(roundTripped.exposure == 1.4f);
+}
+
+TEST_CASE("save/parse round trip omits the environment key when absent") {
+    scene::Scene scene;
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", noMaterials);
+    CHECK(json.find("\"environment\"") == std::string::npos);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    CHECK(!parsed->environment.has_value());
+}

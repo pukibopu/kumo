@@ -9,6 +9,7 @@
 #include <kumo/agent/shader_tools.h>
 #include <kumo/asset/asset.h>
 #include <kumo/asset/primitives.h>
+#include <kumo/asset/procedural_sky.h>
 #include <kumo/core/file.h>
 #include <kumo/core/log.h>
 #include <kumo/math/math.h>
@@ -185,11 +186,44 @@ MaterialParams toMaterialParams(const scene::SavedMaterial& saved) {
     return params;
 }
 
+scene::SavedEnvironment toSavedEnvironment(const asset::ProceduralSkyDesc& desc) {
+    scene::SavedEnvironment saved;
+    const auto copy3 = [](const math::float3& v, float(&out)[3]) {
+        out[0] = v.x;
+        out[1] = v.y;
+        out[2] = v.z;
+    };
+    copy3(desc.zenithColor, saved.zenithColor);
+    copy3(desc.horizonColor, saved.horizonColor);
+    copy3(desc.groundColor, saved.groundColor);
+    copy3(desc.sunDirection, saved.sunDirection);
+    copy3(desc.sunColor, saved.sunColor);
+    saved.sunIntensity = desc.sunIntensity;
+    saved.sunAngularRadiusDeg = desc.sunAngularRadiusDeg;
+    saved.exposure = desc.exposure;
+    return saved;
+}
+
+asset::ProceduralSkyDesc toProceduralSkyDesc(const scene::SavedEnvironment& saved) {
+    asset::ProceduralSkyDesc desc;
+    desc.zenithColor = {saved.zenithColor[0], saved.zenithColor[1], saved.zenithColor[2]};
+    desc.horizonColor = {saved.horizonColor[0], saved.horizonColor[1], saved.horizonColor[2]};
+    desc.groundColor = {saved.groundColor[0], saved.groundColor[1], saved.groundColor[2]};
+    desc.sunDirection = {saved.sunDirection[0], saved.sunDirection[1], saved.sunDirection[2]};
+    desc.sunColor = {saved.sunColor[0], saved.sunColor[1], saved.sunColor[2]};
+    desc.sunIntensity = saved.sunIntensity;
+    desc.sunAngularRadiusDeg = saved.sunAngularRadiusDeg;
+    desc.exposure = saved.exposure;
+    return desc;
+}
+
 // Tool names the undo hook must not record a checkpoint for (ADR 0044): pure
 // reads, so they never change scene/renderer state, plus scene_define_group
 // (M6.9), which only stores a validated assembly and never touches the scene.
-constexpr std::array<std::string_view, 4> kReadOnlyTools{"scene_list", "shader_read",
-                                                         "viewer_screenshot", "scene_define_group"};
+// environment_set is NOT here: it mutates environmentSky_/the renderer and
+// gets its undo checkpoint from this same hook like every other scene tool.
+constexpr std::array<std::string_view, 5> kReadOnlyTools{
+    "scene_list", "shader_read", "viewer_screenshot", "scene_define_group", "scene_validate"};
 
 bool isFinite3(const math::float3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -278,6 +312,7 @@ EngineRuntime::EngineRuntime()
 SceneState EngineRuntime::captureSceneState() const {
     SceneState state;
     state.world = world_;
+    state.environment = environmentSky_;
     const std::uint32_t count = renderer_.materialCount();
     state.materials.reserve(count);
     state.shaderSources.reserve(count);
@@ -315,6 +350,37 @@ void EngineRuntime::applySceneState(const SceneState& state) {
             renderer_.clearMaterialShader(index);
         }
     }
+
+    // Equality-gated (ProceduralSkyDesc::operator== is defaulted) so undoing
+    // an unrelated edit never triggers a bake; nullopt means "restore the
+    // loaded HDR", which is not otherwise reachable once a procedural sky has
+    // been applied. On a bake/swap failure environmentSky_ deliberately keeps
+    // tracking what the renderer actually shows — later captures then pair the
+    // rolled-back world with the environment still on screen, never with a
+    // value that was requested but never applied.
+    if (state.environment != environmentSky_) {
+        if (state.environment.has_value()) {
+            const asset::HdrImage image = asset::proceduralSky(*state.environment);
+            const renderer::ibl::Environment environment = renderer::ibl::bake(*device_, image);
+            if (environment.valid() && renderer_.setEnvironment(environment)) {
+                environmentSky_ = state.environment;
+            } else {
+                logError("undo/redo: failed to re-bake the procedural sky environment");
+            }
+        } else {
+            const auto hdr = asset::loadHdr(envPath_);
+            if (!hdr.has_value()) {
+                logError("undo/redo: failed to reload {}: {}", envPath_.string(), hdr.error());
+            } else {
+                const renderer::ibl::Environment environment = renderer::ibl::bake(*device_, *hdr);
+                if (environment.valid() && renderer_.setEnvironment(environment)) {
+                    environmentSky_ = std::nullopt;
+                } else {
+                    logError("undo/redo: failed to re-bake the loaded HDR environment");
+                }
+            }
+        }
+    }
 }
 
 std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const Desc& desc) {
@@ -335,6 +401,7 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
     auto self = std::unique_ptr<EngineRuntime>(new EngineRuntime());
     self->device_ = &device;
     self->modelPath_ = desc.modelPath;
+    self->envPath_ = desc.envPath;
 
     if (!self->renderer_.init(device, kSwapchainFormat)) {
         return nullptr;
@@ -378,6 +445,12 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
     sceneTools.scene = &self->world_;
     sceneTools.renderer = &self->renderer_;
     sceneTools.groups = std::make_shared<std::unordered_map<std::string, agent::GroupDef>>();
+    sceneTools.applyEnvironment = [runtime = self.get()](const asset::ProceduralSkyDesc& skyDesc) {
+        return runtime->applyEnvironment(skyDesc);
+    };
+    sceneTools.viewportSize = [runtime = self.get()] {
+        return std::make_pair(runtime->extent_.width, runtime->extent_.height);
+    };
     agent::registerSceneTools(self->sceneToolRegistry_, sceneTools);
     agent::registerSceneListTool(self->shaderToolRegistry_, sceneTools);
     agent::ShaderToolContext shaderTools;
@@ -515,6 +588,7 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
             sceneDesc.model = plan.sceneEndpoint.model;
             sceneDesc.systemPrompt = kSceneSystemPrompt;
             sceneDesc.maxTokens = config->maxTokens;
+            sceneDesc.maxToolRounds = config->maxToolRounds;
             sceneDesc.summaryThresholdTokens = config->summaryThresholdTokens;
             // The key never reaches the log (ADR 0012).
             logInfo("agent provider ready: {} {} at {}",
@@ -530,6 +604,7 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
             shaderDesc.model = plan.shaderEndpoint.model;
             shaderDesc.systemPrompt = kShaderSystemPrompt;
             shaderDesc.maxTokens = config->maxTokens;
+            shaderDesc.maxToolRounds = config->maxToolRounds;
             shaderDesc.summaryThresholdTokens = config->summaryThresholdTokens;
             logInfo("shader agent ready: {} {} at {}",
                     plan.shaderEndpoint.type == agent::ProviderType::OpenAi ? "openai"
@@ -706,6 +781,22 @@ bool EngineRuntime::reloadPipelines() {
     return ok;
 }
 
+bool EngineRuntime::applyEnvironment(const asset::ProceduralSkyDesc& desc) {
+    const asset::HdrImage image = asset::proceduralSky(desc);
+    const renderer::ibl::Environment environment = renderer::ibl::bake(*device_, image);
+    if (!environment.valid()) {
+        logError("applyEnvironment: IBL bake failed");
+        return false;
+    }
+    if (!renderer_.setEnvironment(environment)) {
+        logError("applyEnvironment: renderer setEnvironment failed");
+        return false;
+    }
+    environmentSky_ = desc;
+    markDirty();
+    return true;
+}
+
 EngineRuntime::Notice& EngineRuntime::sceneRetryNotice() {
     return sceneRetryNotice_;
 }
@@ -723,7 +814,11 @@ bool EngineRuntime::saveScene(const std::filesystem::path& path) const {
             renderer_.materialParams(static_cast<std::uint32_t>(materialIndex));
         return params != nullptr ? std::make_optional(toSavedMaterial(*params)) : std::nullopt;
     };
-    const std::string json = scene::saveSceneJson(world_, modelPath_.string(), lookup);
+    const std::optional<scene::SavedEnvironment> savedEnvironment =
+        environmentSky_.has_value() ? std::make_optional(toSavedEnvironment(*environmentSky_))
+                                    : std::nullopt;
+    const std::string json =
+        scene::saveSceneJson(world_, modelPath_.string(), lookup, savedEnvironment);
     std::ofstream out(path, std::ios::binary);
     out << json;
     if (!out) {
@@ -769,6 +864,14 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
         }
     }
     world_.camera = saved.camera;
+
+    // Absent key leaves the current environment (HDR or procedural) untouched.
+    if (saved.environment.has_value()) {
+        if (!applyEnvironment(toProceduralSkyDesc(*saved.environment))) {
+            logError("scene load: failed to re-bake the saved procedural sky; keeping the current "
+                     "environment");
+        }
+    }
 
     std::size_t loaded = 0;
     for (const scene::SavedEntity& savedEntity : saved.entities) {

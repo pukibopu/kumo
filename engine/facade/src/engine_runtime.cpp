@@ -425,6 +425,19 @@ std::vector<std::size_t> materialTextureDiffs(
     return diffs;
 }
 
+std::string sharedTextureSet(const scene::Scene& scene, std::int32_t materialIndex) {
+    std::string found;
+    if (materialIndex < 0) {
+        return found;
+    }
+    scene.entities.forEach([&](scene::EntityId, const scene::Entity& entity) {
+        if (found.empty() && entity.materialIndex == materialIndex && !entity.textureSet.empty()) {
+            found = entity.textureSet;
+        }
+    });
+    return found;
+}
+
 } // namespace detail
 
 void EngineRuntime::Notice::set(std::string text) {
@@ -1473,6 +1486,11 @@ EngineRuntime::instantiateModel(std::string_view name, const scene::Transform& r
         entity.materialIndex = model->meshMaterial[static_cast<std::size_t>(node.meshIndex)];
         entity.model = modelName;
         entity.modelMesh = node.meshIndex;
+        // textureSet provenance is per-entity but the binding is per-material:
+        // a later instance sharing an already-textured material renders
+        // textured immediately, so it must inherit the stamp or a save made
+        // after the stamped sibling is removed reloads it untextured.
+        entity.textureSet = detail::sharedTextureSet(world_, entity.materialIndex);
         instance.entities.push_back(world_.entities.insert(entity));
     }
     markDirty();

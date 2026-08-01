@@ -5,6 +5,7 @@
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/asset/texture_set.h>
 #include <kumo/core/assert.h>
+#include <kumo/core/asset_name.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
 #include <kumo/scene/scene.h>
@@ -1115,6 +1116,9 @@ std::string materialSetTexture(const SceneToolContext& context, const json& args
         return errorJson("texture (string) is required");
     }
     const std::string textureName = textureIt->get<std::string>();
+    if (!isPlainAssetName(textureName)) {
+        return errorJson("asset names must be plain names from asset_list, not paths");
+    }
 
     // Staged like every other tool here: tiling is validated before any GPU
     // mutation, so a bad tiling value never leaves the texture bound but the
@@ -1242,6 +1246,9 @@ std::string sceneAddModel(const SceneToolContext& context, const json& args) {
         return errorJson("model (string) is required");
     }
     const std::string model = modelIt->get<std::string>();
+    if (!isPlainAssetName(model)) {
+        return errorJson("asset names must be plain names from asset_list, not paths");
+    }
 
     if (!args.contains("position")) {
         return errorJson("position is required");
@@ -1392,6 +1399,9 @@ std::string environmentSet(const SceneToolContext& context, const json& args) {
         return errorJson(error);
     }
     if (!file.empty()) {
+        if (!isPlainAssetName(file)) {
+            return errorJson("asset names must be plain names from asset_list, not paths");
+        }
         for (const char* field : kProceduralSkyFields) {
             if (args.contains(field)) {
                 return errorJson("file and procedural sky parameters are mutually exclusive");

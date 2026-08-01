@@ -1016,6 +1016,21 @@ TEST_CASE("material_set_texture without a renderer reports a structured error") 
     CHECK(result["message"].get<std::string>().find("renderer") != std::string::npos);
 }
 
+TEST_CASE("material_set_texture rejects traversal/absolute/hidden texture names") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube"})");
+    scene::Entity* entity = f.scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    entity->materialIndex = 0;
+
+    for (const char* bad : {"../x", "a/b", "/tmp/x", ".hidden"}) {
+        const json result = f.invoke("material_set_texture",
+                                     std::format(R"({{"entity_id":"0:0","texture":"{}"}})", bad));
+        CHECK(result["status"] == "error");
+        CHECK(result["message"] == "asset names must be plain names from asset_list, not paths");
+    }
+}
+
 TEST_CASE("material_set_texture rejects an invalid tiling value") {
     Fixture f;
     f.invoke("scene_add_entity", R"({"primitive":"cube"})");
@@ -1053,6 +1068,29 @@ TEST_CASE("scene_add_model rejects a non-uniform scale") {
                                  R"({"model":"Avocado","position":[0,0,0],"scale":[1,1,0.5]})");
     CHECK(result["status"] == "error");
     CHECK(result["message"].get<std::string>().find("uniform") != std::string::npos);
+}
+
+TEST_CASE("scene_add_model rejects traversal/absolute/hidden model names without invoking the "
+          "callback") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    bool called = false;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.instantiateModel =
+        [&called](const scene::Transform&,
+                  std::string_view) -> std::expected<std::vector<std::string>, std::string> {
+        called = true;
+        return std::vector<std::string>{"0:0"};
+    };
+    registerSceneTools(registry, ctx);
+
+    for (const char* bad : {"../x", "a/b", "/tmp/x", ".hidden"}) {
+        const json result = invokeOn(registry, "scene_add_model",
+                                     std::format(R"({{"model":"{}","position":[0,0,0]}})", bad));
+        CHECK(result["status"] == "error");
+        CHECK(result["message"] == "asset names must be plain names from asset_list, not paths");
+    }
+    CHECK(!called);
 }
 
 TEST_CASE("scene_add_model returns entity_ids from the callback and renames on request") {
@@ -1109,6 +1147,27 @@ TEST_CASE("environment_set rejects file combined with a procedural field") {
         invokeOn(registry, "environment_set", R"({"file":"day.hdr","preset":"sunset"})");
     CHECK(result["status"] == "error");
     CHECK(result["message"].get<std::string>().find("mutually exclusive") != std::string::npos);
+}
+
+TEST_CASE("environment_set rejects traversal/absolute/hidden file names without invoking the "
+          "callback") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    bool called = false;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironmentFile = [&called](const std::string&) {
+        called = true;
+        return true;
+    };
+    registerSceneTools(registry, ctx);
+
+    for (const char* bad : {"../x", "a/b", "/tmp/x", ".hidden"}) {
+        const json result =
+            invokeOn(registry, "environment_set", std::format(R"({{"file":"{}"}})", bad));
+        CHECK(result["status"] == "error");
+        CHECK(result["message"] == "asset names must be plain names from asset_list, not paths");
+    }
+    CHECK(!called);
 }
 
 TEST_CASE("environment_set routes file to the applyEnvironmentFile callback") {

@@ -4,6 +4,7 @@
 #include <kumo/agent/mcp_server.h>
 #include <kumo/agent/session.h>
 #include <kumo/agent/tool_registry.h>
+#include <kumo/asset/procedural_sky.h>
 #include <kumo/core/main_thread_queue.h>
 #include <kumo/facade/frame_dirty.h>
 #include <kumo/facade/orbit_camera.h>
@@ -110,6 +111,13 @@ public:
     bool clearEntityShader(const std::string& id); // opens and commits its own undo point
     std::filesystem::path generatedShaderPath(const std::string& id) const; // empty when none
 
+    // Bakes `desc` and swaps it in as the active IBL environment. Does not
+    // manage undo itself: the agent-tool path gets it for free from the
+    // ToolRegistry BeforeInvoke/AfterInvoke hook below, same as every other
+    // scene tool. False and unchanged on a bake or renderer failure; logged
+    // either way.
+    bool applyEnvironment(const asset::ProceduralSkyDesc& desc);
+
     bool undoAvailable() const;
     bool redoAvailable() const;
     std::string undoLabel() const; // "" when none
@@ -168,11 +176,17 @@ private:
     // renderer they reach into via raw pointers/references outlive them.
     rhi::Device* device_ = nullptr;
     std::filesystem::path modelPath_;
+    std::filesystem::path envPath_;
     std::filesystem::path generatedShaderDir_;
 
     renderer::ForwardRenderer renderer_;
     scene::Scene world_;
     rhi::Extent2D extent_{};
+
+    // nullopt while the loaded HDR (envPath_) is active; set once an
+    // environment_set tool call (or a saved scene with one) swaps in a
+    // procedural sky, so undo/save know which to restore.
+    std::optional<asset::ProceduralSkyDesc> environmentSky_;
 
     // Orbit camera arbitration (ADR 0039): orbitMoved_ tracks whether input
     // moved the camera this frame; pump() applies orbit_ onto world_.camera

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kumo/asset/procedural_sky.h>
 #include <kumo/renderer/forward_renderer.h>
 #include <kumo/scene/scene.h>
 
@@ -17,6 +18,11 @@ struct SceneState {
     scene::Scene world;
     std::vector<renderer::ForwardRenderer::MaterialParams> materials;
     std::vector<std::optional<std::string>> shaderSources;
+    // nullopt means "the loaded HDR is active, not a procedural sky"; applying
+    // this snapshot only re-bakes when it differs from the current value
+    // (ProceduralSkyDesc::operator== is defaulted), so undoing an unrelated
+    // edit never re-triggers an IBL bake.
+    std::optional<asset::ProceduralSkyDesc> environment;
 };
 
 // Bounded undo/redo of SceneStates (ADR 0044): capture/apply are injected so

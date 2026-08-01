@@ -180,4 +180,8 @@ std::optional<std::string> setMismatch(const shaderc::Reflection& custom,
     return std::nullopt;
 }
 
+bool sourceReferencesTime(std::string_view source) {
+    return source.find("timeParams") != std::string_view::npos;
+}
+
 } // namespace kumo::renderer::detail

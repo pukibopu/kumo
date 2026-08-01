@@ -204,3 +204,11 @@ TEST_CASE("setMismatch: adding a MaterialFactors member stays set 0/2 compatible
     CHECK(sharedFactors->bufferSize == 48);
     CHECK(variantFactors->bufferSize > 48);
 }
+
+TEST_CASE("sourceReferencesTime: absent, present and inside a comment") {
+    CHECK(!renderer::detail::sourceReferencesTime("void main() { fragColor = vec4(1.0); }"));
+    CHECK(renderer::detail::sourceReferencesTime("void main() { float t = frame.timeParams.x; }"));
+    // A substring match is deliberate: a mention in a comment still counts, and
+    // the only cost of a false positive is a spurious redraw.
+    CHECK(renderer::detail::sourceReferencesTime("// uses timeParams for the flicker\n"));
+}

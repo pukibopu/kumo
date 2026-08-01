@@ -3,8 +3,8 @@
 #include <kumo/agent/confirmation_gate.h>
 #include <kumo/agent/session.h>
 #include <kumo/facade/engine_runtime.h>
-#include <kumo/rhi/rhi.h>
-#include <kumo/rhi_metal/rhi_metal.h>
+#include <kumo/gpu/gpu.h>
+#include <kumo/gpu/metal_interop.h>
 
 #import <Security/Security.h>
 
@@ -20,9 +20,9 @@ using namespace kumo;
 
 namespace {
 
-constexpr rhi::TextureFormat kSwapchainFormat = rhi::TextureFormat::BGRA8Unorm;
+constexpr gpu::TextureFormat kSwapchainFormat = gpu::TextureFormat::BGRA8Unorm;
 
-void configureSurface(rhi::Surface& surface, std::uint32_t width, std::uint32_t height) {
+void configureSurface(gpu::Surface& surface, std::uint32_t width, std::uint32_t height) {
     surface.configure({.size = {width, height}, .format = kSwapchainFormat});
 }
 
@@ -227,8 +227,8 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
     // Declaration order is the destruction contract, mirroring EngineRuntime:
     // the runtime is torn down first (dealloc resets it explicitly below),
     // then the surface, then the device it was created from.
-    rhi::Ptr<rhi::Device> _device;
-    rhi::Ptr<rhi::Surface> _surface;
+    gpu::Ptr<gpu::Device> _device;
+    gpu::Ptr<gpu::Surface> _surface;
     std::unique_ptr<facade::EngineRuntime> _runtime;
     // Counts ticks, not rendered frames: render-on-demand skips rendering on
     // an idle scene, but the scripted-exit smoke test must still terminate.
@@ -254,11 +254,12 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
     _ticks = 0;
     _configPath = [configPath copy];
 
-    _device = rhi::metal::createDevice({});
+    _device = gpu::createDevice();
     if (!_device) {
         return nil;
     }
-    _surface = _device->createSurface({.nativeLayer = (__bridge void*)layer});
+    auto* metalLayer = reinterpret_cast<CA::MetalLayer*>((__bridge void*)layer);
+    _surface = gpu::metal::createSurface(*_device, metalLayer, false);
     if (!_surface) {
         return nil;
     }
@@ -313,12 +314,16 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
     // idle scene must skip drawable acquisition entirely rather than just
     // skipping the draw calls.
     if (_runtime->consumeRenderNeeded()) {
-        rhi::Ptr<rhi::CommandEncoder> encoder = _device->queue().createCommandEncoder();
-        rhi::Texture* target = _surface->acquireNextTexture();
-        if (target != nullptr) {
-            _runtime->render(*encoder, target);
+        std::optional<gpu::SurfaceFrame> surfaceFrame = _surface->acquire();
+        if (surfaceFrame) {
+            gpu::Ptr<gpu::CommandEncoder> encoder = _device->queue().createCommandEncoder();
+            _runtime->render(*encoder, &surfaceFrame->texture());
+            encoder->finishAndSubmit(&*surfaceFrame);
+        } else {
+            // Drawable starvation (occluded/minimized/timeout) must not consume
+            // the render-on-demand token permanently.
+            _runtime->markDirty();
         }
-        encoder->finishAndSubmit(_surface.get());
     }
 
     if (_maxFrames > 0 && ++_ticks >= _maxFrames) {

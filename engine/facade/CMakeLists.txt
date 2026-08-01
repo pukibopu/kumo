@@ -4,6 +4,6 @@ target_include_directories(kumo_facade PUBLIC include)
 # stay free of GLFW/ImGui/platform types so the SwiftUI shell can consume it
 # alongside the GLFW dev viewer.
 target_link_libraries(kumo_facade
-    PUBLIC kumo_agent kumo_renderer kumo_scene kumo_asset kumo_core kumo_math
+    PUBLIC kumo_gpu kumo_agent kumo_renderer kumo_scene kumo_asset kumo_core kumo_math
     PRIVATE nlohmann_json::nlohmann_json)
 kumo_target_warnings(kumo_facade)

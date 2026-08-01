@@ -4,8 +4,8 @@
 #include <kumo/core/file_watcher.h>
 #include <kumo/core/log.h>
 #include <kumo/facade/engine_runtime.h>
-#include <kumo/rhi/rhi.h>
-#include <kumo/rhi_metal/rhi_metal.h>
+#include <kumo/gpu/gpu.h>
+#include <kumo/gpu/metal_interop.h>
 #include <kumo/scene/light.h>
 
 #define GLFW_INCLUDE_NONE
@@ -16,22 +16,28 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-void* attachMetalLayer(GLFWwindow* window);
+namespace CA {
+class MetalLayer;
+}
+
+CA::MetalLayer* attachMetalLayer(GLFWwindow* window);
 
 namespace {
 
 using namespace kumo;
 
-constexpr rhi::TextureFormat kSwapchainFormat = rhi::TextureFormat::BGRA8Unorm;
+constexpr gpu::TextureFormat kSwapchainFormat = gpu::TextureFormat::BGRA8Unorm;
 constexpr const char* kSceneFileName = "kumo_scene.json";
 
-void configureSurface(rhi::Surface& surface, int width, int height) {
+void configureSurface(gpu::Surface& surface, int width, int height) {
     surface.configure(
         {.size = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)},
          .format = kSwapchainFormat});
@@ -80,11 +86,29 @@ void updateOrbit(GLFWwindow* window, AppInput& input, facade::EngineRuntime& run
     input.lastCursorY = y;
 }
 
-void saveScreenshot(rhi::Device& device, rhi::Texture& texture, int frame) {
-    const rhi::Extent2D extent = texture.extent();
+struct ScreenshotReadback {
+    gpu::Ptr<gpu::Buffer> buffer;
+    gpu::Extent2D extent;
+};
+
+std::optional<ScreenshotReadback>
+encodeScreenshot(gpu::Device& device, gpu::CommandEncoder& encoder, gpu::Texture& texture) {
+    const gpu::Extent2D extent = texture.extent();
+    const std::uint64_t bytesPerRow = static_cast<std::uint64_t>(extent.width) * 4;
+    gpu::Ptr<gpu::Buffer> buffer = device.createBuffer({
+        .size = bytesPerRow * extent.height,
+        .usage = gpu::BufferUsage::CopyDst | gpu::BufferUsage::CopySrc,
+    });
+    if (!buffer || !encoder.copyTextureToBuffer(texture, *buffer, 0, bytesPerRow, extent)) {
+        return std::nullopt;
+    }
+    return ScreenshotReadback{.buffer = buffer, .extent = extent};
+}
+
+void saveScreenshot(gpu::Device& device, const ScreenshotReadback& readback, int frame) {
+    const gpu::Extent2D extent = readback.extent;
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(extent.width) * extent.height * 4);
-    if (!device.queue().readTexture(texture, pixels.data(),
-                                    static_cast<std::uint64_t>(extent.width) * 4, extent)) {
+    if (!device.queue().readBuffer(*readback.buffer, 0, pixels.data(), pixels.size())) {
         return;
     }
     // Swapchain is BGRA; PNG wants RGBA.
@@ -122,12 +146,12 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         return 1;
     };
 
-    rhi::Ptr<rhi::Device> device = rhi::metal::createDevice({});
+    gpu::Ptr<gpu::Device> device = gpu::createDevice();
     if (!device) {
         return fail();
     }
-    rhi::Ptr<rhi::Surface> surface =
-        device->createSurface({.nativeLayer = attachMetalLayer(window)});
+    gpu::Ptr<gpu::Surface> surface =
+        gpu::metal::createSurface(*device, attachMetalLayer(window), true);
     if (!surface) {
         return fail();
     }
@@ -162,6 +186,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     float overrideMetallic = 1.0f;
     float overrideRoughness = 1.0f;
     bool shadowsEnabled = runtime->renderer().shadowsEnabled();
+    const bool scriptedSurfaceSmoke = std::getenv("KUMO_VIEWER_SURFACE_SMOKE") != nullptr;
 
     glfwSetWindowUserPointer(window, &input);
     // Installed before ImGui so its backend chains to this callback.
@@ -187,6 +212,19 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     int frame = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        if (scriptedSurfaceSmoke) {
+            if (frame == 1) {
+                glfwSetWindowSize(window, 960, 540);
+                logInfo("surface smoke: requested 960x540 resize");
+            } else if (frame == 3) {
+                glfwIconifyWindow(window);
+                logInfo("surface smoke: minimized window");
+            } else if (frame == 4) {
+                glfwRestoreWindow(window);
+                logInfo("surface smoke: restored window");
+            }
+        }
 
         // Input deltas must reach the runtime before pump() runs the orbit
         // arbitration, or the rendered camera lags the drag by one frame.
@@ -226,7 +264,8 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
 
         const bool sDown = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
         const bool screenshotRequested =
-            sDown && !input.screenshotKeyDown && !ImGui::GetIO().WantCaptureKeyboard;
+            (scriptedSurfaceSmoke && frame == 2) ||
+            (sDown && !input.screenshotKeyDown && !ImGui::GetIO().WantCaptureKeyboard);
         input.screenshotKeyDown = sDown;
 
         const bool kDown = glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS;
@@ -245,10 +284,10 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
             runtime->loadScene(std::filesystem::current_path() / kSceneFileName);
         }
 
-        rhi::Ptr<rhi::CommandEncoder> encoder = device->queue().createCommandEncoder();
-        rhi::Texture* target = surface->acquireNextTexture();
-        if (target != nullptr) {
-            runtime->render(*encoder, target, [&](rhi::RenderPassEncoder& pass) {
+        std::optional<gpu::SurfaceFrame> surfaceFrame = surface->acquire();
+        if (surfaceFrame) {
+            gpu::Ptr<gpu::CommandEncoder> encoder = device->queue().createCommandEncoder();
+            runtime->render(*encoder, &surfaceFrame->texture(), [&](gpu::RenderPassEncoder& pass) {
                 ui::beginFrame(pass);
                 ui::drawStatsPanel(fbWidth, fbHeight);
                 ui::drawLightPanel(lightSettings, runtime->world().light(0), shadowsEnabled);
@@ -260,12 +299,15 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
                 ui::drawConfirmDialog(runtime->confirmGate());
                 ui::endFrame(*encoder, pass);
             });
-        }
-        encoder->finishAndSubmit(surface.get());
-        if (screenshotRequested && target != nullptr) {
-            // The frame was just submitted; command buffers execute in commit
-            // order, so the readback blit sees the completed, presented image.
-            saveScreenshot(*device, *target, frame);
+            std::optional<ScreenshotReadback> screenshot;
+            if (screenshotRequested) {
+                // The drawable blit belongs before present in this command buffer.
+                screenshot = encodeScreenshot(*device, *encoder, surfaceFrame->texture());
+            }
+            encoder->finishAndSubmit(&*surfaceFrame);
+            if (screenshot) {
+                saveScreenshot(*device, *screenshot, frame);
+            }
         }
 
         ++frame;

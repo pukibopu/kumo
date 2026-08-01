@@ -8,7 +8,7 @@
 GLSL ── glslang ──▶ SPIR-V ── SPIRV-Cross ──▶ MSL ──▶ Metal 运行时编译
 ```
 
-编译在进程内完成（`shadercompiler` 模块），构建期校验与运行时热重载共用同一条路径。编译错误分三层结构化捕获：glslang 语法/语义错误、SPIRV-Cross 转换异常、Metal 运行时编译错误（附生成的 MSL）。
+编译在进程内完成（`shadercompiler` 模块），构建期校验与运行时热重载共用同一条路径；MSL target 显式支持 macOS/iOS，Native 模式跟随当前 Apple 构建目标。编译错误分三层结构化捕获：glslang 语法/语义错误、SPIRV-Cross 转换异常、Metal 运行时编译错误（附生成的 MSL）。
 
 ## Shader 清单（M4）
 
@@ -37,7 +37,7 @@ descriptor set 语义固定：
 
 - Per-draw 小数据（model 矩阵 + normal 矩阵，128 字节）走 `layout(push_constant)`，上限 128 字节；
 - **M4 起 renderer 用反射自动生成 `BindGroupLayout`**（ADR 0040），手写声明不再是 shader 绑定的事实来源；
-- Metal 侧绑定由 SPIRV-Cross 重映射：buffer/纹理为扁平索引 `set*8+binding`，采样器为 `set*6+binding`（Metal 采样器表仅 16 槽，越界在编译期报错），顶点流占 Metal buffer index 30 向下——写 shader 不需要关心，重映射由编译层完成并有快照测试保障；
+- Metal 侧绑定由 SPIRV-Cross 重映射：buffer/纹理为扁平索引 `set*8+binding`，采样器为 `set*6+binding`（Metal 采样器表仅 16 槽，越界在编译期报错），顶点流占 Metal buffer index 30 向下；binding ABI 在 `kumo/shaderabi/metal_binding.h` 单一定义，编译与编码两端共同使用；
 - 光源为固定数组：`Light lights[16]` + `int lightCount`，超出 16 视为错误。
 
 ## 热重载（开发期）

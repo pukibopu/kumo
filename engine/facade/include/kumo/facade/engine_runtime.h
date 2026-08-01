@@ -22,7 +22,7 @@
 #include <thread>
 #include <vector>
 
-namespace kumo::rhi {
+namespace kumo::gpu {
 class Device;
 }
 
@@ -63,7 +63,7 @@ public:
 
     // Loads assets, uploads the scene, assembles registries/providers/sessions
     // per the config. Returns null on any fatal failure (already logged).
-    static std::unique_ptr<EngineRuntime> create(rhi::Device& device, const Desc& desc);
+    static std::unique_ptr<EngineRuntime> create(gpu::Device& device, const Desc& desc);
     ~EngineRuntime();
 
     EngineRuntime(const EngineRuntime&) = delete;
@@ -128,9 +128,9 @@ public:
     // Once per frame, before rendering: drains tool work. Returns false when the
     // runtime wants the app to quit (MCP client hung up).
     bool pump();
-    void render(rhi::CommandEncoder& encoder, rhi::Texture* output,
+    void render(gpu::CommandEncoder& encoder, gpu::Texture* output,
                 const renderer::ForwardRenderer::Overlay& overlay = {});
-    void resize(rhi::Extent2D size);
+    void resize(gpu::Extent2D size);
 
     // Orbit camera input (ADR 0039), shared by every shell: dx/dy are in the
     // GLFW convention (cursor y grows downward); a shell whose input is
@@ -174,14 +174,14 @@ private:
     // order is the destruction contract (reverse of declaration). Sessions/mcp
     // machinery are declared last so they tear down first, while the scene and
     // renderer they reach into via raw pointers/references outlive them.
-    rhi::Device* device_ = nullptr;
+    gpu::Device* device_ = nullptr;
     std::filesystem::path modelPath_;
     std::filesystem::path envPath_;
     std::filesystem::path generatedShaderDir_;
 
     renderer::ForwardRenderer renderer_;
     scene::Scene world_;
-    rhi::Extent2D extent_{};
+    gpu::Extent2D extent_{};
 
     // nullopt while the loaded HDR (envPath_) is active; set once an
     // environment_set tool call (or a saved scene with one) swaps in a

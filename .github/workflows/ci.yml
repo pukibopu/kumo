@@ -14,9 +14,36 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DKUMO_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build build --parallel
+      - name: Check GPU architecture boundaries
+        run: |
+          if git grep -nE '#[[:space:]]*(include|import)[[:space:]]*[<"](Metal|QuartzCore)/|MTL::|CAMetalLayer|kumo/gpu/metal_interop\.h' -- engine/renderer engine/facade; then
+            echo "renderer/facade must not depend on Metal or the typed Metal interop API"
+            exit 1
+          fi
+
+          if git grep -nE '#[[:space:]]*(include|import)[[:space:]]*[<"](Metal|QuartzCore)/|MTL::|CAMetalLayer|nativeHandle|virtual[[:space:]]+[~[:alnum:]_]' -- engine/gpu/include/kumo/gpu/gpu.h engine/gpu/include/kumo/gpu/types.h; then
+            echo "core GPU headers must remain concrete and Metal-independent"
+            exit 1
+          fi
+
+          if git grep -nE '[r]hi::|kumo_[r]hi|kumo/[r]hi|[r]hi_metal'; then
+            echo "legacy RHI namespaces, targets, and headers must not return"
+            exit 1
+          fi
       - name: Test
-        # Golden image tests need a GPU and per-machine baselines; local only.
-        run: ctest --test-dir build --output-on-failure -LE golden
+        # GPU contract/golden tests need a Metal device; local hardware runs them.
+        run: ctest --test-dir build --output-on-failure -LE 'golden|gpu'
+
+  ios-arm64-compile:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure iOS arm64
+        run: cmake --preset ios-arm64-compile
+      - name: Build iOS engine libraries
+        run: >-
+          cmake --build --preset ios-arm64-compile --parallel
+          --target kumo_gpu kumo_renderer kumo_facade
 
   format:
     runs-on: ubuntu-latest

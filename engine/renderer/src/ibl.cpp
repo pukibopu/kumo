@@ -21,22 +21,22 @@ constexpr std::uint32_t kPrefilteredMips = 5;
 constexpr std::uint32_t kBrdfLutSize = 512;
 
 struct ComputeStep {
-    rhi::Ptr<rhi::ComputePipeline> pipeline;
-    rhi::Ptr<rhi::BindGroupLayout> layout;
+    gpu::Ptr<gpu::ComputePipeline> pipeline;
+    gpu::Ptr<gpu::BindGroupLayout> layout;
 };
 
-std::optional<ComputeStep> buildStep(rhi::Device& device, const char* file) {
+std::optional<ComputeStep> buildStep(gpu::Device& device, const char* file) {
     auto stage = detail::loadStage(device, file, shaderc::Stage::Compute);
     if (!stage) {
         return std::nullopt;
     }
-    const detail::StageReflection reflections[] = {{&stage->reflection, rhi::ShaderStage::Compute}};
+    const detail::StageReflection reflections[] = {{&stage->reflection, gpu::ShaderStage::Compute}};
     auto layouts = detail::layoutsFromReflection(device, reflections);
     if (layouts.empty() || !layouts[0]) {
         logError("{}: no set 0 bindings reflected", file);
         return std::nullopt;
     }
-    rhi::Ptr<rhi::ComputePipeline> pipeline = device.createComputePipeline({
+    gpu::Ptr<gpu::ComputePipeline> pipeline = device.createComputePipeline({
         .shader = stage->module,
         .bindGroupLayouts = {layouts[0]},
         .pushConstantSize = stage->reflection.pushConstantSize,
@@ -52,15 +52,15 @@ std::optional<ComputeStep> buildStep(rhi::Device& device, const char* file) {
 
 // Per-face (and per-mip) 2D storage views; layout tracking is per image, so
 // every step reads one texture and writes a different one.
-std::vector<rhi::Ptr<rhi::Texture>>
-faceViews(rhi::Device& device, const rhi::Ptr<rhi::Texture>& cube, std::uint32_t mip) {
-    std::vector<rhi::Ptr<rhi::Texture>> views(6);
+std::vector<gpu::Ptr<gpu::Texture>>
+faceViews(gpu::Device& device, const gpu::Ptr<gpu::Texture>& cube, std::uint32_t mip) {
+    std::vector<gpu::Ptr<gpu::Texture>> views(6);
     for (std::uint32_t face = 0; face < 6; ++face) {
         views[face] = device.createTextureView(cube, {.baseMipLevel = mip,
                                                       .mipLevelCount = 1,
                                                       .baseArrayLayer = face,
                                                       .arrayLayerCount = 1,
-                                                      .dimension = rhi::TextureDimension::Tex2D});
+                                                      .dimension = gpu::TextureDimension::Tex2D});
         if (!views[face]) {
             return {};
         }
@@ -83,7 +83,7 @@ std::uint32_t fullMipChain(std::uint32_t size) {
 
 } // namespace
 
-Environment bake(rhi::Device& device, const asset::HdrImage& hdr) {
+Environment bake(gpu::Device& device, const asset::HdrImage& hdr) {
     const auto start = std::chrono::steady_clock::now();
     if (hdr.width == 0 || hdr.height == 0) {
         logError("ibl::bake: empty HDR image");
@@ -98,47 +98,47 @@ Environment bake(rhi::Device& device, const asset::HdrImage& hdr) {
         return {};
     }
 
-    rhi::Ptr<rhi::Texture> equirect = device.createTexture({
+    gpu::Ptr<gpu::Texture> equirect = device.createTexture({
         .size = {hdr.width, hdr.height},
-        .format = rhi::TextureFormat::RGBA32Float,
-        .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDst,
+        .format = gpu::TextureFormat::RGBA32Float,
+        .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::CopyDst,
     });
     Environment env;
     env.environment = device.createTexture({
         .size = {kEnvironmentSize, kEnvironmentSize},
-        .format = rhi::TextureFormat::RGBA16Float,
-        .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Storage |
-                 rhi::TextureUsage::CopySrc | rhi::TextureUsage::CopyDst,
-        .dimension = rhi::TextureDimension::Cube,
+        .format = gpu::TextureFormat::RGBA16Float,
+        .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::Storage |
+                 gpu::TextureUsage::CopySrc | gpu::TextureUsage::CopyDst,
+        .dimension = gpu::TextureDimension::Cube,
         .mipLevelCount = fullMipChain(kEnvironmentSize),
     });
     env.irradiance = device.createTexture({
         .size = {kIrradianceSize, kIrradianceSize},
-        .format = rhi::TextureFormat::RGBA16Float,
-        .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Storage,
-        .dimension = rhi::TextureDimension::Cube,
+        .format = gpu::TextureFormat::RGBA16Float,
+        .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::Storage,
+        .dimension = gpu::TextureDimension::Cube,
     });
     env.prefiltered = device.createTexture({
         .size = {kPrefilteredSize, kPrefilteredSize},
-        .format = rhi::TextureFormat::RGBA16Float,
-        .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Storage,
-        .dimension = rhi::TextureDimension::Cube,
+        .format = gpu::TextureFormat::RGBA16Float,
+        .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::Storage,
+        .dimension = gpu::TextureDimension::Cube,
         .mipLevelCount = kPrefilteredMips,
     });
     env.brdfLut = device.createTexture({
         .size = {kBrdfLutSize, kBrdfLutSize},
-        .format = rhi::TextureFormat::RG16Float,
-        .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Storage,
+        .format = gpu::TextureFormat::RG16Float,
+        .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::Storage,
     });
     env.prefilteredMips = kPrefilteredMips;
     if (!equirect || !env.valid()) {
         return {};
     }
 
-    rhi::Ptr<rhi::Sampler> sampler = device.createSampler({
-        .addressModeU = rhi::AddressMode::ClampToEdge,
-        .addressModeV = rhi::AddressMode::ClampToEdge,
-        .addressModeW = rhi::AddressMode::ClampToEdge,
+    gpu::Ptr<gpu::Sampler> sampler = device.createSampler({
+        .addressModeU = gpu::AddressMode::ClampToEdge,
+        .addressModeV = gpu::AddressMode::ClampToEdge,
+        .addressModeW = gpu::AddressMode::ClampToEdge,
     });
     if (!sampler) {
         return {};
@@ -154,16 +154,16 @@ Environment bake(rhi::Device& device, const asset::HdrImage& hdr) {
         return {};
     }
 
-    auto makeGroup = [&](const rhi::Ptr<rhi::BindGroupLayout>& layout,
-                         const rhi::Ptr<rhi::Texture>& source, const rhi::Ptr<rhi::Texture>& dest) {
+    auto makeGroup = [&](const gpu::Ptr<gpu::BindGroupLayout>& layout,
+                         const gpu::Ptr<gpu::Texture>& source, const gpu::Ptr<gpu::Texture>& dest) {
         return device.createBindGroup({.layout = layout,
                                        .entries = {{.binding = 0, .texture = source},
                                                    {.binding = 1, .sampler = sampler},
                                                    {.binding = 2, .texture = dest}}});
     };
 
-    std::array<rhi::Ptr<rhi::BindGroup>, 6> equirectGroups;
-    std::array<rhi::Ptr<rhi::BindGroup>, 6> irradianceGroups;
+    std::array<gpu::Ptr<gpu::BindGroup>, 6> equirectGroups;
+    std::array<gpu::Ptr<gpu::BindGroup>, 6> irradianceGroups;
     for (std::uint32_t face = 0; face < 6; ++face) {
         equirectGroups[face] = makeGroup(equirectStep->layout, equirect, envFaces[face]);
         irradianceGroups[face] =
@@ -173,7 +173,7 @@ Environment bake(rhi::Device& device, const asset::HdrImage& hdr) {
         }
     }
 
-    std::vector<rhi::Ptr<rhi::BindGroup>> prefilterGroups(kPrefilteredMips * 6);
+    std::vector<gpu::Ptr<gpu::BindGroup>> prefilterGroups(kPrefilteredMips * 6);
     for (std::uint32_t mip = 0; mip < kPrefilteredMips; ++mip) {
         const auto mipFaces = faceViews(device, env.prefiltered, mip);
         if (mipFaces.empty()) {
@@ -187,15 +187,15 @@ Environment bake(rhi::Device& device, const asset::HdrImage& hdr) {
             }
         }
     }
-    rhi::Ptr<rhi::BindGroup> brdfGroup = device.createBindGroup(
+    gpu::Ptr<gpu::BindGroup> brdfGroup = device.createBindGroup(
         {.layout = brdfStep->layout, .entries = {{.binding = 0, .texture = env.brdfLut}}});
     if (!brdfGroup) {
         return {};
     }
 
-    rhi::Ptr<rhi::CommandEncoder> encoder = device.queue().createCommandEncoder();
+    gpu::Ptr<gpu::CommandEncoder> encoder = device.queue().createCommandEncoder();
     {
-        rhi::ComputePassEncoder& pass = encoder->beginComputePass();
+        gpu::ComputePassEncoder& pass = encoder->beginComputePass();
         pass.setPipeline(*equirectStep->pipeline);
         const std::uint32_t groups = groupsFor(kEnvironmentSize, 8);
         for (std::int32_t face = 0; face < 6; ++face) {
@@ -207,7 +207,7 @@ Environment bake(rhi::Device& device, const asset::HdrImage& hdr) {
     }
     encoder->generateMipmaps(*env.environment);
     {
-        rhi::ComputePassEncoder& pass = encoder->beginComputePass();
+        gpu::ComputePassEncoder& pass = encoder->beginComputePass();
         pass.setPipeline(*irradianceStep->pipeline);
         const std::uint32_t irradianceGroupCount = groupsFor(kIrradianceSize, 8);
         for (std::int32_t face = 0; face < 6; ++face) {

@@ -48,7 +48,6 @@ endif()
 
 if(APPLE)
     target_sources(kumo_tests PRIVATE test_metal_binding.cpp)
-    target_include_directories(kumo_tests PRIVATE ${CMAKE_SOURCE_DIR}/engine/rhi_metal/include)
 endif()
 
 add_test(NAME kumo_tests COMMAND kumo_tests)
@@ -56,9 +55,15 @@ add_test(NAME kumo_tests COMMAND kumo_tests)
 # Golden image tests render on the GPU against per-machine baselines; they are
 # excluded in CI via `ctest -LE golden` and run locally with `ctest -L golden`.
 if(APPLE)
+    add_executable(kumo_gpu_contract test_gpu_contract.cpp)
+    target_link_libraries(kumo_gpu_contract PRIVATE doctest::doctest kumo_gpu)
+    kumo_target_warnings(kumo_gpu_contract)
+    add_test(NAME kumo_gpu_contract COMMAND kumo_gpu_contract)
+    set_tests_properties(kumo_gpu_contract PROPERTIES LABELS gpu)
+
     add_executable(kumo_golden test_golden.cpp)
-    target_link_libraries(kumo_golden PRIVATE doctest::doctest kumo_core kumo_math kumo_rhi
-        kumo_scene kumo_asset kumo_renderer kumo_rhi_metal)
+    target_link_libraries(kumo_golden PRIVATE doctest::doctest kumo_core kumo_math kumo_gpu
+        kumo_scene kumo_asset kumo_renderer)
     target_compile_definitions(kumo_golden PRIVATE
         KUMO_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
         KUMO_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden"

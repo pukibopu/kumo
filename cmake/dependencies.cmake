@@ -59,7 +59,13 @@ FetchContent_Declare(spirv_cross
     GIT_TAG 1a6169566c73d3da552748fc372fe2bbb856e46e # vulkan-sdk-1.4.350.1
 )
 
-FetchContent_MakeAvailable(glm doctest nlohmann_json glfw imgui)
+FetchContent_MakeAvailable(glm nlohmann_json)
+if(KUMO_BUILD_TESTS)
+    FetchContent_MakeAvailable(doctest)
+endif()
+if(KUMO_BUILD_DESKTOP_APPS)
+    FetchContent_MakeAvailable(glfw imgui)
+endif()
 
 FetchContent_MakeAvailable(cgltf stb)
 add_library(cgltf INTERFACE)
@@ -67,18 +73,20 @@ target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
 add_library(stb INTERFACE)
 target_include_directories(stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
 
-add_library(imgui_lib STATIC
-    ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_draw.cpp
-    ${imgui_SOURCE_DIR}/imgui_tables.cpp
-    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-)
-target_include_directories(imgui_lib SYSTEM PUBLIC
-    ${imgui_SOURCE_DIR}
-    ${imgui_SOURCE_DIR}/backends
-)
-target_link_libraries(imgui_lib PUBLIC glfw)
+if(KUMO_BUILD_DESKTOP_APPS)
+    add_library(imgui_lib STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    )
+    target_include_directories(imgui_lib SYSTEM PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+    )
+    target_link_libraries(imgui_lib PUBLIC glfw)
+endif()
 
 if(APPLE)
     # Mirror of Apple's metal-cpp distribution (developer.apple.com/metal/cpp).
@@ -92,10 +100,12 @@ if(APPLE)
     target_link_libraries(metal_cpp INTERFACE "-framework Foundation" "-framework Metal"
                                               "-framework QuartzCore")
 
-    # imgui_impl_metal.mm uses manual retain/release; do not enable ARC for it.
-    target_sources(imgui_lib PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm)
-    target_compile_definitions(imgui_lib PUBLIC IMGUI_IMPL_METAL_CPP)
-    target_link_libraries(imgui_lib PUBLIC metal_cpp)
+    if(KUMO_BUILD_DESKTOP_APPS)
+        # imgui_impl_metal.mm uses manual retain/release; do not enable ARC for it.
+        target_sources(imgui_lib PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm)
+        target_compile_definitions(imgui_lib PUBLIC IMGUI_IMPL_METAL_CPP)
+        target_link_libraries(imgui_lib PUBLIC metal_cpp)
+    endif()
 endif()
 
 # Shader cross-compilation toolchain (kumo_shaderc): GLSL -> SPIR-V -> MSL.

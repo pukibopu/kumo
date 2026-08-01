@@ -2,11 +2,10 @@
 #include <doctest/doctest.h>
 
 #include <kumo/asset/asset.h>
+#include <kumo/gpu/gpu.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
 #include <kumo/renderer/ibl.h>
-#include <kumo/rhi/rhi.h>
-#include <kumo/rhi_metal/rhi_metal.h>
 #include <kumo/scene/scene.h>
 
 #include <cmath>
@@ -24,7 +23,7 @@ constexpr std::uint32_t kSize = 512;
 constexpr int kChannelTolerance = 3;
 constexpr double kMaxDifferingRatio = 0.01;
 
-std::vector<std::uint8_t> renderHelmet(rhi::Device& device) {
+std::vector<std::uint8_t> renderHelmet(gpu::Device& device) {
     auto sceneAsset =
         asset::loadGltf(std::filesystem::path(KUMO_ASSET_DIR) / "models" / "DamagedHelmet.glb");
     REQUIRE_MESSAGE(sceneAsset.has_value(), sceneAsset.error_or(""));
@@ -33,7 +32,7 @@ std::vector<std::uint8_t> renderHelmet(rhi::Device& device) {
     REQUIRE_MESSAGE(hdr.has_value(), hdr.error_or(""));
 
     renderer::ForwardRenderer forward;
-    REQUIRE(forward.init(device, rhi::TextureFormat::BGRA8Unorm));
+    REQUIRE(forward.init(device, gpu::TextureFormat::BGRA8Unorm));
     const renderer::ibl::Environment environment = renderer::ibl::bake(device, *hdr);
     REQUIRE(environment.valid());
     REQUIRE(forward.loadScene(*sceneAsset, environment));
@@ -63,14 +62,14 @@ std::vector<std::uint8_t> renderHelmet(rhi::Device& device) {
                     .direction = -math::float3{std::cos(el) * std::sin(az), std::sin(el),
                                                std::cos(el) * std::cos(az)}});
 
-    rhi::Ptr<rhi::Texture> output = device.createTexture({
+    gpu::Ptr<gpu::Texture> output = device.createTexture({
         .size = {kSize, kSize},
-        .format = rhi::TextureFormat::BGRA8Unorm,
-        .usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::CopySrc,
+        .format = gpu::TextureFormat::BGRA8Unorm,
+        .usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::CopySrc,
     });
     REQUIRE(output != nullptr);
 
-    rhi::Ptr<rhi::CommandEncoder> encoder = device.queue().createCommandEncoder();
+    gpu::Ptr<gpu::CommandEncoder> encoder = device.queue().createCommandEncoder();
     forward.render(*encoder, world, output.get());
     encoder->finishAndSubmit();
     device.queue().waitIdle();
@@ -125,7 +124,7 @@ void compareToBaseline(const std::vector<std::uint8_t>& actual, const char* back
 } // namespace
 
 TEST_CASE("golden image: helmet (metal)") {
-    rhi::Ptr<rhi::Device> device = rhi::metal::createDevice({});
+    gpu::Ptr<gpu::Device> device = gpu::createDevice();
     REQUIRE(device != nullptr);
     compareToBaseline(renderHelmet(*device), "metal");
 }

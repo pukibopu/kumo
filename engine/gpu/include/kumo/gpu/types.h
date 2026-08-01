@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace kumo::rhi {
+namespace kumo::gpu {
 
 enum class TextureFormat {
     Undefined,
@@ -18,6 +18,11 @@ enum class TextureFormat {
 };
 
 enum class TextureDimension { Tex2D, Cube };
+
+// Automatic preserves the backend's normal shared/private placement policy.
+// TransientAttachment permits memoryless placement when the descriptor and GPU
+// support it, and otherwise falls back to private storage.
+enum class StorageMode { Automatic, TransientAttachment };
 
 enum class BufferUsage : std::uint32_t {
     None = 0,
@@ -45,7 +50,7 @@ enum class ShaderStage : std::uint32_t {
     Compute = 1u << 2,
 };
 
-#define KUMO_RHI_ENUM_FLAGS(E)                                                                     \
+#define KUMO_GPU_ENUM_FLAGS(E)                                                                     \
     constexpr E operator|(E a, E b) {                                                              \
         return static_cast<E>(static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b));      \
     }                                                                                              \
@@ -56,11 +61,11 @@ enum class ShaderStage : std::uint32_t {
         return (static_cast<std::uint32_t>(value) & static_cast<std::uint32_t>(flag)) != 0;        \
     }
 
-KUMO_RHI_ENUM_FLAGS(BufferUsage)
-KUMO_RHI_ENUM_FLAGS(TextureUsage)
-KUMO_RHI_ENUM_FLAGS(ShaderStage)
+KUMO_GPU_ENUM_FLAGS(BufferUsage)
+KUMO_GPU_ENUM_FLAGS(TextureUsage)
+KUMO_GPU_ENUM_FLAGS(ShaderStage)
 
-#undef KUMO_RHI_ENUM_FLAGS
+#undef KUMO_GPU_ENUM_FLAGS
 
 enum class LoadOp { Load, Clear, DontCare };
 enum class StoreOp { Store, DontCare };
@@ -89,8 +94,6 @@ enum class VertexStepMode { Vertex, Instance };
 
 enum class BindingType { UniformBuffer, StorageBuffer, Texture, StorageTexture, Sampler };
 
-enum class ShaderSourceLanguage { MSL, SPIRV };
-
 struct Color {
     float r = 0.0f;
     float g = 0.0f;
@@ -103,4 +106,4 @@ struct Extent2D {
     std::uint32_t height = 0;
 };
 
-} // namespace kumo::rhi
+} // namespace kumo::gpu

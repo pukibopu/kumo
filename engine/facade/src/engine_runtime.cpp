@@ -12,9 +12,9 @@
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/core/file.h>
 #include <kumo/core/log.h>
+#include <kumo/gpu/gpu.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/ibl.h>
-#include <kumo/rhi/rhi.h>
 #include <kumo/scene/persistence.h>
 
 #include <nlohmann/json.hpp>
@@ -40,7 +40,7 @@ namespace kumo::facade {
 
 namespace {
 
-constexpr rhi::TextureFormat kSwapchainFormat = rhi::TextureFormat::BGRA8Unorm;
+constexpr gpu::TextureFormat kSwapchainFormat = gpu::TextureFormat::BGRA8Unorm;
 
 // English for tool-call stability; the closing instruction keeps replies in the
 // user's language (ADR 0028). The craft sections raise the default output from
@@ -448,7 +448,7 @@ void EngineRuntime::applySceneState(const SceneState& state) {
     }
 }
 
-std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const Desc& desc) {
+std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const Desc& desc) {
     auto sceneAsset = asset::loadGltf(desc.modelPath);
     if (!sceneAsset) {
         logError("{}", sceneAsset.error());
@@ -551,16 +551,16 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(rhi::Device& device, const 
              .parametersSchema = R"({"type":"object","properties":{}})",
              .destructive = false},
             [runtime = self.get()](std::string_view) -> std::string {
-                const rhi::Extent2D extent = runtime->extent_;
-                rhi::Ptr<rhi::Texture> target = runtime->device_->createTexture({
+                const gpu::Extent2D extent = runtime->extent_;
+                gpu::Ptr<gpu::Texture> target = runtime->device_->createTexture({
                     .size = extent,
                     .format = kSwapchainFormat,
-                    .usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::CopySrc,
+                    .usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::CopySrc,
                 });
                 if (!target) {
                     return agent::errorJson("failed to create offscreen render target");
                 }
-                rhi::Ptr<rhi::CommandEncoder> encoder =
+                gpu::Ptr<gpu::CommandEncoder> encoder =
                     runtime->device_->queue().createCommandEncoder();
                 runtime->renderer_.render(*encoder, runtime->world_, target.get());
                 encoder->finishAndSubmit(nullptr);
@@ -797,12 +797,12 @@ void EngineRuntime::orbitZoom(float delta) {
     markDirty();
 }
 
-void EngineRuntime::render(rhi::CommandEncoder& encoder, rhi::Texture* output,
+void EngineRuntime::render(gpu::CommandEncoder& encoder, gpu::Texture* output,
                            const renderer::ForwardRenderer::Overlay& overlay) {
     renderer_.render(encoder, world_, output, overlay);
 }
 
-void EngineRuntime::resize(rhi::Extent2D size) {
+void EngineRuntime::resize(gpu::Extent2D size) {
     extent_ = size;
     renderer_.resize(size);
     markDirty();

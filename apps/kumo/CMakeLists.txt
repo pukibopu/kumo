@@ -7,7 +7,7 @@ add_library(kumo_bridge STATIC KumoEngine.mm)
 target_include_directories(kumo_bridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_source_files_properties(KumoEngine.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_link_libraries(kumo_bridge
-    PUBLIC kumo_facade kumo_rhi_metal "-framework Cocoa" "-framework QuartzCore" "-framework Metal"
+    PUBLIC kumo_facade kumo_gpu "-framework Cocoa" "-framework QuartzCore" "-framework Metal"
            "-framework Security")
 target_compile_definitions(kumo_bridge PRIVATE
     KUMO_VERSION_STRING="${PROJECT_VERSION}"

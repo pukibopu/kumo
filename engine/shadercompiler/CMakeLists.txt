@@ -4,7 +4,7 @@ add_library(kumo_shaderc STATIC
 )
 target_include_directories(kumo_shaderc PUBLIC include)
 target_link_libraries(kumo_shaderc
-    PUBLIC kumo_core
+    PUBLIC kumo_core kumo_shaderabi
     PRIVATE glslang glslang-default-resource-limits SPIRV spirv-cross-msl
 )
 kumo_target_warnings(kumo_shaderc)

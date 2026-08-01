@@ -4,6 +4,7 @@
 
 #include <cgltf.h>
 #include <stb_image.h>
+#include <stb_image_resize2.h>
 #include <stb_image_write.h>
 
 #include <algorithm>
@@ -365,6 +366,31 @@ bool writePng(const std::filesystem::path& path, std::uint32_t width, std::uint3
               const std::uint8_t* rgba) {
     return stbi_write_png(path.string().c_str(), static_cast<int>(width), static_cast<int>(height),
                           4, rgba, static_cast<int>(width) * 4) != 0;
+}
+
+DownscaledImage downscaleRgba(const std::uint8_t* src, std::uint32_t width, std::uint32_t height,
+                              std::uint32_t maxLongSide) {
+    const std::uint32_t longSide = std::max(width, height);
+    const std::size_t byteCount = static_cast<std::size_t>(width) * height * 4;
+    if (longSide == 0 || longSide <= maxLongSide) {
+        return {.rgba = std::vector<std::uint8_t>(src, src + byteCount),
+                .width = width,
+                .height = height};
+    }
+    // Integer rounding keeps output dimensions deterministic across platforms.
+    const auto outW = static_cast<std::uint32_t>(std::max<std::uint64_t>(
+        1, (static_cast<std::uint64_t>(width) * maxLongSide + longSide / 2) / longSide));
+    const auto outH = static_cast<std::uint32_t>(std::max<std::uint64_t>(
+        1, (static_cast<std::uint64_t>(height) * maxLongSide + longSide / 2) / longSide));
+
+    DownscaledImage out;
+    out.width = outW;
+    out.height = outH;
+    out.rgba.resize(static_cast<std::size_t>(outW) * outH * 4);
+    stbir_resize_uint8_srgb(src, static_cast<int>(width), static_cast<int>(height), 0,
+                            out.rgba.data(), static_cast<int>(outW), static_cast<int>(outH), 0,
+                            STBIR_RGBA);
+    return out;
 }
 
 } // namespace kumo::asset

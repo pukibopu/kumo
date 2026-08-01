@@ -85,4 +85,16 @@ std::expected<TextureData, std::string> loadImage(const std::filesystem::path& p
 bool writePng(const std::filesystem::path& path, std::uint32_t width, std::uint32_t height,
               const std::uint8_t* rgba);
 
+struct DownscaledImage {
+    std::vector<std::uint8_t> rgba;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
+// Aspect-preserving sRGB 8-bit downscale for screenshot attachments (the vision
+// feedback loop, M6.97). A no-op copy when both dimensions already fit within
+// maxLongSide; never upscales.
+DownscaledImage downscaleRgba(const std::uint8_t* src, std::uint32_t width, std::uint32_t height,
+                              std::uint32_t maxLongSide);
+
 } // namespace kumo::asset

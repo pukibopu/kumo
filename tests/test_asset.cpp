@@ -2,9 +2,12 @@
 
 #include <kumo/asset/asset.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 using namespace kumo;
 
@@ -80,6 +83,62 @@ TEST_CASE("loadHdr loads the studio environment") {
         }
     }
     CHECK(hasHdr);
+}
+
+namespace {
+
+std::vector<std::uint8_t> makeGradientRgba(std::uint32_t width, std::uint32_t height) {
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width) * height * 4);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * width + x) * 4;
+            rgba[i + 0] =
+                static_cast<std::uint8_t>(x * 255 / std::max<std::uint32_t>(1, width - 1));
+            rgba[i + 1] =
+                static_cast<std::uint8_t>(y * 255 / std::max<std::uint32_t>(1, height - 1));
+            rgba[i + 2] = 128;
+            rgba[i + 3] = 255;
+        }
+    }
+    return rgba;
+}
+
+} // namespace
+
+TEST_CASE("downscaleRgba scales the long side down while preserving aspect ratio") {
+    const std::uint32_t width = 8;
+    const std::uint32_t height = 4;
+    const std::vector<std::uint8_t> src = makeGradientRgba(width, height);
+
+    const asset::DownscaledImage out = asset::downscaleRgba(src.data(), width, height, 4);
+    CHECK(out.width == 4);
+    CHECK(out.height == 2);
+    // uint8 output is trivially finite; the size check is what actually matters.
+    REQUIRE(out.rgba.size() == static_cast<std::size_t>(out.width) * out.height * 4);
+}
+
+TEST_CASE("downscaleRgba passes through unchanged when already within the budget") {
+    const std::uint32_t width = 4;
+    const std::uint32_t height = 3;
+    const std::vector<std::uint8_t> src = makeGradientRgba(width, height);
+
+    const asset::DownscaledImage out = asset::downscaleRgba(src.data(), width, height, 8);
+    CHECK(out.width == width);
+    CHECK(out.height == height);
+    REQUIRE(out.rgba.size() == src.size());
+    CHECK(out.rgba == src);
+}
+
+TEST_CASE("downscaleRgba is deterministic across repeated calls") {
+    const std::uint32_t width = 37;
+    const std::uint32_t height = 21;
+    const std::vector<std::uint8_t> src = makeGradientRgba(width, height);
+
+    const asset::DownscaledImage first = asset::downscaleRgba(src.data(), width, height, 16);
+    const asset::DownscaledImage second = asset::downscaleRgba(src.data(), width, height, 16);
+    CHECK(first.width == second.width);
+    CHECK(first.height == second.height);
+    CHECK(first.rgba == second.rgba);
 }
 
 TEST_CASE("loaders report missing files with the path") {

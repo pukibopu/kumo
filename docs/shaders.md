@@ -51,7 +51,7 @@ viewer 以 `FileWatcher`（500ms 轮询）监听 `shaders/` 源文件：变化�
 shader 助手（见 agents.md）经 `ForwardRenderer::setMaterialShader` 为单个材质安装专属 fragment shader（ADR 0011）：
 
 - 复用共享 pbr 顶点级；set 0/2 的声明必须与模板反射逐项一致（引擎侧强制校验，不兼容以结构化编译错误回灌模型），push constant 布局不可变；
-- set 1 允许在 `MaterialFactors`（binding 6）尾部追加成员：该材质的 layout / 系数 buffer（按新反射尺寸重建，引擎写入前 48 字节，追加成员读到零值）/ bind group 就地重建；
+- set 1 允许在 `MaterialFactors`（binding 6）尾部追加成员：该材质的 layout / 系数 buffer（按新反射尺寸重建，引擎写入前 64 字节即 baseColor/metallicRoughness/emissive/uvTiling，追加成员读到零值）/ bind group 就地重建；
 - 绘制循环按 pipeline 分组（共享管线在前），材质系数 UBO 按帧槽双缓冲；
 - 生效源码可由 `materialShaderSource` 读回，接受的结果落盘 `shaders/generated/material_<N>.frag`（gitignored）。
 

@@ -14,6 +14,13 @@ class OrbitCamera {
 public:
     void rotate(float dx, float dy);
     void zoom(float scroll);
+    // Translates the pivot along the camera's horizontal forward/right axes
+    // (view direction projected onto XZ, normalized): `forwardMeters` moves
+    // along/against view direction, `rightMeters` strafes. Guards the
+    // near-vertical look (pitch close to +-90 deg) where that projection
+    // collapses toward zero, leaving the pivot unmoved on that axis instead
+    // of normalizing garbage.
+    void pan(float forwardMeters, float rightMeters);
     void apply(scene::Camera& camera) const;
 
     // Adopts the camera's aim as the new pivot: the target moves onto the view
@@ -21,6 +28,10 @@ public:
     // framing instead of snapping back to the old target. Imported pitch is
     // clamped into the range rotate() allows.
     void syncFrom(const scene::Camera& camera);
+
+    // Read-only: scales external input (e.g. WASD pan speed) by the current
+    // framing distance.
+    float distance() const { return distance_; }
 
 private:
     float yaw_ = 0.0f;

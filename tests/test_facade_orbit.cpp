@@ -92,6 +92,61 @@ TEST_CASE("OrbitCamera: zoom soft ceiling follows an imported distance, not a fi
     CHECK(math::length(check.position) == doctest::Approx(0.5f).epsilon(1e-3));
 }
 
+TEST_CASE("OrbitCamera: pan translates the pivot along yaw-relative forward/right") {
+    OrbitCamera orbit; // default yaw 0: forward (0,0,-1), right (1,0,0)
+    scene::Camera before;
+    orbit.apply(before);
+
+    orbit.pan(2.0f, 3.0f); // forward 2m, right 3m; distance/pitch untouched
+    scene::Camera after;
+    orbit.apply(after);
+
+    // apply()'s offset*distance term is unchanged, so the position delta is
+    // exactly the pan translation applied to target_.
+    const math::float3 delta = after.position - before.position;
+    CHECK(delta.x == doctest::Approx(3.0f).epsilon(kEps));
+    CHECK(delta.y == doctest::Approx(0.0f).epsilon(kEps));
+    CHECK(delta.z == doctest::Approx(-2.0f).epsilon(kEps));
+}
+
+TEST_CASE("OrbitCamera: pan respects the current yaw") {
+    OrbitCamera orbit;
+    orbit.rotate(-314.159265f, 0.0f); // yaw -= dx * 0.005 -> yaw ~= +pi/2
+    scene::Camera before;
+    orbit.apply(before);
+
+    orbit.pan(2.0f, 3.0f);
+    scene::Camera after;
+    orbit.apply(after);
+
+    // At yaw = pi/2: forward = (-1,0,0), right = (0,0,-1).
+    const math::float3 delta = after.position - before.position;
+    CHECK(delta.x == doctest::Approx(-2.0f).epsilon(1e-3));
+    CHECK(delta.y == doctest::Approx(0.0f).epsilon(1e-3));
+    CHECK(delta.z == doctest::Approx(-3.0f).epsilon(1e-3));
+}
+
+TEST_CASE("OrbitCamera: pan stays finite and yaw-only at the extreme pitch clamp "
+          "(straight-down guard)") {
+    OrbitCamera orbit;
+    orbit.rotate(0.0f, 1.0e6f); // pitch clamps to +1.5 (near straight down/up)
+    scene::Camera before;
+    orbit.apply(before);
+
+    orbit.pan(2.0f, 3.0f);
+    scene::Camera after;
+    orbit.apply(after);
+
+    const math::float3 delta = after.position - before.position;
+    CHECK(std::isfinite(delta.x));
+    CHECK(std::isfinite(delta.y));
+    CHECK(std::isfinite(delta.z));
+    // Pan stays yaw-only (unaffected by pitch): same as the yaw=0 case above.
+    CHECK(delta.x == doctest::Approx(3.0f).epsilon(kEps));
+    CHECK(delta.y == doctest::Approx(0.0f).epsilon(kEps));
+    CHECK(delta.z == doctest::Approx(-2.0f).epsilon(kEps));
+}
+
 TEST_CASE("OrbitCamera: syncFrom adopts an agent-moved camera; apply reproduces its view") {
     scene::Camera camera;
     camera.position = {5.0f, 2.0f, -3.0f};

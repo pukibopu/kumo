@@ -111,6 +111,23 @@ public:
     bool clearEntityShader(const std::string& id); // opens and commits its own undo point
     std::filesystem::path generatedShaderPath(const std::string& id) const; // empty when none
 
+    // Sun light (index 0) snapshot for the product GUI's light panel; mirrors
+    // apps/viewer/ui.cpp's LightSettings::syncFrom formula. `found` is false
+    // when index 0 does not exist (empty scene), in which case every other
+    // field is meaningless.
+    struct LightState {
+        bool found = false;
+        float azimuthDeg = 0.0f;
+        float elevationDeg = 0.0f;
+        float intensity = 0.0f;
+        math::float3 color{1.0f, 1.0f, 1.0f};
+    };
+    LightState sunLightState() const;
+    // Mirrors LightSettings::apply. Same pending-commit contract as
+    // setEntityTransform: beginEdit opens the undo point, this commits it on
+    // success. False (no light 0) leaves the pending snapshot open.
+    bool setSunLight(float azimuthDeg, float elevationDeg, float intensity, math::float3 color);
+
     // Bakes `desc` and swaps it in as the active IBL environment. Does not
     // manage undo itself: the agent-tool path gets it for free from the
     // ToolRegistry BeforeInvoke/AfterInvoke hook below, same as every other
@@ -139,6 +156,12 @@ public:
     // syncing from the scene camera, and both call markDirty().
     void orbitRotate(float dx, float dy);
     void orbitZoom(float delta);
+    // Same arbitration contract; forward/right are meters (product GUI's WASD
+    // pan).
+    void orbitPan(float forward, float right);
+    // Read-only mirror of OrbitCamera::distance(), for scaling pan speed by
+    // the current framing.
+    float orbitDistance() const;
 
     // Render-on-demand (product shell only; the GLFW viewer ignores this and
     // renders unconditionally). Every state change the runtime can observe
@@ -155,6 +178,16 @@ public:
     agent::ConfirmationGate* confirmGate();
     bool reloadPipelines();
 
+    // Hot-applies whatever the config file/env say now: re-resolves the agent
+    // config and rebuilds the scene/shader sessions and providers from scratch,
+    // tearing down the existing ones first. Env seeding is the app's concern
+    // (a later pass); this only re-reads what is already on disk/in the
+    // environment. Refuses (false, logged) while either session is busy —
+    // AgentSession's destructor can abort/join a mid-turn session safely, but
+    // silently killing a turn the user is waiting on is worse than asking them
+    // to wait. Tool registries, the scene and the renderer are untouched.
+    bool reloadAgentSessions();
+
     Notice& sceneRetryNotice();
     Notice& shaderRetryNotice();
 
@@ -169,6 +202,12 @@ private:
 
     SceneState captureSceneState() const;
     void applySceneState(const SceneState& state);
+    // Config resolution + session assembly shared by create() and
+    // reloadAgentSessions(); `isReload` pushes an initial transcript Info entry
+    // into the freshly built sessions instead of leaving the wiped history
+    // unexplained. Assumes sceneSession_/shaderSession_/sceneProvider_/
+    // shaderProvider_/confirmGate_ are already torn down.
+    void assembleAgentSessions(bool isReload);
 
     // Members below are declared in the order app.cpp's locals used to be: that
     // order is the destruction contract (reverse of declaration). Sessions/mcp
@@ -178,6 +217,13 @@ private:
     std::filesystem::path modelPath_;
     std::filesystem::path envPath_;
     std::filesystem::path generatedShaderDir_;
+
+    // Retained so reloadAgentSessions() can redo the same config-resolution
+    // branch create() ran, without needing the full Desc kept alive.
+    std::filesystem::path configPath_;
+    std::filesystem::path envFilePath_;
+    bool offline_ = false;
+    bool confirmDestructiveOverride_ = false;
 
     renderer::ForwardRenderer renderer_;
     scene::Scene world_;

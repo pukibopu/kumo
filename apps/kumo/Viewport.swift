@@ -28,6 +28,19 @@ final class KumoMetalView: NSView {
     // modifier handling needed. Tracked in view-local coordinates.
     private var lastDragLocation: NSPoint = .zero
 
+    // WASD pan (product GUI only; the GLFW viewer has no such input). Physical
+    // key codes (ANSI layout) so the bindings track key position, not the
+    // current input-language mapping. Cleared on flagsChanged/resignFirstResponder
+    // so a key does not read as stuck down after the app loses focus mid-press
+    // (Cmd+Tab, Mission Control, ...).
+    private static let kVKANSI_A: UInt16 = 0x00
+    private static let kVKANSI_S: UInt16 = 0x01
+    private static let kVKANSI_D: UInt16 = 0x02
+    private static let kVKANSI_W: UInt16 = 0x0D
+    private static let wasdKeyCodes: Set<UInt16> = [kVKANSI_A, kVKANSI_S, kVKANSI_D, kVKANSI_W]
+    private var pressedKeys: Set<UInt16> = []
+    private var lastPanTime: CFTimeInterval?
+
     override var acceptsFirstResponder: Bool { true }
 
     override init(frame frameRect: NSRect) {
@@ -92,8 +105,30 @@ final class KumoMetalView: NSView {
     private func fireFrame() {
         defer { tickQueued.withLock { $0 = false } }
         guard let engine else { return }
+        applyKeyboardPan(engine: engine)
         if !engine.tick() {
             stopAndTerminate()
+        }
+    }
+
+    // WASD pan (ADR 0039 arbitration via panCameraForward): speed scales with
+    // the current orbit distance so the pan feels the same relative to the
+    // framing whether zoomed in on a small prop or looking at a whole scene.
+    private func applyKeyboardPan(engine: KumoEngine) {
+        let now = CACurrentMediaTime()
+        let dt = lastPanTime.map { now - $0 } ?? 0
+        lastPanTime = now
+        guard !pressedKeys.isEmpty, dt > 0 else { return }
+
+        let speed = Float(max(1.0, Double(engine.orbitDistance()))) * Float(dt) * 1.5
+        var forward: Float = 0
+        var right: Float = 0
+        if pressedKeys.contains(Self.kVKANSI_W) { forward += speed }
+        if pressedKeys.contains(Self.kVKANSI_S) { forward -= speed }
+        if pressedKeys.contains(Self.kVKANSI_D) { right += speed }
+        if pressedKeys.contains(Self.kVKANSI_A) { right -= speed }
+        if forward != 0 || right != 0 {
+            engine.panCameraForward(forward, right: right)
         }
     }
 
@@ -133,6 +168,37 @@ final class KumoMetalView: NSView {
         // them into roughly the same range as a mouse wheel step.
         let scale: Float = event.hasPreciseScrollingDeltas ? 0.05 : 1.0
         engine.orbitZoom(Float(event.scrollingDeltaY) * scale)
+    }
+
+    // Only handled while this view is first responder (clicking the viewport
+    // makes it so, standard AppKit); a text field elsewhere keeps first
+    // responder and these overrides are simply never called.
+    override func keyDown(with event: NSEvent) {
+        guard Self.wasdKeyCodes.contains(event.keyCode) else {
+            super.keyDown(with: event)
+            return
+        }
+        pressedKeys.insert(event.keyCode)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        guard Self.wasdKeyCodes.contains(event.keyCode) else {
+            super.keyUp(with: event)
+            return
+        }
+        pressedKeys.remove(event.keyCode)
+    }
+
+    // Modifier changes often coincide with the app losing key focus (Cmd+Tab,
+    // Mission Control); clear so a WASD key never reads as stuck down.
+    override func flagsChanged(with event: NSEvent) {
+        pressedKeys.removeAll()
+        super.flagsChanged(with: event)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        pressedKeys.removeAll()
+        return super.resignFirstResponder()
     }
 }
 

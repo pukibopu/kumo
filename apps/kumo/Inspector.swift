@@ -106,9 +106,9 @@ struct InspectorView: View {
                 }
                 .formStyle(.grouped)
             } else {
-                Text("未选择实体")
-                    .foregroundStyle(.secondary)
-                    .padding()
+                // Nothing selected: the least intrusive spot for scene-level
+                // controls (ADR 0044) rather than a dedicated sidebar section.
+                LightPanelView(holder: holder, onChanged: onChanged)
             }
         }
         .frame(minWidth: 280, idealWidth: 300, maxWidth: 340)
@@ -270,5 +270,117 @@ struct InspectorView: View {
         let resolved = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(color)
         return (Float(resolved.redComponent), Float(resolved.greenComponent),
                 Float(resolved.blueComponent), Float(resolved.alphaComponent))
+    }
+}
+
+// Sun light (light index 0) + shadow toggle: shown in the inspector slot when
+// nothing is selected (ADR 0044), the least intrusive spot for a scene-level
+// control. Mirrors apps/viewer/ui.cpp's drawLightPanel/LightSettings, and
+// InspectorView's pending-commit undo wiring (beginEdit ahead of the setter
+// that commits it, ColorPicker's 0.75s coalescing). Reflects agent-driven
+// changes via its own poll timer, same cadence as KumoApp's entity/undo
+// refresh; safe against an in-progress local drag because every slider step
+// already committed that same value to the engine (a read-back mid-drag is a
+// no-op, not a jump).
+private struct LightPanelView: View {
+    @ObservedObject var holder: EngineHolder
+    let onChanged: () -> Void
+
+    @State private var found = false
+    @State private var azimuthDeg = 0.0
+    @State private var elevationDeg = 0.0
+    @State private var intensity = 0.0
+    @State private var color = Color.white
+    @State private var shadowsOn = true
+
+    @State private var lastColorEditAt: Date?
+    @State private var lightError: String?
+
+    private let refreshTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Form {
+            Section("光照") {
+                if found {
+                    LabeledContent("方位角") {
+                        Slider(value: $azimuthDeg, in: -180...180) { began in
+                            if began { holder.engine?.beginEdit("light") }
+                        }
+                    }
+                    .onChange(of: azimuthDeg) { _, _ in commitLight(beginNewEdit: false) }
+                    LabeledContent("高度角") {
+                        Slider(value: $elevationDeg, in: -85...85) { began in
+                            if began { holder.engine?.beginEdit("light") }
+                        }
+                    }
+                    .onChange(of: elevationDeg) { _, _ in commitLight(beginNewEdit: false) }
+                    LabeledContent("强度") {
+                        Slider(value: $intensity, in: 0...10) { began in
+                            if began { holder.engine?.beginEdit("light") }
+                        }
+                    }
+                    .onChange(of: intensity) { _, _ in commitLight(beginNewEdit: false) }
+                    ColorPicker("颜色", selection: $color, supportsOpacity: false)
+                        .onChange(of: color) { _, _ in
+                            let now = Date()
+                            let isNewGesture = lastColorEditAt.map { now.timeIntervalSince($0) > 0.75 }
+                                ?? true
+                            lastColorEditAt = now
+                            commitLight(beginNewEdit: isNewGesture)
+                        }
+                    if let lightError {
+                        Text(lightError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                } else {
+                    Text("场景中没有灯光")
+                        .foregroundStyle(.secondary)
+                }
+                Toggle("阴影", isOn: $shadowsOn)
+                    .onChange(of: shadowsOn) { _, newValue in
+                        holder.engine?.setShadowsEnabled(newValue)
+                        onChanged()
+                    }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { loadLight() }
+        .onReceive(refreshTimer) { _ in loadLight() }
+    }
+
+    private func loadLight() {
+        guard let engine = holder.engine else { return }
+        let detail = engine.sunLightDetail()
+        found = detail.found
+        if detail.found {
+            azimuthDeg = Double(detail.azimuthDeg)
+            elevationDeg = Double(detail.elevationDeg)
+            intensity = Double(detail.intensity)
+            color = Color(red: Double(detail.colorR), green: Double(detail.colorG),
+                          blue: Double(detail.colorB))
+        }
+        shadowsOn = engine.shadowsEnabled()
+    }
+
+    private func commitLight(beginNewEdit: Bool) {
+        guard let engine = holder.engine else { return }
+        if beginNewEdit {
+            engine.beginEdit("light")
+        }
+        let rgb = rgbComponents(of: color)
+        // Pending-commit model (EngineRuntime::setSunLight): a failed set never
+        // commits an undo step on its own.
+        let ok = engine.setSunLightAzimuthDeg(Float(azimuthDeg), elevationDeg: Float(elevationDeg),
+                                             intensity: Float(intensity), r: rgb.r, g: rgb.g,
+                                             b: rgb.b)
+        lightError = ok ? nil : "光照设置失败"
+        onChanged()
+    }
+
+    private func rgbComponents(of color: Color) -> (r: Float, g: Float, b: Float) {
+        let resolved = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(color)
+        return (Float(resolved.redComponent), Float(resolved.greenComponent),
+                Float(resolved.blueComponent))
     }
 }

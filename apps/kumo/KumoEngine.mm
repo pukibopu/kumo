@@ -44,6 +44,12 @@ std::string toStdString(NSString* s) {
     return s.UTF8String != nullptr ? std::string(s.UTF8String) : std::string();
 }
 
+// fileSystemRepresentation (not UTF8String) so non-ASCII paths round-trip
+// through the filesystem's actual on-disk byte form.
+std::filesystem::path toPath(NSString* s) {
+    return std::filesystem::path(s.fileSystemRepresentation);
+}
+
 // Chinese hints mirroring apps/viewer/ui.cpp's drawAgentPanels (ADR 0028: UI
 // copy is Chinese, engine strings stay English).
 NSString* const kSceneUnavailableHint =
@@ -96,11 +102,13 @@ KumoTranscriptKind toKumoTranscriptKind(agent::AgentSession::TranscriptEntry::Ki
 }
 
 // Reads a Settings-saved key from the Keychain (service "dev.kumo.app",
-// account = env-var name) and seeds the process env with it, `0` meaning
-// "do not overwrite a real env var" already set: the config loader's
-// env-over-file precedence (ADR 0012) then applies it the same as if the
-// user had exported it themselves.
-void applyKeychainEnv(NSString* account, const char* envName) {
+// account = env-var name) and seeds the process env with it. `overwrite=0`
+// (launch time) means "do not overwrite a real env var" already set; the
+// config loader's env-over-file precedence (ADR 0012) then applies it the
+// same as if the user had exported it themselves. `overwrite=1` is the
+// settings-hot-apply path (Item D): the user just changed the value in-app
+// and explicitly wants it to take effect now.
+void applyKeychainEnv(NSString* account, const char* envName, int overwrite) {
     NSDictionary* query = @{
         (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService : @"dev.kumo.app",
@@ -116,8 +124,35 @@ void applyKeychainEnv(NSString* account, const char* envName) {
     NSData* data = (__bridge_transfer NSData*)result;
     NSString* value = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (value.length > 0) {
-        setenv(envName, value.UTF8String, 0);
+        setenv(envName, value.UTF8String, overwrite);
     }
+}
+
+} // namespace
+
+@interface KumoLightDetail ()
+@property(nonatomic, readwrite) BOOL found;
+@property(nonatomic, readwrite) float azimuthDeg;
+@property(nonatomic, readwrite) float elevationDeg;
+@property(nonatomic, readwrite) float intensity;
+@property(nonatomic, readwrite) float colorR, colorG, colorB;
+@end
+
+@implementation KumoLightDetail
+@end
+
+namespace {
+
+KumoLightDetail* toKumoLightDetail(const facade::EngineRuntime::LightState& state) {
+    KumoLightDetail* out = [[KumoLightDetail alloc] init];
+    out.found = state.found;
+    out.azimuthDeg = state.azimuthDeg;
+    out.elevationDeg = state.elevationDeg;
+    out.intensity = state.intensity;
+    out.colorR = state.color.x;
+    out.colorG = state.color.y;
+    out.colorB = state.color.z;
+    return out;
 }
 
 } // namespace
@@ -272,8 +307,8 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
     // the process env from them before the config layer resolves providers, so
     // its existing env-over-file precedence (ADR 0012) picks them up unchanged.
     // `setenv(..., 0)` never overwrites a real env var the user already set.
-    applyKeychainEnv(@"OPENAI_API_KEY", "OPENAI_API_KEY");
-    applyKeychainEnv(@"ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY");
+    applyKeychainEnv(@"OPENAI_API_KEY", "OPENAI_API_KEY", 0);
+    applyKeychainEnv(@"ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", 0);
 
     const std::string assetDirStd = assetDir.UTF8String;
     const facade::EngineRuntime::Desc desc{
@@ -348,6 +383,14 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
     _runtime->orbitZoom(delta);
 }
 
+- (void)panCameraForward:(float)forward right:(float)right {
+    _runtime->orbitPan(forward, right);
+}
+
+- (float)orbitDistance {
+    return _runtime->orbitDistance();
+}
+
 - (NSArray<KumoEntityInfo*>*)listEntities {
     NSMutableArray<KumoEntityInfo*>* out = [NSMutableArray array];
     for (const facade::EngineRuntime::EntityInfo& entity : _runtime->listEntities()) {
@@ -413,6 +456,28 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
 - (nullable NSString*)generatedShaderPath:(NSString*)entityId {
     const std::filesystem::path path = _runtime->generatedShaderPath(toStdString(entityId));
     return path.empty() ? nil : toNSString(path.string());
+}
+
+- (KumoLightDetail*)sunLightDetail {
+    return toKumoLightDetail(_runtime->sunLightState());
+}
+
+- (BOOL)setSunLightAzimuthDeg:(float)azimuthDeg
+                 elevationDeg:(float)elevationDeg
+                    intensity:(float)intensity
+                            r:(float)r
+                            g:(float)g
+                            b:(float)b {
+    return _runtime->setSunLight(azimuthDeg, elevationDeg, intensity, {r, g, b}) ? YES : NO;
+}
+
+- (BOOL)shadowsEnabled {
+    return _runtime->renderer().shadowsEnabled() ? YES : NO;
+}
+
+- (void)setShadowsEnabled:(BOOL)enabled {
+    _runtime->renderer().setShadowsEnabled(enabled == YES);
+    _runtime->markDirty();
 }
 
 - (BOOL)undoAvailable {
@@ -509,6 +574,21 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
 
 - (NSString*)configPath {
     return _configPath;
+}
+
+- (BOOL)saveSceneToPath:(NSString*)path {
+    return _runtime->saveScene(toPath(path)) ? YES : NO;
+}
+
+- (BOOL)loadSceneFromPath:(NSString*)path {
+    // loadScene() already calls markDirty() on success (facade contract).
+    return _runtime->loadScene(toPath(path)) ? YES : NO;
+}
+
+- (BOOL)reloadAgentSessions {
+    applyKeychainEnv(@"OPENAI_API_KEY", "OPENAI_API_KEY", 1);
+    applyKeychainEnv(@"ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", 1);
+    return _runtime->reloadAgentSessions() ? YES : NO;
 }
 
 - (void)dealloc {

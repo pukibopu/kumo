@@ -1,12 +1,17 @@
 #include <kumo/agent/session.h>
 
+#include "base64.h"
+
 #include <kumo/agent/confirmation_gate.h>
 #include <kumo/agent/summary.h>
 #include <kumo/core/main_thread_queue.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <format>
+#include <optional>
 #include <utility>
 
 namespace kumo::agent {
@@ -169,6 +174,20 @@ void AgentSession::runTurn(std::string userText) {
                        .json = toolResult.contentJson});
             toolMessage.toolResults.push_back(std::move(toolResult));
         }
+        // Retention: images are resent with the whole history every round, so at
+        // most one stays attached at a time. A fresh image evicts every earlier
+        // one rather than the other way around, since the newest screenshot is
+        // the one worth the model's attention.
+        const bool carriesImage = std::any_of(
+            toolMessage.toolResults.begin(), toolMessage.toolResults.end(),
+            [](const ToolResult& toolResult) { return !toolResult.imagePngBase64.empty(); });
+        if (carriesImage) {
+            for (ChatMessage& earlier : history_) {
+                for (ToolResult& earlierResult : earlier.toolResults) {
+                    earlierResult.imagePngBase64.clear();
+                }
+            }
+        }
         history_.push_back(std::move(toolMessage));
     }
 }
@@ -224,6 +243,21 @@ ToolResult AgentSession::executeToolCall(const ToolCall& call) {
             return registry->invoke(name, args);
         });
     result.contentJson = awaitJson(std::move(future));
+
+    // Vision feedback loop (ADR 0041/M6.97): a result JSON carrying image_path
+    // (viewer_screenshot and friends) gets its PNG attached in base64; any
+    // failure to read the file degrades silently to text-only, same as MCP.
+    const nlohmann::json parsed = nlohmann::json::parse(result.contentJson, nullptr, false);
+    if (!parsed.is_discarded() && parsed.is_object()) {
+        const auto imagePathIt = parsed.find("image_path");
+        if (imagePathIt != parsed.end() && imagePathIt->is_string()) {
+            if (std::optional<std::string> encoded =
+                    detail::base64EncodeFile(imagePathIt->get<std::string>());
+                encoded.has_value()) {
+                result.imagePngBase64 = std::move(*encoded);
+            }
+        }
+    }
     return result;
 }
 

@@ -6,10 +6,14 @@
 #include <kumo/agent/tool_registry.h>
 #include <kumo/core/main_thread_queue.h>
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <string>
 #include <thread>
@@ -379,6 +383,70 @@ TEST_CASE("AgentSession destruction unblocks a worker waiting for confirmation")
         REQUIRE(waitFor([&] { return gate.pending().has_value(); }));
     }
     CHECK(!gate.pending().has_value());
+}
+
+TEST_CASE("AgentSession attaches a tool result's image and retains only the newest one") {
+    MainThreadQueue queue;
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "kumo_agent_session_vision_test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path1 = dir / "shot1.png";
+    const std::filesystem::path path2 = dir / "shot2.png";
+    std::ofstream(path1, std::ios::binary) << "IMG1DATA";
+    std::ofstream(path2, std::ios::binary) << "IMG2DATA";
+
+    ToolRegistry registry;
+    int calls = 0;
+    registry.add({.name = "take_screenshot",
+                  .description = "test",
+                  .parametersSchema = R"({"type":"object"})"},
+                 [&](std::string_view) {
+                     ++calls;
+                     const std::string path = (calls == 1 ? path1 : path2).string();
+                     return nlohmann::json{{"status", "ok"}, {"image_path", path}}.dump();
+                 });
+
+    FakeProvider provider({toolUse("c1", "take_screenshot", "{}"), assistantText("done1"),
+                           toolUse("c2", "take_screenshot", "{}"), assistantText("done2")});
+    AgentSession session(provider, registry, queue, nullptr, desc());
+
+    REQUIRE(session.submit("first"));
+    REQUIRE(pumpUntilIdle(queue, session));
+    REQUIRE(provider.requests().size() == 2);
+    {
+        const std::vector<ChatMessage>& messages = provider.requests()[1].messages;
+        REQUIRE(messages.size() == 3);
+        REQUIRE(messages[2].role == Role::Tool);
+        REQUIRE(messages[2].toolResults.size() == 1);
+        // base64("IMG1DATA"), computed independently of the encoder under test.
+        CHECK(messages[2].toolResults[0].imagePngBase64 == "SU1HMURBVEE=");
+    }
+
+    REQUIRE(session.submit("second"));
+    REQUIRE(pumpUntilIdle(queue, session));
+    REQUIRE(provider.requests().size() == 4);
+    {
+        // Requested before the second screenshot ran: the first image is still
+        // the only one attached anywhere in history.
+        const std::vector<ChatMessage>& messages = provider.requests()[2].messages;
+        REQUIRE(messages.size() == 5);
+        REQUIRE(messages[2].role == Role::Tool);
+        CHECK(messages[2].toolResults[0].imagePngBase64 == "SU1HMURBVEE=");
+    }
+    {
+        // After the second screenshot lands, retention evicts the first image so
+        // only the newest stays attached.
+        const std::vector<ChatMessage>& messages = provider.requests()[3].messages;
+        REQUIRE(messages.size() == 7);
+        REQUIRE(messages[2].role == Role::Tool);
+        CHECK(messages[2].toolResults[0].imagePngBase64.empty());
+        REQUIRE(messages[6].role == Role::Tool);
+        // base64("IMG2DATA")
+        CHECK(messages[6].toolResults[0].imagePngBase64 == "SU1HMkRBVEE=");
+    }
+
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("FakeProvider falls back to the exhausted message") {

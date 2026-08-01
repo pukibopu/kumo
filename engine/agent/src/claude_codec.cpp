@@ -42,9 +42,22 @@ json toContentBlocks(const ChatMessage& message) {
     json blocks = json::array();
     if (message.role == Role::Tool) {
         for (const ToolResult& result : message.toolResults) {
-            json block{{"type", "tool_result"},
-                       {"tool_use_id", result.callId},
-                       {"content", result.contentJson}};
+            json block{{"type", "tool_result"}, {"tool_use_id", result.callId}};
+            // Vision feedback loop (M6.97): an image-bearing result becomes a
+            // content array (text + image); image-less results keep the plain
+            // string form so today's no-image wire shape stays unchanged.
+            if (result.imagePngBase64.empty()) {
+                block["content"] = result.contentJson;
+            } else {
+                json content = json::array();
+                content.push_back({{"type", "text"}, {"text", result.contentJson}});
+                content.push_back({{"type", "image"},
+                                   {"source",
+                                    {{"type", "base64"},
+                                     {"media_type", "image/png"},
+                                     {"data", result.imagePngBase64}}}});
+                block["content"] = std::move(content);
+            }
             if (result.isError) {
                 block["is_error"] = true;
             }

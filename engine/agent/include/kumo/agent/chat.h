@@ -24,6 +24,9 @@ struct ToolResult {
     std::string callId;
     std::string contentJson;
     bool isError = false;
+    // Empty when the result carries no attachment; filled by the session when the
+    // tool's result JSON carries an image_path.
+    std::string imagePngBase64;
 };
 
 // Provider-neutral message: deliberately the intersection of the Anthropic and

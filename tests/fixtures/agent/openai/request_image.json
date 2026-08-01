@@ -1,0 +1,46 @@
+{
+    "model": "test-model",
+    "max_completion_tokens": 256,
+    "messages": [
+        { "role": "system", "content": "You are a test." },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "viewer_screenshot",
+                        "arguments": "{}"
+                    }
+                }
+            ]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "{\"status\":\"ok\",\"width\":640,\"height\":360}"
+        },
+        {
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "Screenshot from the last tool call:" },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,UE5HREFUQQ==", "detail": "low" }
+                }
+            ]
+        }
+    ],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "viewer_screenshot",
+                "description": "Take a screenshot.",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }
+    ]
+}

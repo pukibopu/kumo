@@ -57,6 +57,29 @@ std::string encodeChatCompletionsRequest(const ChatRequest& request) {
                                     {"tool_call_id", result.callId},
                                     {"content", result.contentJson}});
             }
+            // Vision feedback loop (M6.97): the tool-role message has no image
+            // slot on this wire, so an image-bearing result gets resent as one
+            // follow-up user message. detail:"low" trades detail for token cost
+            // deliberately; the image is already downscaled at the source.
+            json imageParts = json::array();
+            for (const ToolResult& result : message.toolResults) {
+                if (!result.imagePngBase64.empty()) {
+                    imageParts.push_back(
+                        {{"type", "image_url"},
+                         {"image_url",
+                          {{"url", "data:image/png;base64," + result.imagePngBase64},
+                           {"detail", "low"}}}});
+                }
+            }
+            if (!imageParts.empty()) {
+                json content = json::array();
+                content.push_back(
+                    {{"type", "text"}, {"text", "Screenshot from the last tool call:"}});
+                for (json& part : imageParts) {
+                    content.push_back(std::move(part));
+                }
+                messages.push_back({{"role", "user"}, {"content", std::move(content)}});
+            }
             continue;
         }
         json entry{{"role", roleName(message.role)}, {"content", message.text}};

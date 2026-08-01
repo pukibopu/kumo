@@ -49,7 +49,7 @@ ChatMessage assistantToolUse(std::string id, std::string name, std::string args)
 ChatMessage toolResult(std::string callId, std::string contentJson) {
     ChatMessage message;
     message.role = Role::Tool;
-    message.toolResults.push_back({std::move(callId), std::move(contentJson), false});
+    message.toolResults.push_back({std::move(callId), std::move(contentJson), false, ""});
     return message;
 }
 
@@ -120,6 +120,17 @@ TEST_CASE("approxTokens estimates bytes/4, summing tool payloads") {
 
     std::vector<ChatMessage> messages{plain, withCall, withResult};
     CHECK(approxTokens(std::span<const ChatMessage>(messages)) == 2 + 3 + 1);
+}
+
+TEST_CASE("approxTokens adds a flat per-image cost, not the base64 length") {
+    ChatMessage withImage = toolResult("1", R"({"status":"ok"})");
+    // A generous base64 stand-in: if the cost tracked its length, this alone
+    // would blow past any reasonable compression threshold.
+    withImage.toolResults[0].imagePngBase64 = std::string(10000, 'A');
+
+    const std::size_t textOnly = approxTokens(toolResult("1", R"({"status":"ok"})"));
+    // 512 mirrors summary.cpp's kImageTokenEstimate.
+    CHECK(approxTokens(withImage) == textOnly + 512);
 }
 
 TEST_CASE("shouldCompress compares the approx token count against the threshold") {

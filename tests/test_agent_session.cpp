@@ -132,6 +132,29 @@ TEST_CASE("AgentSession runs a plain text turn and records the request") {
     CHECK(request.messages[0].role == Role::User);
 }
 
+TEST_CASE("AgentSession pushes an initial Info entry when Desc::initialNotice is set") {
+    MainThreadQueue queue;
+    ToolRegistry registry = echoRegistry();
+    FakeProvider provider({});
+    AgentSession::Desc withNotice = desc();
+    withNotice.initialNotice = "agent configuration reloaded; conversation reset";
+    AgentSession session(provider, registry, queue, nullptr, withNotice);
+
+    const std::vector<Entry> transcript = session.drainTranscript();
+    REQUIRE(transcript.size() == 1);
+    CHECK(transcript[0].kind == Kind::Info);
+    CHECK(transcript[0].text == "agent configuration reloaded; conversation reset");
+}
+
+TEST_CASE("AgentSession stays silent when Desc::initialNotice is empty") {
+    MainThreadQueue queue;
+    ToolRegistry registry = echoRegistry();
+    FakeProvider provider({});
+    AgentSession session(provider, registry, queue, nullptr, desc());
+
+    CHECK(session.drainTranscript().empty());
+}
+
 TEST_CASE("AgentSession executes tool calls on the draining thread with matching ids") {
     MainThreadQueue queue;
     std::vector<std::string> seenArgs;

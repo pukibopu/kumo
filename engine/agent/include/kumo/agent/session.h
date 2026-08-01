@@ -44,6 +44,11 @@ public:
         // 0 disables history compression.
         std::size_t summaryThresholdTokens = 0;
         int keepRecentMessages = 8;
+        // Pushed as a Kind::Info transcript entry as soon as the session is
+        // constructed; empty for a no-op. Lets a caller that just rebuilt this
+        // session (e.g. a hot config reload) explain the fresh, historyless
+        // transcript instead of leaving it silently empty.
+        std::string initialNotice;
     };
 
     struct TranscriptEntry {

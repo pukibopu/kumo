@@ -7,6 +7,7 @@
 #include <chrono>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -24,6 +25,9 @@ struct HttpRequest {
 struct HttpResponse {
     int status = 0;
     std::string body;
+    // Raw Retry-After header value when the response carried one; only this
+    // single header is captured (ADR 0030 update). nullopt when absent.
+    std::optional<std::string> retryAfter;
 };
 
 struct TransportError {
@@ -43,16 +47,22 @@ using HttpTransport = std::function<std::expected<HttpResponse, TransportError>(
 HttpTransport makeUrlSessionTransport();
 
 // Template-method base for HTTP providers: encode once, then a retry loop with
-// exponential backoff (1s -> 4s with jitter) over 429/5xx/transport failures,
-// two retries max; other 4xx fail immediately (ADR 0030). Sleep and jitter are
-// injected so tests replay the schedule without real waiting.
+// exponential backoff (1s -> 4s with jitter) over 5xx/transport failures (two
+// retries max) and 429 (three retries max); other 4xx fail immediately (ADR
+// 0030). A 429 carrying a Retry-After header waits that many seconds (+ the
+// same jitter envelope, capped at 30s) instead of the blind backoff. Sleep and
+// jitter are injected so tests replay the schedule without real waiting.
 class HttpLLMProvider : public ILLMProvider {
 public:
     struct Options {
         std::chrono::seconds requestTimeout{120};
         int maxRetries = 2;
-        // Invoked from the worker thread before each backoff sleep with
-        // (nextAttempt, maxRetries); UI surfaces the retry notice from it.
+        // 429 gets a larger budget: servers that send Retry-After expect the
+        // client to actually wait it out rather than give up early.
+        int maxRetries429 = 3;
+        // Invoked from the worker thread before each backoff/Retry-After sleep
+        // with (nextAttempt, maxRetriesForThisFailure); UI surfaces the retry
+        // notice from it.
         std::function<void(int, int)> onRetry;
         // Test seams; null selects the abort-aware default sleep / uniform jitter.
         std::function<void(std::chrono::milliseconds)> sleep;
@@ -70,6 +80,13 @@ protected:
 
 private:
     void backoffSleep(int completedAttempt);
+    // Waits `retryAfterSeconds` (+ jitter, capped at 30s) instead of the
+    // exponential schedule.
+    void retryAfterSleep(double retryAfterSeconds);
+    // Shared +-20% jitter envelope (0.8-1.2) behind both sleep functions.
+    double jitterFactor();
+    // options_.sleep when injected (tests), otherwise a real abort-aware wait.
+    void sleepFor(std::chrono::milliseconds delay);
 
     HttpTransport transport_;
     Options options_;

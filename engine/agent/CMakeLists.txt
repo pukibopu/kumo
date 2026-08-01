@@ -7,6 +7,7 @@ add_library(kumo_agent STATIC
     src/http_provider.cpp
     src/mcp_server.cpp
     src/openai_codec.cpp
+    src/retry_after.cpp
     src/scene_tools.cpp
     src/session.cpp
     src/shader_tools.cpp

@@ -52,8 +52,18 @@ float kumoShadowPcf(vec3 worldPos, vec3 normal) {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) return 1.0;
     float receiver = ndc.z - frame.shadowParams.z;
 
+    // One rotation shared by both disks. Rotating the blocker search matters as
+    // much as the filter: a fixed sparse disk lets small casters slip between
+    // all 8 taps for whole regions at once, punching tap-pattern-shaped holes
+    // into large penumbras; rotation degrades that to per-pixel noise.
+    float angle = kumoInterleavedGradientNoise(gl_FragCoord.xy) * 6.28318530718;
+    float s = sin(angle);
+    float c = cos(angle);
+    mat2 rotation = mat2(c, s, -s, c);
+
     // Blocker search: raw depth reads (no hardware compare) averaged over a
-    // fixed disk; early out to full light when nothing occludes the receiver.
+    // rotated disk plus a center tap (a caster straight above the receiver can
+    // never be missed); early out to full light when nothing occludes.
     // Classification uses the UNBIASED depth (reference PCSS): the bias margin
     // exists to stop the final compare from self-shadowing, and excluding
     // contact-adjacent casters here would skew the penumbra estimate soft
@@ -62,8 +72,13 @@ float kumoShadowPcf(vec3 worldPos, vec3 normal) {
     // minimum (sharp) radius instead of acne.
     float blockerSum = 0.0;
     int blockerCount = 0;
+    float centerDepth = texture(sampler2D(shadowMap, shadowRawSampler), uv).r;
+    if (centerDepth < ndc.z) {
+        blockerSum += centerDepth;
+        ++blockerCount;
+    }
     for (int i = 0; i < 8; ++i) {
-        vec2 sampleUv = uv + kPoissonDisk8[i] * kSearchRadiusUV;
+        vec2 sampleUv = uv + rotation * (kPoissonDisk8[i] * kSearchRadiusUV);
         float depth = texture(sampler2D(shadowMap, shadowRawSampler), sampleUv).r;
         if (depth < ndc.z) {
             blockerSum += depth;
@@ -76,13 +91,6 @@ float kumoShadowPcf(vec3 worldPos, vec3 normal) {
     // Penumbra estimate: similar-triangles between receiver, blocker and light.
     float penumbraUV = clamp((receiver - avgBlocker) * kLightSizeUV / max(avgBlocker, 1e-4),
                              frame.shadowParams.y, kMaxRadiusUV);
-
-    // Rotate the filter disk per pixel (IGN) so the fixed taps do not leave a
-    // visible fixed pattern across the penumbra.
-    float angle = kumoInterleavedGradientNoise(gl_FragCoord.xy) * 6.28318530718;
-    float s = sin(angle);
-    float c = cos(angle);
-    mat2 rotation = mat2(c, s, -s, c);
 
     float sum = 0.0;
     for (int i = 0; i < 16; ++i) {

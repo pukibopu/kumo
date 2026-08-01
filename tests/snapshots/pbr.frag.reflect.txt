@@ -8,7 +8,7 @@ binding set=1 binding=2 type=sampled_texture name=normalTex bufferSize=0
 binding set=1 binding=3 type=sampled_texture name=occlusionTex bufferSize=0
 binding set=1 binding=4 type=sampled_texture name=emissiveTex bufferSize=0
 binding set=1 binding=5 type=sampler name=materialSampler bufferSize=0
-binding set=1 binding=6 type=uniform_buffer name=MaterialFactors bufferSize=48
+binding set=1 binding=6 type=uniform_buffer name=MaterialFactors bufferSize=64
 binding set=2 binding=0 type=sampled_texture name=irradianceMap bufferSize=0
 binding set=2 binding=1 type=sampled_texture name=prefilteredMap bufferSize=0
 binding set=2 binding=2 type=sampled_texture name=brdfLut bufferSize=0

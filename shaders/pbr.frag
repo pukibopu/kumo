@@ -20,6 +20,7 @@ layout(set = 1, binding = 6, std140) uniform MaterialFactors {
     vec4 baseColor;
     vec4 metallicRoughness; // x metallic, y roughness
     vec4 emissive;          // xyz
+    vec4 uvTiling;          // xy uv scale, zw reserved
 }
 material;
 
@@ -72,20 +73,22 @@ vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
 }
 
 void main() {
-    vec4 baseSample = texture(sampler2D(baseColorTex, materialSampler), vUv) * material.baseColor;
+    vec2 uv = vUv * material.uvTiling.xy;
+
+    vec4 baseSample = texture(sampler2D(baseColorTex, materialSampler), uv) * material.baseColor;
     vec3 albedo = baseSample.rgb;
 
-    vec3 mrSample = texture(sampler2D(metallicRoughnessTex, materialSampler), vUv).rgb;
+    vec3 mrSample = texture(sampler2D(metallicRoughnessTex, materialSampler), uv).rgb;
     float metallic = clamp(
         mrSample.b * material.metallicRoughness.x * frame.materialOverride.x, 0.0, 1.0);
     float roughness = clamp(
         mrSample.g * material.metallicRoughness.y * frame.materialOverride.y, 0.045, 1.0);
-    float occlusion = texture(sampler2D(occlusionTex, materialSampler), vUv).r;
+    float occlusion = texture(sampler2D(occlusionTex, materialSampler), uv).r;
     vec3 emissive =
-        texture(sampler2D(emissiveTex, materialSampler), vUv).rgb * material.emissive.rgb;
+        texture(sampler2D(emissiveTex, materialSampler), uv).rgb * material.emissive.rgb;
 
     vec3 V = normalize(frame.cameraPos.xyz - vWorldPos);
-    vec3 N = perturbNormal(normalize(vNormal), vWorldPos, vUv);
+    vec3 N = perturbNormal(normalize(vNormal), vWorldPos, uv);
     float NdotV = max(dot(N, V), 1e-4);
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);

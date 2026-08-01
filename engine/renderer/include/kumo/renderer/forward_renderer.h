@@ -32,6 +32,7 @@ public:
         float metallic = 1.0f;
         float roughness = 1.0f;
         float emissive[3]{0.0f, 0.0f, 0.0f};
+        float uvTiling[2]{1.0f, 1.0f};
     };
 
     bool init(gpu::Device& device, gpu::TextureFormat outputFormat);
@@ -44,10 +45,35 @@ public:
     void resize(gpu::Extent2D size);
 
     // Incremental uploads on top of a loaded scene; indices stay valid until the
-    // next loadScene. All return -1 / false instead of asserting on bad input.
+    // next loadScene (meshes, textures and materials all share this contract).
+    // All return -1 / false instead of asserting on bad input.
     std::int32_t addMesh(const asset::MeshData& mesh);
+    // Uploads one RGBA8 texture (sRGB or linear per `texture.srgb`) with a full
+    // mip chain, into the same list loadScene populates; own command encoder,
+    // submitted and waited on before returning (loadScene batches uploads on
+    // its own encoder instead).
+    std::int32_t addTexture(const asset::TextureData& texture);
     // Untextured: every texture slot binds the built-in fallback.
     std::int32_t addMaterial(const MaterialParams& params);
+
+    // Resolves indices from addTexture's list into a material's five texture
+    // slots: -1 uses the built-in fallback for that slot, an out-of-range
+    // index fails the whole call.
+    struct MaterialTextureIndices {
+        std::int32_t baseColor = -1;
+        std::int32_t metallicRoughness = -1;
+        std::int32_t normal = -1;
+        std::int32_t occlusion = -1;
+        std::int32_t emissive = -1;
+    };
+    std::int32_t addMaterial(const MaterialParams& params, const MaterialTextureIndices& textures);
+    // Rebinds an EXISTING material's textures (e.g. after new addTexture
+    // calls); rebuilds its bind groups for both frame slots. Waits for the GPU
+    // first, mirroring setEnvironment's stance: an in-flight frame may still
+    // reference the old bind group. False (material untouched) when
+    // materialIndex or any texture index is invalid.
+    bool setMaterialTextures(std::uint32_t materialIndex, const MaterialTextureIndices& textures);
+
     std::uint32_t meshCount() const;
     // Local-space bounds recorded at upload; null when `index` is out of range.
     const math::Aabb* meshLocalAabb(std::uint32_t index) const;
@@ -136,10 +162,25 @@ private:
     gpu::Ptr<gpu::Texture> makeSolidTexture(std::uint8_t r, std::uint8_t g, std::uint8_t b,
                                             std::uint8_t a);
     bool uploadMesh(const asset::MeshData& mesh, GpuMesh& out);
+    // Creates, uploads and generates the mip chain for one texture using
+    // `encoder`; shared by loadScene's batched loop and addTexture's own
+    // one-off encoder. Null on failure (bad dimensions or GPU resource
+    // creation failure).
+    gpu::Ptr<gpu::Texture> uploadTexture(gpu::CommandEncoder& encoder,
+                                         const asset::TextureData& tex);
+    // Resolves a MaterialTextureIndices against textures_: -1 per slot uses
+    // the built-in fallback, out-of-range fails the whole resolve (nullopt).
+    std::optional<MaterialTextures>
+    resolveMaterialTextures(const MaterialTextureIndices& indices) const;
     bool appendMaterial(const MaterialParams& params, const MaterialTextures& textures);
-    // Builds (or rebuilds) the shared-layout 48B factor buffers and bind groups
+    // Builds (or rebuilds) the shared-layout factor buffers and bind groups
     // for one material slot, across every frame slot.
     bool buildSharedMaterialSlots(std::size_t materialIndex);
+    // Rebuilds a custom-shader material's bind groups (both frame slots) from
+    // its existing pipeline/layout/factor buffers and the current
+    // materialTextures_[materialIndex]; used when only the textures change so
+    // a swap does not require recompiling the shader.
+    bool rebuildCustomMaterialGroups(std::size_t materialIndex);
     // Compiles `source` as this material's fragment shader and, on success,
     // rebuilds its pipeline/layout/buffers/groups in place. Leaves everything
     // untouched on failure.

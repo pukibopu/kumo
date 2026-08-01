@@ -34,7 +34,7 @@ shaderc::Reflection makeSharedReflection() {
          .binding = 6,
          .type = "uniform_buffer",
          .name = "MaterialFactors",
-         .bufferSize = 48},
+         .bufferSize = 64},
     };
     return reflection;
 }
@@ -102,7 +102,7 @@ TEST_CASE("setMismatch: a changed uniform buffer size is a mismatch") {
     const shaderc::Reflection shared = makeSharedReflection();
     shaderc::Reflection custom = makeSharedReflection();
     // set 1 binding 6 is MaterialFactors; grow it past its shared declared size.
-    custom.bindings[3].bufferSize = 64;
+    custom.bindings[3].bufferSize = 80;
 
     const auto mismatch = renderer::detail::setMismatch(custom, shared, 1);
     REQUIRE(mismatch.has_value());
@@ -179,8 +179,8 @@ TEST_CASE("setMismatch: adding a MaterialFactors member stays set 0/2 compatible
     REQUIRE(shared.has_value());
 
     const std::string variantSource =
-        replaceOnce(*source, "vec4 emissive;          // xyz\n}",
-                    "vec4 emissive;          // xyz\n    vec4 extra;\n}");
+        replaceOnce(*source, "vec4 uvTiling;          // xy uv scale, zw reserved\n}",
+                    "vec4 uvTiling;          // xy uv scale, zw reserved\n    vec4 extra;\n}");
     const auto variant = compilePbrFragVariant(variantSource, "variant.frag");
     REQUIRE(variant.has_value());
 
@@ -201,8 +201,8 @@ TEST_CASE("setMismatch: adding a MaterialFactors member stays set 0/2 compatible
     }
     REQUIRE(sharedFactors != nullptr);
     REQUIRE(variantFactors != nullptr);
-    CHECK(sharedFactors->bufferSize == 48);
-    CHECK(variantFactors->bufferSize > 48);
+    CHECK(sharedFactors->bufferSize == 64);
+    CHECK(variantFactors->bufferSize > 64);
 }
 
 TEST_CASE("sourceReferencesTime: absent, present and inside a comment") {

@@ -59,12 +59,15 @@ struct PerDrawData {
 };
 static_assert(sizeof(PerDrawData) == 128);
 
-// std140 mirror of MaterialFactors in pbr.frag.
+// std140 mirror of MaterialFactors in pbr.frag; uvTiling is the last
+// engine-written member, custom shaders append their own members after it.
 struct MaterialFactorsData {
     math::float4 baseColor{1.0f};
     math::float4 metallicRoughness{1.0f, 1.0f, 0.0f, 0.0f};
     math::float4 emissive{0.0f};
+    math::float4 uvTiling{1.0f, 1.0f, 0.0f, 0.0f};
 };
+static_assert(sizeof(MaterialFactorsData) == 64);
 
 MaterialFactorsData toFactors(const ForwardRenderer::MaterialParams& params) {
     return {
@@ -72,6 +75,7 @@ MaterialFactorsData toFactors(const ForwardRenderer::MaterialParams& params) {
                       params.baseColor[3]},
         .metallicRoughness = {params.metallic, params.roughness, 0.0f, 0.0f},
         .emissive = {params.emissive[0], params.emissive[1], params.emissive[2], 0.0f},
+        .uvTiling = {params.uvTiling[0], params.uvTiling[1], 0.0f, 0.0f},
     };
 }
 
@@ -339,6 +343,73 @@ std::int32_t ForwardRenderer::addMesh(const asset::MeshData& mesh) {
     return static_cast<std::int32_t>(meshes_.size() - 1);
 }
 
+gpu::Ptr<gpu::Texture> ForwardRenderer::uploadTexture(gpu::CommandEncoder& encoder,
+                                                      const asset::TextureData& tex) {
+    KUMO_ASSERT(device_ != nullptr);
+    if (tex.width == 0 || tex.height == 0 ||
+        tex.rgba.size() < static_cast<std::size_t>(tex.width) * tex.height * 4) {
+        return nullptr;
+    }
+    gpu::Ptr<gpu::Texture> texture = device_->createTexture({
+        .size = {tex.width, tex.height},
+        .format = tex.srgb ? gpu::TextureFormat::RGBA8UnormSrgb : gpu::TextureFormat::RGBA8Unorm,
+        .usage =
+            gpu::TextureUsage::Sampled | gpu::TextureUsage::CopySrc | gpu::TextureUsage::CopyDst,
+        .mipLevelCount = fullMipChain(tex.width, tex.height),
+    });
+    if (!texture) {
+        return nullptr;
+    }
+    device_->queue().writeTexture(*texture, tex.rgba.data(),
+                                  static_cast<std::uint64_t>(tex.width) * 4,
+                                  {tex.width, tex.height});
+    encoder.generateMipmaps(*texture);
+    return texture;
+}
+
+std::int32_t ForwardRenderer::addTexture(const asset::TextureData& texture) {
+    KUMO_ASSERT(device_ != nullptr);
+    gpu::Ptr<gpu::CommandEncoder> encoder = device_->queue().createCommandEncoder();
+    if (!encoder) {
+        return -1;
+    }
+    gpu::Ptr<gpu::Texture> uploaded = uploadTexture(*encoder, texture);
+    if (!uploaded) {
+        return -1;
+    }
+    encoder->finishAndSubmit();
+    device_->queue().waitIdle();
+    textures_.push_back(std::move(uploaded));
+    return static_cast<std::int32_t>(textures_.size() - 1);
+}
+
+std::optional<ForwardRenderer::MaterialTextures>
+ForwardRenderer::resolveMaterialTextures(const MaterialTextureIndices& indices) const {
+    const auto resolve = [&](std::int32_t index,
+                             const gpu::Ptr<gpu::Texture>& fallback) -> gpu::Ptr<gpu::Texture> {
+        return index >= 0 && static_cast<std::size_t>(index) < textures_.size()
+                   ? textures_[static_cast<std::size_t>(index)]
+                   : fallback;
+    };
+    // Any explicit (>= 0) index that misses textures_ fails the whole material
+    // instead of silently falling back, unlike -1 which means "use the default".
+    const auto outOfRange = [&](std::int32_t index) {
+        return index >= 0 && static_cast<std::size_t>(index) >= textures_.size();
+    };
+    if (outOfRange(indices.baseColor) || outOfRange(indices.metallicRoughness) ||
+        outOfRange(indices.normal) || outOfRange(indices.occlusion) ||
+        outOfRange(indices.emissive)) {
+        return std::nullopt;
+    }
+    return MaterialTextures{
+        .baseColor = resolve(indices.baseColor, defaultWhite_),
+        .metallicRoughness = resolve(indices.metallicRoughness, defaultWhite_),
+        .normal = resolve(indices.normal, defaultNormal_),
+        .occlusion = resolve(indices.occlusion, defaultWhite_),
+        .emissive = resolve(indices.emissive, defaultWhite_),
+    };
+}
+
 std::int32_t ForwardRenderer::addMaterial(const MaterialParams& params) {
     KUMO_ASSERT(device_ != nullptr);
     if (!materialLayout_ || !defaultWhite_ || !defaultNormal_) {
@@ -352,6 +423,72 @@ std::int32_t ForwardRenderer::addMaterial(const MaterialParams& params) {
         return -1;
     }
     return static_cast<std::int32_t>(materialGroups_.size() - 1);
+}
+
+std::int32_t ForwardRenderer::addMaterial(const MaterialParams& params,
+                                          const MaterialTextureIndices& textures) {
+    KUMO_ASSERT(device_ != nullptr);
+    if (!materialLayout_ || !defaultWhite_ || !defaultNormal_) {
+        return -1;
+    }
+    const std::optional<MaterialTextures> resolved = resolveMaterialTextures(textures);
+    if (!resolved || !appendMaterial(params, *resolved)) {
+        return -1;
+    }
+    return static_cast<std::int32_t>(materialGroups_.size() - 1);
+}
+
+bool ForwardRenderer::rebuildCustomMaterialGroups(std::size_t materialIndex) {
+    KUMO_ASSERT(device_ != nullptr);
+    KUMO_ASSERT(materialIndex < materialShaders_.size() && materialShaders_[materialIndex]);
+    const MaterialShaderRecord& record = *materialShaders_[materialIndex];
+    const MaterialTextures& textures = materialTextures_[materialIndex];
+    std::array<gpu::Ptr<gpu::BindGroup>, kFrameSlots> groups;
+    for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
+        groups[slot] = device_->createBindGroup({
+            .layout = record.materialLayout,
+            .entries = {{.binding = 0, .texture = textures.baseColor},
+                        {.binding = 1, .texture = textures.metallicRoughness},
+                        {.binding = 2, .texture = textures.normal},
+                        {.binding = 3, .texture = textures.occlusion},
+                        {.binding = 4, .texture = textures.emissive},
+                        {.binding = 5, .sampler = materialSampler_},
+                        {.binding = record.factorBufferBinding,
+                         .buffer = materialFactorBuffers_[materialIndex][slot]}},
+        });
+        if (!groups[slot]) {
+            return false;
+        }
+    }
+    materialGroups_[materialIndex] = std::move(groups);
+    return true;
+}
+
+bool ForwardRenderer::setMaterialTextures(std::uint32_t materialIndex,
+                                          const MaterialTextureIndices& textures) {
+    if (materialIndex >= materialParams_.size()) {
+        return false;
+    }
+    const std::optional<MaterialTextures> resolved = resolveMaterialTextures(textures);
+    if (!resolved) {
+        return false;
+    }
+    // An in-flight frame may still reference the old bind groups (mirrors
+    // setEnvironment's stance).
+    device_->queue().waitIdle();
+    const MaterialTextures previous = materialTextures_[materialIndex];
+    materialTextures_[materialIndex] = *resolved;
+    const bool rebuilt = materialShaders_[materialIndex]
+                             ? rebuildCustomMaterialGroups(materialIndex)
+                             : buildSharedMaterialSlots(materialIndex);
+    if (!rebuilt) {
+        // Restore the previous textures so a failed rebuild does not leave
+        // materialTextures_ pointing at a bind group that was never built.
+        materialTextures_[materialIndex] = previous;
+        logError("setMaterialTextures: bind group rebuild failed for material {}", materialIndex);
+        return false;
+    }
+    return true;
 }
 
 std::uint32_t ForwardRenderer::meshCount() const {
@@ -517,14 +654,18 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
                                                 .secondStage = true}});
     }
 
-    // Buffer is sized from reflection so custom MaterialFactors members past
-    // the 48B CPU struct exist on the GPU side; only the known 48B prefix is
-    // ever written, the rest stays zero (M6-B exposes a way to author it).
-    const std::uint32_t bufferSize =
-        std::max(factors->bufferSize, static_cast<std::uint32_t>(sizeof(MaterialFactorsData)));
+    // Buffer is sized from reflection exactly, so an older custom shader that
+    // never picked up uvTiling (still reflecting the pre-M6.98 48B block)
+    // gets a 48B buffer, not one padded to the current CPU struct: the
+    // engine-written prefix below is clamped to this size, so it never writes
+    // past what the shader itself declared (no stomping an appended member
+    // that happens to sit right after emissive).
+    const std::uint32_t bufferSize = factors->bufferSize;
     const MaterialFactorsData factorsData = toFactors(materialParams_[materialIndex]);
     std::vector<std::byte> payload(bufferSize, std::byte{0});
-    std::memcpy(payload.data(), &factorsData, sizeof(factorsData));
+    const std::size_t copySize =
+        std::min(sizeof(factorsData), static_cast<std::size_t>(bufferSize));
+    std::memcpy(payload.data(), &factorsData, copySize);
 
     const MaterialTextures& textures = materialTextures_[materialIndex];
     std::array<gpu::Ptr<gpu::Buffer>, kFrameSlots> buffers;
@@ -845,21 +986,10 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
 
     textures_.clear();
     for (const asset::TextureData& tex : sceneAsset.textures) {
-        gpu::Ptr<gpu::Texture> texture = device_->createTexture({
-            .size = {tex.width, tex.height},
-            .format =
-                tex.srgb ? gpu::TextureFormat::RGBA8UnormSrgb : gpu::TextureFormat::RGBA8Unorm,
-            .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::CopySrc |
-                     gpu::TextureUsage::CopyDst,
-            .mipLevelCount = fullMipChain(tex.width, tex.height),
-        });
+        gpu::Ptr<gpu::Texture> texture = uploadTexture(*encoder, tex);
         if (!texture) {
             return false;
         }
-        device_->queue().writeTexture(*texture, tex.rgba.data(),
-                                      static_cast<std::uint64_t>(tex.width) * 4,
-                                      {tex.width, tex.height});
-        encoder->generateMipmaps(*texture);
         textures_.push_back(std::move(texture));
     }
 
@@ -979,7 +1109,13 @@ void ForwardRenderer::flushDirtyMaterials() {
         }
         const MaterialFactorsData factors = toFactors(materialParams_[i]);
         if (gpu::Ptr<gpu::Buffer>& buffer = materialFactorBuffers_[i][frameSlot_]) {
-            device_->queue().writeBuffer(*buffer, 0, &factors, sizeof(factors));
+            // Clamped to the buffer's actual size: an older custom shader's
+            // factor buffer may be smaller than the current CPU struct (its
+            // reflection never grew to include uvTiling), and writing past it
+            // would overflow the buffer.
+            const std::uint64_t writeSize =
+                std::min<std::uint64_t>(sizeof(factors), buffer->size());
+            device_->queue().writeBuffer(*buffer, 0, &factors, writeSize);
         }
         materialDirty_[i][frameSlot_] = false;
     }

@@ -244,8 +244,8 @@ TEST_CASE("pbr.frag reflects the MaterialFactors uniform buffer size") {
         });
     REQUIRE(materialFactors != bindings.end());
     CHECK(materialFactors->type == "uniform_buffer");
-    // std140: 3 vec4 members (baseColor, metallicRoughness, emissive), 16 bytes each.
-    CHECK(materialFactors->bufferSize == 48);
+    // std140: 4 vec4 members (baseColor, metallicRoughness, emissive, uvTiling), 16 bytes each.
+    CHECK(materialFactors->bufferSize == 64);
 
     const auto baseColorTex =
         std::find_if(bindings.begin(), bindings.end(), [](const shaderc::ReflectionBinding& b) {

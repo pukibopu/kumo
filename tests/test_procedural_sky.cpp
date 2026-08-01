@@ -108,6 +108,22 @@ TEST_CASE("proceduralSky output is always finite") {
     }
 }
 
+TEST_CASE("proceduralSky clamps extreme radiance into half-float range") {
+    asset::ProceduralSkyDesc desc;
+    desc.sunIntensity = 1e30f;
+    desc.exposure = 100.0f;
+    desc.sunAngularRadiusDeg = 20.0f;
+    desc.zenithColor = {-5.0f, 0.3f, 0.6f}; // negative input must not survive either
+    desc.width = 32;
+    desc.height = 16;
+    const asset::HdrImage image = asset::proceduralSky(desc);
+    for (float v : image.rgba) {
+        CHECK(std::isfinite(v));
+        CHECK(v >= 0.0f);
+        CHECK(v <= 32768.0f);
+    }
+}
+
 TEST_CASE("proceduralSky falls back to a default direction on a zero sun vector") {
     asset::ProceduralSkyDesc desc;
     desc.sunDirection = {0.0f, 0.0f, 0.0f};

@@ -72,6 +72,14 @@ HdrImage proceduralSky(const ProceduralSkyDesc& desc) {
 
             color = color * desc.exposure;
 
+            // Baked into an RGBA16Float environment texture (half max 65504):
+            // clamp away negatives and overflow so no input combination can
+            // push Inf/NaN through the IBL convolutions.
+            constexpr float kMaxRadiance = 32768.0f;
+            color.x = std::clamp(color.x, 0.0f, kMaxRadiance);
+            color.y = std::clamp(color.y, 0.0f, kMaxRadiance);
+            color.z = std::clamp(color.z, 0.0f, kMaxRadiance);
+
             const std::size_t idx = (static_cast<std::size_t>(y) * image.width + x) * 4;
             image.rgba[idx + 0] = color.x;
             image.rgba[idx + 1] = color.y;

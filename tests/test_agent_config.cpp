@@ -245,6 +245,26 @@ TEST_CASE("agents.max_tool_rounds defaults to 24 and can be overridden") {
     CHECK(overridden->maxToolRounds == 40);
 }
 
+TEST_CASE("agents.max_tool_rounds below 2 is rejected") {
+    // The final round never executes tools, so 0 or 1 would silently disable
+    // the agent rather than limit it.
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "agents": { "max_tool_rounds": 0 }
+    })");
+    CHECK(!sandbox.load().has_value());
+
+    sandbox.writeConfig(R"({
+        "agents": { "max_tool_rounds": 1 }
+    })");
+    CHECK(!sandbox.load().has_value());
+
+    sandbox.writeConfig(R"({
+        "agents": { "max_tool_rounds": 2 }
+    })");
+    CHECK(sandbox.load().has_value());
+}
+
 TEST_CASE("KUMO_PROVIDER_TYPE switches the protocol and default base url") {
     ConfigSandbox sandbox;
     setenv("KUMO_PROVIDER_TYPE", "openai", 1);

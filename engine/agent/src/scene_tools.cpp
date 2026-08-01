@@ -1054,11 +1054,14 @@ std::string environmentSet(const SceneToolContext& context, const json& args) {
         !readNumber(args, "exposure", desc.exposure, error)) {
         return errorJson(error);
     }
-    if (args.contains("sun_intensity") && desc.sunIntensity < 0.0f) {
-        return errorJson("sun_intensity must be non-negative");
+    // Upper bounds keep the baked sky inside half-float range with margin;
+    // proceduralSky clamps as well, this layer exists so the model sees why.
+    if (args.contains("sun_intensity") &&
+        (desc.sunIntensity < 0.0f || desc.sunIntensity > 10000.0f)) {
+        return errorJson("sun_intensity must be between 0 and 10000");
     }
-    if (args.contains("exposure") && desc.exposure <= 0.0f) {
-        return errorJson("exposure must be positive");
+    if (args.contains("exposure") && (desc.exposure <= 0.0f || desc.exposure > 100.0f)) {
+        return errorJson("exposure must be positive and at most 100");
     }
     const math::float3& d = desc.sunDirection;
     if (d.x * d.x + d.y * d.y + d.z * d.z < 1e-8f) {
@@ -1470,12 +1473,12 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         R"({"type":"object","properties":{
 "preset":{"type":"string","enum":["clear_day","sunset","overcast","night","studio"],"description":"Default clear_day"},
 "sun_direction":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Direction the sunlight travels, must be non-zero"},
-"sun_intensity":{"type":"number","minimum":0},
+"sun_intensity":{"type":"number","minimum":0,"maximum":10000},
 "sun_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
 "zenith_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
 "horizon_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
 "ground_color":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
-"exposure":{"type":"number","description":"Must be positive"}}})",
+"exposure":{"type":"number","description":"Positive, at most 100"}}})",
         false,
         [](const SceneToolContext& ctx, const json& args) { return environmentSet(ctx, args); });
 

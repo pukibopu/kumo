@@ -774,6 +774,24 @@ TEST_CASE("environment_set rejects a zero sun_direction override") {
     CHECK(result["status"] == "error");
 }
 
+TEST_CASE("environment_set bounds sun_intensity and exposure") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    bool applied = false;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironment = [&applied](const asset::ProceduralSkyDesc&) {
+        applied = true;
+        return true;
+    };
+    registerSceneTools(registry, ctx);
+
+    CHECK(invokeOn(registry, "environment_set", R"({"sun_intensity":1e30})")["status"] == "error");
+    CHECK(invokeOn(registry, "environment_set", R"({"exposure":1000})")["status"] == "error");
+    CHECK(!applied);
+    CHECK(invokeOn(registry, "environment_set", R"({"sun_intensity":10000})")["status"] == "ok");
+    CHECK(applied);
+}
+
 TEST_CASE("scene_validate flags a floating entity but not one resting on the ground") {
     Fixture f;
     f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,5,0]})");

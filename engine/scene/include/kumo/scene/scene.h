@@ -32,6 +32,16 @@ public:
     Light* light(std::size_t index) { return index < lights_.size() ? &lights_[index] : nullptr; }
     void clearLights() { lights_.clear(); }
 
+    // False when index is out of range; remaining lights shift down to fill
+    // the gap (the light array has no stable ids, unlike SlotMap entities).
+    bool removeLight(std::size_t index) {
+        if (index >= lights_.size()) {
+            return false;
+        }
+        lights_.erase(lights_.begin() + static_cast<std::ptrdiff_t>(index));
+        return true;
+    }
+
 private:
     std::vector<Light> lights_;
 };

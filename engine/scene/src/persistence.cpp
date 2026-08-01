@@ -37,18 +37,23 @@ json materialJson(const SavedMaterial& material) {
     return {{"base_color", numberArray(material.baseColor, 4)},
             {"metallic", material.metallic},
             {"roughness", material.roughness},
-            {"emissive", numberArray(material.emissive, 3)}};
+            {"emissive", numberArray(material.emissive, 3)},
+            {"uv_tiling", numberArray(material.uvTiling, 2)}};
 }
 
 json environmentJson(const SavedEnvironment& env) {
-    return {{"zenith_color", numberArray(env.zenithColor, 3)},
-            {"horizon_color", numberArray(env.horizonColor, 3)},
-            {"ground_color", numberArray(env.groundColor, 3)},
-            {"sun_direction", numberArray(env.sunDirection, 3)},
-            {"sun_color", numberArray(env.sunColor, 3)},
-            {"sun_intensity", env.sunIntensity},
-            {"sun_angular_radius_deg", env.sunAngularRadiusDeg},
-            {"exposure", env.exposure}};
+    json out{{"zenith_color", numberArray(env.zenithColor, 3)},
+             {"horizon_color", numberArray(env.horizonColor, 3)},
+             {"ground_color", numberArray(env.groundColor, 3)},
+             {"sun_direction", numberArray(env.sunDirection, 3)},
+             {"sun_color", numberArray(env.sunColor, 3)},
+             {"sun_intensity", env.sunIntensity},
+             {"sun_angular_radius_deg", env.sunAngularRadiusDeg},
+             {"exposure", env.exposure}};
+    if (env.file.has_value()) {
+        out["file"] = *env.file;
+    }
+    return out;
 }
 
 json lightJson(const Light& light) {
@@ -168,7 +173,8 @@ bool readMaterial(const json& obj, SavedMaterial& material, std::string& error) 
     return readNumbers(obj, "base_color", material.baseColor, 4, error) &&
            readFloat(obj, "metallic", material.metallic, error) &&
            readFloat(obj, "roughness", material.roughness, error) &&
-           readNumbers(obj, "emissive", material.emissive, 3, error);
+           readNumbers(obj, "emissive", material.emissive, 3, error) &&
+           readNumbers(obj, "uv_tiling", material.uvTiling, 2, error);
 }
 
 bool readEnvironment(const json& obj, SavedEnvironment& env, std::string& error) {
@@ -179,7 +185,8 @@ bool readEnvironment(const json& obj, SavedEnvironment& env, std::string& error)
            readNumbers(obj, "sun_color", env.sunColor, 3, error) &&
            readFloat(obj, "sun_intensity", env.sunIntensity, error) &&
            readFloat(obj, "sun_angular_radius_deg", env.sunAngularRadiusDeg, error) &&
-           readFloat(obj, "exposure", env.exposure, error);
+           readFloat(obj, "exposure", env.exposure, error) &&
+           readOptionalString(obj, "file", env.file, error);
 }
 
 std::expected<Camera, std::string> readCamera(const json& obj) {
@@ -240,7 +247,9 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
         !readInt(obj, "mesh_index", entity.meshIndex, error) ||
         !readInt(obj, "material_index", entity.materialIndex, error) ||
         !readString(obj, "primitive", entity.primitive, error) ||
-        !readFloat(obj, "primitive_size", entity.primitiveSize, error)) {
+        !readFloat(obj, "primitive_size", entity.primitiveSize, error) ||
+        !readString(obj, "model", entity.model, error) ||
+        !readInt(obj, "model_mesh", entity.modelMesh, error)) {
         return std::unexpected(error);
     }
     if (obj.contains("material")) {
@@ -276,6 +285,10 @@ std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
         if (!entity.primitive.empty()) {
             e["primitive"] = entity.primitive;
             e["primitive_size"] = entity.primitiveSize;
+        }
+        if (!entity.model.empty()) {
+            e["model"] = entity.model;
+            e["model_mesh"] = entity.modelMesh;
         }
         if (entity.materialIndex >= 0 && materials) {
             if (const std::optional<SavedMaterial> material = materials(entity.materialIndex);

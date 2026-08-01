@@ -116,7 +116,10 @@ final class KumoMetalView: NSView {
     // framing whether zoomed in on a small prop or looking at a whole scene.
     private func applyKeyboardPan(engine: KumoEngine) {
         let now = CACurrentMediaTime()
-        let dt = lastPanTime.map { now - $0 } ?? 0
+        // Clamped: a modal panel or system sleep while a key is held stalls the
+        // ticks, and an unbounded dt would turn the backlog into one giant pan
+        // that teleports the camera out of the scene.
+        let dt = min(lastPanTime.map { now - $0 } ?? 0, 0.1)
         lastPanTime = now
         guard !pressedKeys.isEmpty, dt > 0 else { return }
 

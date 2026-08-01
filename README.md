@@ -10,7 +10,7 @@ macOS / iPad 原生 Metal PBR 渲染器，内置 LLM 驱动的场景与 shader �
 - Cook-Torrance PBR、IBL、HDR + ACES、MSAA 4x、平行光阴影
 - glTF 2.0 静态场景加载
 - GLSL 单源 → SPIR-V / MSL 交叉编译，支持运行时热重载
-- 场景助手：自然语言增删实体、调整灯光 / 相机 / 材质
+- 场景助手：自然语言增删实体、调整灯光 / 相机 / 材质 / 天空环境，内置构图与布光指导、场景自检
 - Shader 助手：自然语言生成材质 shader，编译报错自动修正后热载入
 
 进度见 [docs/milestones.md](docs/milestones.md)。
@@ -52,7 +52,7 @@ viewer 以 Cook-Torrance PBR + IBL 渲染 glTF 场景（MSAA 4x、ACES tone mapp
 
 ## 助手
 
-场景助手：自然语言增删实体、调整变换/材质/灯光/相机。Shader 助手：「让头盔变成肥皂泡彩虹色」级别的自然语言描述 → 生成该材质专属的 fragment shader，编译错误自动修正，只影响目标物体。
+场景助手：自然语言增删实体、调整变换/材质/灯光/相机/天空环境（clear_day / sunset / overcast / night / studio 预设 + 参数覆盖，重烘焙 IBL），建完自动用 `scene_validate` 自检悬浮、穿插与出画。Shader 助手：「让头盔变成肥皂泡彩虹色」级别的自然语言描述 → 生成该材质专属的 fragment shader，编译错误自动修正，只影响目标物体。
 
 接入协议双轨（`provider.type`），且两个助手可各配端点（`agents.scene.*` / `agents.shader.*` 按字段覆盖全局）：
 
@@ -69,7 +69,7 @@ viewer 以 Cook-Torrance PBR + IBL 渲染 glTF 场景（MSAA 4x、ACES tone mapp
 
 ### MCP
 
-`viewer --mcp` 经 stdio 提供 MCP 端点，工具面与内嵌助手同源（场景七工具 + shader 双工具 + 离屏截图工具 `viewer_screenshot`）：
+`viewer --mcp` 经 stdio 提供 MCP 端点，工具面与内嵌助手同源（场景十三工具 + shader 双工具 + 离屏截图工具 `viewer_screenshot`）：
 
 ```sh
 claude mcp add kumo -- "$(pwd)/build/macos-debug/apps/viewer/viewer" --mcp

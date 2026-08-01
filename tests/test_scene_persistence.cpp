@@ -222,6 +222,56 @@ TEST_CASE("save/parse round trip preserves the environment when present") {
     CHECK(roundTripped.exposure == 1.4f);
 }
 
+TEST_CASE("save/parse round trip preserves a material's custom shader source") {
+    scene::Scene scene;
+
+    scene::Entity shaded;
+    shaded.name = "shaded";
+    shaded.meshIndex = 0;
+    shaded.materialIndex = 0;
+    scene.entities.insert(shaded);
+
+    scene::Entity plain;
+    plain.name = "plain";
+    plain.meshIndex = 1;
+    plain.materialIndex = 1;
+    scene.entities.insert(plain);
+
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const std::string customSource = "// custom fragment shader\nvoid main() {}\n";
+    const scene::ShaderLookup shaders = [&](std::int32_t index) -> std::optional<std::string> {
+        return index == 0 ? std::make_optional(customSource) : std::nullopt;
+    };
+
+    const std::string json =
+        scene::saveSceneJson(scene, "assets/model.glb", noMaterials, std::nullopt, shaders);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 2);
+
+    REQUIRE(parsed->entities[0].shaderSource.has_value());
+    CHECK(*parsed->entities[0].shaderSource == customSource);
+    CHECK(!parsed->entities[1].shaderSource.has_value());
+}
+
+TEST_CASE("save/parse round trip omits shader_source when the lookup returns nullopt") {
+    scene::Scene scene;
+    scene::Entity entity;
+    entity.name = "plain";
+    entity.materialIndex = 0;
+    scene.entities.insert(entity);
+
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const scene::ShaderLookup noShaders = [](std::int32_t) { return std::nullopt; };
+    const std::string json =
+        scene::saveSceneJson(scene, "assets/model.glb", noMaterials, std::nullopt, noShaders);
+    CHECK(json.find("\"shader_source\"") == std::string::npos);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    CHECK(!parsed->entities[0].shaderSource.has_value());
+}
+
 TEST_CASE("save/parse round trip omits the environment key when absent") {
     scene::Scene scene;
     const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };

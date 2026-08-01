@@ -137,6 +137,20 @@ bool readString(const json& obj, const char* key, std::string& out, std::string&
     return true;
 }
 
+bool readOptionalString(const json& obj, const char* key, std::optional<std::string>& out,
+                        std::string& error) {
+    const auto it = obj.find(key);
+    if (it == obj.end()) {
+        return true;
+    }
+    if (!it->is_string()) {
+        error = std::format("{} must be a string", key);
+        return false;
+    }
+    out = it->get<std::string>();
+    return true;
+}
+
 bool readInt(const json& obj, const char* key, std::int32_t& out, std::string& error) {
     const auto it = obj.find(key);
     if (it == obj.end()) {
@@ -239,6 +253,9 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
         }
         saved.material = material;
     }
+    if (!readOptionalString(obj, "shader_source", saved.shaderSource, error)) {
+        return std::unexpected(error);
+    }
     return saved;
 }
 
@@ -246,7 +263,8 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
 
 std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
                           const MaterialLookup& materials,
-                          const std::optional<SavedEnvironment>& environment) {
+                          const std::optional<SavedEnvironment>& environment,
+                          const ShaderLookup& shaders) {
     json entities = json::array();
     scene.entities.forEach([&](EntityId, const Entity& entity) {
         json e{{"name", entity.name},
@@ -263,6 +281,12 @@ std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
             if (const std::optional<SavedMaterial> material = materials(entity.materialIndex);
                 material.has_value()) {
                 e["material"] = materialJson(*material);
+            }
+        }
+        if (entity.materialIndex >= 0 && shaders) {
+            if (const std::optional<std::string> source = shaders(entity.materialIndex);
+                source.has_value()) {
+                e["shader_source"] = *source;
             }
         }
         entities.push_back(std::move(e));

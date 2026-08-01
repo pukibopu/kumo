@@ -1,4 +1,5 @@
 add_library(kumo_core STATIC
+    src/asset_name.cpp
     src/assert.cpp
     src/file.cpp
     src/file_watcher.cpp

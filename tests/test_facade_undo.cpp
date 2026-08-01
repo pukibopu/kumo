@@ -3,8 +3,11 @@
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/facade/undo_stack.h>
 
+#include <vector>
+
 using namespace kumo;
 using namespace kumo::facade;
+using MaterialTextureIndices = renderer::ForwardRenderer::MaterialTextureIndices;
 
 namespace {
 
@@ -211,6 +214,39 @@ TEST_CASE("SceneState::environment equality gates whether applySceneState would 
     const EnvironmentSource file{.file = "sunset.hdr"};
     b.environment = file;
     CHECK(a.environment != b.environment); // a procedural sky vs. a named HDR file
+}
+
+TEST_CASE("MaterialTextureIndices equality distinguishes any differing slot") {
+    MaterialTextureIndices a;
+    MaterialTextureIndices b;
+    CHECK(a == b); // both default-constructed (-1 in every slot)
+
+    b.baseColor = 3;
+    CHECK(a != b);
+
+    b = a;
+    b.emissive = 7;
+    CHECK(a != b); // a slot other than baseColor also counts
+}
+
+TEST_CASE("SceneState::materialTextures round-trips through undo/redo like every other field") {
+    // Struct-level only (ADR 0044 follow-up): no GPU renderer here, just the
+    // field capture/apply plumbing SceneState/UndoStack already exercise for
+    // materials/shaderSources above; EngineRuntime::captureSceneState/
+    // applySceneState wire this field to renderer_.materialTextureIndices()/
+    // setMaterialTextures() outside kumo_tests' reach.
+    Fixture f;
+    f.current.materialTextures = {MaterialTextureIndices{.baseColor = 1}};
+    f.stack.beginPending("bind");
+    f.current.materialTextures[0].baseColor = 2;
+    f.stack.commitPending();
+
+    REQUIRE(f.stack.undo());
+    REQUIRE(f.current.materialTextures.size() == 1);
+    CHECK(f.current.materialTextures[0].baseColor == 1);
+
+    REQUIRE(f.stack.redo());
+    CHECK(f.current.materialTextures[0].baseColor == 2);
 }
 
 TEST_CASE("UndoStack: redo mirrors undo, moving state forward and back to undo") {

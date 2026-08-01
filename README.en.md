@@ -12,6 +12,7 @@ A native Metal PBR renderer for macOS / iPad with an LLM-powered scene and shade
 - Single-source GLSL → SPIR-V / MSL cross-compilation with runtime hot reload
 - Scene assistant: add/remove entities, tweak lights, camera, materials and the sky environment in natural language, with built-in composition guidance, scene validation and screenshot self-review
 - Shader assistant: generate material shaders from natural language, self-correcting on compile errors, hot-reloaded live
+- Real asset library: textures, glTF models and HDRI environments (`./tools/fetch_assets.sh` fetches a CC0 starter pack), preferred by the assistants over procedural geometry
 
 See [docs/milestones.md](docs/milestones.md) for progress.
 
@@ -69,7 +70,7 @@ Two wire protocols (`provider.type`), and each assistant can point at its own en
 
 ### MCP
 
-`viewer --mcp` serves an MCP endpoint over stdio, with the same tool set as the embedded assistants (the thirteen scene tools, the two shader tools, and an offscreen `viewer_screenshot` tool):
+`viewer --mcp` serves an MCP endpoint over stdio, with the same tool set as the embedded assistants (the sixteen scene tools, the two shader tools, and an offscreen `viewer_screenshot` tool):
 
 ```sh
 claude mcp add kumo -- "$(pwd)/build/macos-debug/apps/viewer/viewer" --mcp

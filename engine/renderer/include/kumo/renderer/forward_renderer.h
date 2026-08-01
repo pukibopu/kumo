@@ -65,6 +65,7 @@ public:
         std::int32_t normal = -1;
         std::int32_t occlusion = -1;
         std::int32_t emissive = -1;
+        bool operator==(const MaterialTextureIndices&) const = default;
     };
     std::int32_t addMaterial(const MaterialParams& params, const MaterialTextureIndices& textures);
     // Rebinds an EXISTING material's textures (e.g. after new addTexture
@@ -81,6 +82,10 @@ public:
     std::uint32_t defaultMaterialIndex() const;
     const MaterialParams* materialParams(std::uint32_t index) const;
     bool setMaterialParams(std::uint32_t index, const MaterialParams& params);
+    // Indices as last bound via addMaterial/setMaterialTextures (-1 per slot =
+    // built-in fallback); default-constructed (all -1) when `index` is out of
+    // range, for undo/redo snapshot comparisons (ADR 0044).
+    MaterialTextureIndices materialTextureIndices(std::uint32_t index) const;
 
     // Compiles and installs a material-private fragment shader over the shared
     // pbr vertex stage (ADR 0011). Sets 0 and 2 must stay reflection-identical
@@ -177,7 +182,8 @@ private:
     // the built-in fallback, out-of-range fails the whole resolve (nullopt).
     std::optional<MaterialTextures>
     resolveMaterialTextures(const MaterialTextureIndices& indices) const;
-    bool appendMaterial(const MaterialParams& params, const MaterialTextures& textures);
+    bool appendMaterial(const MaterialParams& params, const MaterialTextures& textures,
+                        const MaterialTextureIndices& indices);
     // Builds (or rebuilds) the shared-layout factor buffers and bind groups
     // for one material slot, across every frame slot.
     bool buildSharedMaterialSlots(std::size_t materialIndex);
@@ -263,6 +269,12 @@ private:
     // Original textures a material was created with; rebuilds (custom shader
     // install/clear, hot-reload layout change) recreate bind groups from these.
     std::vector<MaterialTextures> materialTextures_;
+    // Indices materialTextures_ was resolved from (addTexture-list indices, -1
+    // = fallback); mirrors materialTextures_ 1:1. Exists only so undo/redo can
+    // snapshot/compare texture bindings without holding GPU texture handles
+    // (SceneState, ADR 0044) — materialTextures_ itself stays the source of
+    // truth for rendering.
+    std::vector<MaterialTextureIndices> materialTextureIndices_;
     // nullopt when the material uses the shared pbr pipeline.
     std::vector<std::optional<MaterialShaderRecord>> materialShaders_;
     // Sentinel material for entities without one; recorded explicitly so that

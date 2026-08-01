@@ -1,7 +1,9 @@
 #include <doctest/doctest.h>
 
+#include <kumo/agent/entity_id.h>
 #include <kumo/agent/scene_tools.h>
 #include <kumo/agent/tool_registry.h>
+#include <kumo/asset/asset.h>
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/math/math.h>
 #include <kumo/scene/scene.h>
@@ -9,7 +11,10 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <expected>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,15 +57,46 @@ bool hasFinding(const json& findings, const char* check) {
     return false;
 }
 
+// Removed on destruction; each test gets a fresh, non-colliding directory
+// (mirrors test_texture_set.cpp's TempDir, duplicated locally since it is
+// private to that translation unit).
+struct TempDir {
+    std::filesystem::path path;
+    explicit TempDir(const char* name) : path(std::filesystem::temp_directory_path() / name) {
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() { std::filesystem::remove_all(path); }
+};
+
+void touch(const std::filesystem::path& path) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream(path).put('x');
+}
+
+// One flat-colored RGBA8 image, same helper as test_texture_set.cpp: real
+// pixel data is only needed where loadTextureSet must actually succeed.
+std::vector<std::uint8_t> flatPixels(std::uint32_t width, std::uint32_t height,
+                                     std::uint8_t value) {
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+    for (std::size_t i = 0; i < pixels.size(); i += 4) {
+        pixels[i + 0] = value;
+        pixels[i + 1] = value;
+        pixels[i + 2] = value;
+        pixels[i + 3] = 255;
+    }
+    return pixels;
+}
+
 } // namespace
 
-TEST_CASE("scene tools register all thirteen with object schemas") {
+TEST_CASE("scene tools register all sixteen with object schemas") {
     Fixture f;
-    const char* expected[] = {"scene_list",          "scene_add_entity",     "scene_add_entities",
-                              "scene_remove_entity", "scene_set_transform",  "camera_set",
-                              "light_set",           "light_remove",         "material_set_param",
-                              "scene_define_group",  "scene_instance_group", "environment_set",
-                              "scene_validate"};
+    const char* expected[] = {
+        "scene_list",         "asset_list",           "scene_add_entity",    "scene_add_entities",
+        "scene_add_model",    "scene_remove_entity",  "scene_set_transform", "camera_set",
+        "light_set",          "light_remove",         "material_set_param",  "material_set_texture",
+        "scene_define_group", "scene_instance_group", "environment_set",     "scene_validate"};
     for (const char* name : expected) {
         const ToolDef* def = f.registry.find(name);
         REQUIRE_MESSAGE(def != nullptr, name);
@@ -74,10 +110,13 @@ TEST_CASE("scene tools register all thirteen with object schemas") {
     CHECK(f.registry.find("light_remove")->destructive);
     CHECK(!f.registry.find("scene_add_entity")->destructive);
     CHECK(!f.registry.find("scene_add_entities")->destructive);
+    CHECK(!f.registry.find("scene_add_model")->destructive);
     CHECK(!f.registry.find("scene_define_group")->destructive);
     CHECK(!f.registry.find("scene_instance_group")->destructive);
     CHECK(!f.registry.find("environment_set")->destructive);
     CHECK(!f.registry.find("scene_validate")->destructive);
+    CHECK(!f.registry.find("asset_list")->destructive);
+    CHECK(!f.registry.find("material_set_texture")->destructive);
 }
 
 TEST_CASE("registerSceneListTool registers exactly scene_list") {
@@ -865,4 +904,294 @@ TEST_CASE("scene_validate flags an entity behind the camera as out of frustum, u
         }
     }
     CHECK(flagged);
+}
+
+// --- asset_list -------------------------------------------------------
+
+TEST_CASE("asset_list reports unset assetDir as unsupported") {
+    Fixture f; // default context leaves assetDir empty
+    const json result = f.invoke("asset_list", "");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("not configured") != std::string::npos);
+}
+
+TEST_CASE("asset_list scans textures, models and env, sorted deterministically") {
+    TempDir dir("kumo_scene_tools_asset_list");
+    touch(dir.path / "textures" / "sand" / "albedo.png");
+    touch(dir.path / "textures" / "sand" / "normal.png");
+    touch(dir.path / "textures" / "empty" / "readme.txt"); // no recognized maps, excluded
+    touch(dir.path / "models" / "Tree.glb");
+    touch(dir.path / "env" / "day.hdr");
+
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.assetDir = dir.path;
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "asset_list");
+    REQUIRE(result["status"] == "ok");
+    REQUIRE(result["textures"].size() == 1);
+    CHECK(result["textures"][0]["name"] == "sand");
+    REQUIRE(result["textures"][0]["maps"].size() == 2);
+    CHECK(result["textures"][0]["maps"][0] == "albedo");
+    CHECK(result["textures"][0]["maps"][1] == "normal");
+    REQUIRE(result["models"].size() == 1);
+    CHECK(result["models"][0] == "Tree");
+    REQUIRE(result["env"].size() == 1);
+    CHECK(result["env"][0] == "day.hdr");
+    CHECK(!result.contains("note"));
+}
+
+TEST_CASE("asset_list on a configured but empty library reports empty arrays with a note") {
+    TempDir dir("kumo_scene_tools_asset_list_empty");
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.assetDir = dir.path;
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "asset_list");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["textures"].empty());
+    CHECK(result["models"].empty());
+    CHECK(result["env"].empty());
+    CHECK(result.contains("note"));
+}
+
+// --- material_set_texture ----------------------------------------------
+
+TEST_CASE("material_set_texture requires the entity to already have a material") {
+    Fixture f;
+    // No renderer, so scene_add_entity leaves materialIndex at -1.
+    f.invoke("scene_add_entity", R"({"primitive":"cube"})");
+    const json result = f.invoke("material_set_texture", R"({"entity_id":"0:0","texture":"sand"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("material") != std::string::npos);
+}
+
+TEST_CASE("material_set_texture reports an unknown set and lists available names") {
+    TempDir dir("kumo_scene_tools_material_texture_unknown");
+    touch(dir.path / "textures" / "sand" / "albedo.png");
+
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.assetDir = dir.path;
+    registerSceneTools(registry, ctx);
+
+    invokeOn(registry, "scene_add_entity", R"({"primitive":"cube"})");
+    scene::Entity* entity = scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    entity->materialIndex = 0; // only "has a material" matters for this check
+
+    const json result =
+        invokeOn(registry, "material_set_texture", R"({"entity_id":"0:0","texture":"bogus"})");
+    CHECK(result["status"] == "error");
+    const std::string message = result["message"].get<std::string>();
+    CHECK(message.find("unknown texture set") != std::string::npos);
+    CHECK(message.find("sand") != std::string::npos);
+}
+
+TEST_CASE("material_set_texture without a renderer reports a structured error") {
+    TempDir dir("kumo_scene_tools_material_texture_no_renderer");
+    std::filesystem::create_directories(dir.path / "textures" / "sand");
+    const std::vector<std::uint8_t> albedo = flatPixels(2, 2, 200);
+    REQUIRE(asset::writePng(dir.path / "textures" / "sand" / "albedo.png", 2, 2, albedo.data()));
+
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.assetDir = dir.path;
+    registerSceneTools(registry, ctx);
+
+    invokeOn(registry, "scene_add_entity", R"({"primitive":"cube"})");
+    scene::Entity* entity = scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    entity->materialIndex = 0;
+
+    const json result =
+        invokeOn(registry, "material_set_texture", R"({"entity_id":"0:0","texture":"sand"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("renderer") != std::string::npos);
+}
+
+TEST_CASE("material_set_texture rejects traversal/absolute/hidden texture names") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube"})");
+    scene::Entity* entity = f.scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    entity->materialIndex = 0;
+
+    for (const char* bad : {"../x", "a/b", "/tmp/x", ".hidden"}) {
+        const json result = f.invoke("material_set_texture",
+                                     std::format(R"({{"entity_id":"0:0","texture":"{}"}})", bad));
+        CHECK(result["status"] == "error");
+        CHECK(result["message"] == "asset names must be plain names from asset_list, not paths");
+    }
+}
+
+TEST_CASE("material_set_texture rejects an invalid tiling value") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube"})");
+    scene::Entity* entity = f.scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    entity->materialIndex = 0;
+
+    const json result =
+        f.invoke("material_set_texture", R"({"entity_id":"0:0","texture":"sand","tiling":-1})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("tiling") != std::string::npos);
+}
+
+// --- scene_add_model -----------------------------------------------------
+
+TEST_CASE("scene_add_model reports unsupported without an instantiateModel callback") {
+    Fixture f; // default context leaves instantiateModel null
+    const json result = f.invoke("scene_add_model", R"({"model":"Avocado","position":[0,0,0]})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("not available") != std::string::npos);
+}
+
+TEST_CASE("scene_add_model rejects a non-uniform scale") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.instantiateModel =
+        [](const scene::Transform&,
+           std::string_view) -> std::expected<std::vector<std::string>, std::string> {
+        return std::vector<std::string>{"0:0"};
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "scene_add_model",
+                                 R"({"model":"Avocado","position":[0,0,0],"scale":[1,1,0.5]})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("uniform") != std::string::npos);
+}
+
+TEST_CASE("scene_add_model rejects traversal/absolute/hidden model names without invoking the "
+          "callback") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    bool called = false;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.instantiateModel =
+        [&called](const scene::Transform&,
+                  std::string_view) -> std::expected<std::vector<std::string>, std::string> {
+        called = true;
+        return std::vector<std::string>{"0:0"};
+    };
+    registerSceneTools(registry, ctx);
+
+    for (const char* bad : {"../x", "a/b", "/tmp/x", ".hidden"}) {
+        const json result = invokeOn(registry, "scene_add_model",
+                                     std::format(R"({{"model":"{}","position":[0,0,0]}})", bad));
+        CHECK(result["status"] == "error");
+        CHECK(result["message"] == "asset names must be plain names from asset_list, not paths");
+    }
+    CHECK(!called);
+}
+
+TEST_CASE("scene_add_model returns entity_ids from the callback and renames on request") {
+    scene::Scene scene;
+    scene::Entity node;
+    node.name = "Avocado_mesh0";
+    const scene::EntityId nodeId = scene.entities.insert(node);
+
+    ToolRegistry registry;
+    std::optional<scene::Transform> capturedRoot;
+    std::optional<std::string> capturedModel;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.instantiateModel =
+        [&](const scene::Transform& root,
+            std::string_view model) -> std::expected<std::vector<std::string>, std::string> {
+        capturedRoot = root;
+        capturedModel = std::string(model);
+        return std::vector<std::string>{formatEntityId(nodeId)};
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result =
+        invokeOn(registry, "scene_add_model",
+                 R"({"model":"Avocado","name":"fruit","position":[1,2,3],"scale":2})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["model"] == "Avocado");
+    REQUIRE(result["entities"].size() == 1);
+    CHECK(result["entities"][0] == formatEntityId(nodeId));
+
+    REQUIRE(capturedRoot.has_value());
+    CHECK(capturedRoot->position.x == doctest::Approx(1.0f));
+    CHECK(capturedRoot->scale.x == doctest::Approx(2.0f));
+    REQUIRE(capturedModel.has_value());
+    CHECK(*capturedModel == "Avocado");
+
+    // The entity the fake callback "created" is renamed from the model's own
+    // node name to the caller's chosen prefix.
+    const scene::Entity* renamed = scene.entities.get(nodeId);
+    REQUIRE(renamed != nullptr);
+    CHECK(renamed->name == "fruit_mesh0");
+}
+
+// --- environment_set file support ----------------------------------------
+
+TEST_CASE("environment_set rejects file combined with a procedural field") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironment = [](const asset::ProceduralSkyDesc&) { return true; };
+    ctx.applyEnvironmentFile = [](const std::string&) { return true; };
+    registerSceneTools(registry, ctx);
+
+    const json result =
+        invokeOn(registry, "environment_set", R"({"file":"day.hdr","preset":"sunset"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("mutually exclusive") != std::string::npos);
+}
+
+TEST_CASE("environment_set rejects traversal/absolute/hidden file names without invoking the "
+          "callback") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    bool called = false;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironmentFile = [&called](const std::string&) {
+        called = true;
+        return true;
+    };
+    registerSceneTools(registry, ctx);
+
+    for (const char* bad : {"../x", "a/b", "/tmp/x", ".hidden"}) {
+        const json result =
+            invokeOn(registry, "environment_set", std::format(R"({{"file":"{}"}})", bad));
+        CHECK(result["status"] == "error");
+        CHECK(result["message"] == "asset names must be plain names from asset_list, not paths");
+    }
+    CHECK(!called);
+}
+
+TEST_CASE("environment_set routes file to the applyEnvironmentFile callback") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    std::optional<std::string> captured;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironmentFile = [&captured](const std::string& file) {
+        captured = file;
+        return true;
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "environment_set", R"({"file":"day.hdr"})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["file"] == "day.hdr");
+    REQUIRE(captured.has_value());
+    CHECK(*captured == "day.hdr");
+}
+
+TEST_CASE("environment_set reports unsupported for file without an applyEnvironmentFile "
+          "callback") {
+    Fixture f; // default context leaves applyEnvironmentFile null
+    const json result = f.invoke("environment_set", R"({"file":"day.hdr"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("not available") != std::string::npos);
 }

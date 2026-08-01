@@ -27,6 +27,11 @@ struct SceneState {
     scene::Scene world;
     std::vector<renderer::ForwardRenderer::MaterialParams> materials;
     std::vector<std::optional<std::string>> shaderSources;
+    // Texture bindings (ADR 0044 follow-up): renderer texture indices never
+    // get reclaimed within a session (same boundary materials/shaderSources
+    // above already rely on), so a snapshot's indices stay valid to reapply
+    // as long as no loadScene happened in between.
+    std::vector<renderer::ForwardRenderer::MaterialTextureIndices> materialTextures;
     // nullopt means "the loaded startup HDR is active, not an environment_set
     // choice"; applying this snapshot only re-bakes when it differs from the
     // current value (EnvironmentSource::operator== is defaulted), so undoing

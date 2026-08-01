@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <kumo/core/asset_name.h>
 #include <kumo/core/file.h>
 #include <kumo/core/file_watcher.h>
 
@@ -63,6 +64,22 @@ TEST_CASE("FileWatcher fires once when mtime changes") {
     CHECK(fires == 1);
 
     fs::remove(path, ec);
+}
+
+TEST_CASE("isPlainAssetName accepts ordinary names, rejects traversal and hidden names") {
+    CHECK(kumo::isPlainAssetName("sand"));
+    CHECK(kumo::isPlainAssetName("Damaged_Helmet-01"));
+    CHECK(kumo::isPlainAssetName("day.hdr"));
+
+    CHECK_FALSE(kumo::isPlainAssetName(""));
+    CHECK_FALSE(kumo::isPlainAssetName("."));
+    CHECK_FALSE(kumo::isPlainAssetName(".."));
+    CHECK_FALSE(kumo::isPlainAssetName(".hidden"));
+    CHECK_FALSE(kumo::isPlainAssetName("../x"));
+    CHECK_FALSE(kumo::isPlainAssetName("a/b"));
+    CHECK_FALSE(kumo::isPlainAssetName("a\\b"));
+    CHECK_FALSE(kumo::isPlainAssetName("/tmp/x"));
+    CHECK_FALSE(kumo::isPlainAssetName("models/../../etc/passwd"));
 }
 
 TEST_CASE("FileWatcher fires when a missing file appears") {

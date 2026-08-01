@@ -116,7 +116,7 @@ void main() {
         vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 1e-4);
         vec3 kd = (1.0 - F) * (1.0 - metallic);
 
-        float shadow = i == int(frame.shadowParams.w) ? kumoShadowPcf(vWorldPos) : 1.0;
+        float shadow = i == int(frame.shadowParams.w) ? kumoShadowPcf(vWorldPos, N) : 1.0;
         vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation * shadow;
         direct += (kd * albedo / PI + specular) * radiance * NdotL;
     }

@@ -185,6 +185,9 @@ private:
     rhi::Ptr<rhi::Sampler> iblSampler_;
     rhi::Ptr<rhi::Sampler> tonemapSampler_;
     rhi::Ptr<rhi::Sampler> shadowSampler_;
+    // Non-comparison sampler over the same shadow map, for PCSS blocker search
+    // (raw depth reads; shadowSampler_ only does hardware compare).
+    rhi::Ptr<rhi::Sampler> shadowRawSampler_;
 
     ibl::Environment environment_;
     rhi::Ptr<rhi::BindGroup> iblGroup_;

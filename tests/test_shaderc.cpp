@@ -90,6 +90,28 @@ void main() {
     CHECK(contains(result->msl, "sample_compare"));
 }
 
+// PCSS reads the same depth texture both ways: a plain sampled read for the
+// blocker search and a hardware-compare read for the PCF filter. Pins that
+// SPIRV-Cross accepts this mixed usage on a single texture binding.
+TEST_CASE("a depth texture sampled both raw and compared compiles and emits both MSL forms") {
+    constexpr const char* source = R"(#version 460
+layout(set = 0, binding = 1) uniform texture2D depthTex;
+layout(set = 0, binding = 2) uniform samplerShadow cmpSampler;
+layout(set = 0, binding = 3) uniform sampler rawSampler;
+layout(location = 0) out vec4 color;
+void main() {
+    float raw = texture(sampler2D(depthTex, rawSampler), vec2(0.5, 0.5)).r;
+    float cmp = texture(sampler2DShadow(depthTex, cmpSampler), vec3(0.5, 0.5, 0.5));
+    color = vec4(raw + cmp);
+}
+)";
+    const auto result = shaderc::compileGlsl(source, shaderc::Stage::Fragment);
+    REQUIRE(result.has_value());
+
+    CHECK(contains(result->msl, "sample_compare("));
+    CHECK(contains(result->msl, ".sample("));
+}
+
 TEST_CASE("push constant reflects size and remaps to buffer 24") {
     constexpr const char* source = R"(#version 460
 layout(push_constant) uniform Pc { mat4 m; } pc;

@@ -567,8 +567,11 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
 
         // The temp dir is writable from every shell; the SwiftUI app's cwd is
         // whatever LaunchServices provides (often /) and must not be relied on.
+        // Per-pid name: the temp dir is shared, and a viewer and the app running
+        // side by side must not read each other's (possibly half-written) file.
         const std::filesystem::path path =
-            std::filesystem::temp_directory_path() / "kumo_screenshot.png";
+            std::filesystem::temp_directory_path() /
+            std::format("kumo_screenshot_{}.png", getpid());
         if (!asset::writePng(path, scaled.width, scaled.height, scaled.rgba.data())) {
             return agent::errorJson(std::format("screenshot write failed: {}", path.string()));
         }

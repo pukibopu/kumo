@@ -12,17 +12,26 @@
 
 namespace kumo::facade {
 
+// One active environment: `file` empty means the procedural sky in `sky` is
+// active; a non-empty `file` names an HDR under <assetDir>/env/ and `sky` is
+// then unused (still present/defaulted so the type stays copyable value data).
+struct EnvironmentSource {
+    std::string file;
+    asset::ProceduralSkyDesc sky;
+    bool operator==(const EnvironmentSource&) const = default;
+};
+
 // One captured pre-change state: the scene value plus the renderer-side
 // per-material factors and custom shader sources the scene indices refer to.
 struct SceneState {
     scene::Scene world;
     std::vector<renderer::ForwardRenderer::MaterialParams> materials;
     std::vector<std::optional<std::string>> shaderSources;
-    // nullopt means "the loaded HDR is active, not a procedural sky"; applying
-    // this snapshot only re-bakes when it differs from the current value
-    // (ProceduralSkyDesc::operator== is defaulted), so undoing an unrelated
-    // edit never re-triggers an IBL bake.
-    std::optional<asset::ProceduralSkyDesc> environment;
+    // nullopt means "the loaded startup HDR is active, not an environment_set
+    // choice"; applying this snapshot only re-bakes when it differs from the
+    // current value (EnvironmentSource::operator== is defaulted), so undoing
+    // an unrelated edit never re-triggers an IBL bake.
+    std::optional<EnvironmentSource> environment;
 };
 
 // Bounded undo/redo of SceneStates (ADR 0044): capture/apply are injected so

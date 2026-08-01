@@ -461,6 +461,7 @@ GroupMaterialSpec toGroupMaterial(const ForwardRenderer::MaterialParams& params)
     out.metallic = params.metallic;
     out.roughness = params.roughness;
     std::copy(std::begin(params.emissive), std::end(params.emissive), out.emissive);
+    std::copy(std::begin(params.uvTiling), std::end(params.uvTiling), out.uvTiling);
     return out;
 }
 
@@ -470,6 +471,7 @@ ForwardRenderer::MaterialParams toMaterialParams(const GroupMaterialSpec& spec) 
     out.metallic = spec.metallic;
     out.roughness = spec.roughness;
     std::copy(std::begin(spec.emissive), std::end(spec.emissive), out.emissive);
+    std::copy(std::begin(spec.uvTiling), std::end(spec.uvTiling), out.uvTiling);
     return out;
 }
 

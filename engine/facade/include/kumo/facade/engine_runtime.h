@@ -14,12 +14,15 @@
 #include <kumo/scene/scene.h>
 
 #include <atomic>
+#include <expected>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace kumo::gpu {
@@ -41,6 +44,11 @@ public:
         std::filesystem::path configPath;  // kumo.config.json
         std::filesystem::path envFilePath; // .env
         std::filesystem::path shaderDir;   // KUMO_SHADER_DIR
+        // Asset library root: models/, textures/ and env/ live under it
+        // (instantiateModel, applyEnvironmentFile). Both shells already
+        // resolve modelPath/envPath from this directory; the directory itself
+        // is only needed for lookups made after startup.
+        std::filesystem::path assetDir;
         bool offline = false;
         bool confirmDestructive = false;
         bool demoPrimitives = false;
@@ -75,12 +83,14 @@ public:
         std::string id;
         std::string name;
         std::string primitive;
+        std::string model; // non-empty when the entity came from instantiateModel
     };
     struct EntityDetail {
         bool found = false;
         std::string id;
         std::string name;
         std::string primitive;
+        std::string model; // non-empty when the entity came from instantiateModel
         math::float3 position{0.0f, 0.0f, 0.0f};
         math::float3 eulerDeg{0.0f, 0.0f, 0.0f};
         math::float3 scale{1.0f, 1.0f, 1.0f};
@@ -134,6 +144,26 @@ public:
     // scene tool. False and unchanged on a bake or renderer failure; logged
     // either way.
     bool applyEnvironment(const asset::ProceduralSkyDesc& desc);
+    // Same contract as applyEnvironment, loading `<assetDir>/env/<file>`
+    // instead of baking a procedural sky.
+    bool applyEnvironmentFile(const std::string& file);
+
+    // One glTF model uploaded on top of the loaded scene (Item 4, M6.98
+    // PR-1): entities named `<name>_<node.name or index>`, one per node in
+    // the file. Undo-safe like addMesh/addMaterial: the renderer never
+    // reclaims uploads, so entities referencing them survive undo/redo.
+    struct ModelInstance {
+        std::vector<scene::EntityId> entities;
+    };
+    // Resolves `<assetDir>/models/<name>.glb`; loads and uploads it on first
+    // use, later calls reuse the cached upload (one upload regardless of
+    // instance count). `root` places the whole model; only a uniform scale is
+    // supported (root.scale.x/y/z must be equal) because a non-uniform root
+    // scale composed with a rotated child node would shear it, which
+    // decomposeTrs cannot represent as a TRS. Error string on failure (bad
+    // name, glTF load failure, non-uniform root scale, GPU upload failure).
+    std::expected<ModelInstance, std::string> instantiateModel(std::string_view name,
+                                                               const scene::Transform& root);
 
     bool undoAvailable() const;
     bool redoAvailable() const;
@@ -208,6 +238,27 @@ private:
     // unexplained. Assumes sceneSession_/shaderSession_/sceneProvider_/
     // shaderProvider_/confirmGate_ are already torn down.
     void assembleAgentSessions(bool isReload);
+    // Bakes/loads `source` and swaps it into the renderer; on success updates
+    // environmentSky_ but does NOT call markDirty() (callers differ on
+    // whether that is needed/already covered). Shared by applyEnvironment,
+    // applyEnvironmentFile, loadScene and the undo/redo has-value branch.
+    bool applyEnvironmentSource(const EnvironmentSource& source);
+
+    // One glTF file's uploaded meshes/materials, cached by filename so N
+    // instantiateModel calls for the same model upload once.
+    struct UploadedModel {
+        // Indexed by the local (glTF) mesh index.
+        std::vector<std::int32_t> meshIndices;  // -> renderer mesh index
+        std::vector<std::int32_t> meshMaterial; // -> renderer material index, -1 = none
+        // Mirrors asset::SceneAsset::nodes (node.meshIndex is a LOCAL mesh
+        // index into the vectors above), so a later instantiation (or a
+        // scene-load rebuild) re-derives the same entity set without
+        // re-parsing the glb.
+        std::vector<asset::NodeInstance> nodes;
+    };
+    // Loads and uploads `name`'s glb on first call; returns the cached record
+    // afterward. Null on any failure (already logged).
+    const UploadedModel* loadOrGetModel(const std::string& name);
 
     // Members below are declared in the order app.cpp's locals used to be: that
     // order is the destruction contract (reverse of declaration). Sessions/mcp
@@ -216,6 +267,7 @@ private:
     gpu::Device* device_ = nullptr;
     std::filesystem::path modelPath_;
     std::filesystem::path envPath_;
+    std::filesystem::path assetDir_;
     std::filesystem::path generatedShaderDir_;
 
     // Retained so reloadAgentSessions() can redo the same config-resolution
@@ -229,10 +281,12 @@ private:
     scene::Scene world_;
     gpu::Extent2D extent_{};
 
-    // nullopt while the loaded HDR (envPath_) is active; set once an
+    // nullopt while the loaded startup HDR (envPath_) is active; set once an
     // environment_set tool call (or a saved scene with one) swaps in a
-    // procedural sky, so undo/save know which to restore.
-    std::optional<asset::ProceduralSkyDesc> environmentSky_;
+    // procedural sky or a named HDR file, so undo/save know which to restore.
+    std::optional<EnvironmentSource> environmentSky_;
+    // Keyed by model file name (instantiateModel's `name`); see UploadedModel.
+    std::unordered_map<std::string, UploadedModel> modelCache_;
 
     // Orbit camera arbitration (ADR 0039): orbitMoved_ tracks whether input
     // moved the camera this frame; pump() applies orbit_ onto world_.camera

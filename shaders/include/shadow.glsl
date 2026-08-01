@@ -54,12 +54,18 @@ float kumoShadowPcf(vec3 worldPos, vec3 normal) {
 
     // Blocker search: raw depth reads (no hardware compare) averaged over a
     // fixed disk; early out to full light when nothing occludes the receiver.
+    // Classification uses the UNBIASED depth (reference PCSS): the bias margin
+    // exists to stop the final compare from self-shadowing, and excluding
+    // contact-adjacent casters here would skew the penumbra estimate soft
+    // exactly where hardening matters. False self-blockers this admits average
+    // out to avgBlocker ~ ndc.z, so the clamp below degrades them to the
+    // minimum (sharp) radius instead of acne.
     float blockerSum = 0.0;
     int blockerCount = 0;
     for (int i = 0; i < 8; ++i) {
         vec2 sampleUv = uv + kPoissonDisk8[i] * kSearchRadiusUV;
         float depth = texture(sampler2D(shadowMap, shadowRawSampler), sampleUv).r;
-        if (depth < receiver) {
+        if (depth < ndc.z) {
             blockerSum += depth;
             ++blockerCount;
         }

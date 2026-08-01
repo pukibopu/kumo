@@ -127,8 +127,8 @@ void saveScreenshot(gpu::Device& device, const ScreenshotReadback& readback, int
 } // namespace
 
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
-           const std::filesystem::path& envPath, bool demoPrimitives, bool offline,
-           bool confirmDestructive, bool mcp) {
+           const std::filesystem::path& envPath, const std::filesystem::path& assetDir,
+           bool demoPrimitives, bool offline, bool confirmDestructive, bool mcp) {
     if (!glfwInit()) {
         kumo::logError("glfwInit failed");
         return 1;
@@ -166,6 +166,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
         .configPath = "kumo.config.json",
         .envFilePath = ".env",
         .shaderDir = KUMO_SHADER_DIR,
+        .assetDir = assetDir,
         .offline = offline,
         .confirmDestructive = confirmDestructive,
         .demoPrimitives = demoPrimitives,

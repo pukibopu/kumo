@@ -1,7 +1,8 @@
 #include "retry_after.h"
 
-#include <charconv>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 namespace kumo::agent::detail {
 
@@ -11,14 +12,16 @@ std::optional<double> parseRetryAfterSeconds(std::string_view headerValue) {
         return std::nullopt;
     }
     const auto end = headerValue.find_last_not_of(" \t");
-    const std::string_view trimmed = headerValue.substr(begin, end - begin + 1);
+    const std::string trimmed(headerValue.substr(begin, end - begin + 1));
 
-    double seconds = 0.0;
-    const auto result = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), seconds);
-    // A full match only: the HTTP-date form ("Wed, 21 Oct 2015 07:28:00 GMT")
-    // fails to parse as a leading number and falls back to backoff; an
-    // out-of-range value (e.g. an absurdly long digit string) is rejected too.
-    if (result.ec != std::errc{} || result.ptr != trimmed.data() + trimmed.size()) {
+    // strtod instead of std::from_chars: the floating-point overload is still
+    // missing from the CI toolchain's libc++. A full match only: the HTTP-date
+    // form ("Wed, 21 Oct 2015 07:28:00 GMT") stops at the comma and is
+    // rejected; strtod sets the result to +-HUGE_VAL on overflow, which the
+    // finiteness check below rejects.
+    char* parseEnd = nullptr;
+    const double seconds = std::strtod(trimmed.c_str(), &parseEnd);
+    if (parseEnd != trimmed.c_str() + trimmed.size() || trimmed.empty()) {
         return std::nullopt;
     }
     if (!std::isfinite(seconds) || seconds < 0.0) {

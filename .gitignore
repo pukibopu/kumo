@@ -17,3 +17,11 @@ shaders/generated/
 
 # generated at runtime
 imgui.ini
+
+# fetched asset library (tools/fetch_assets.sh); only the two demo assets
+# actually shipped in the repo are exempted
+assets/textures/*
+assets/models/*
+!assets/models/DamagedHelmet.glb
+assets/env/*
+!assets/env/studio_small_09_2k.hdr

@@ -354,7 +354,10 @@ void EngineRuntime::applySceneState(const SceneState& state) {
     // Equality-gated (ProceduralSkyDesc::operator== is defaulted) so undoing
     // an unrelated edit never triggers a bake; nullopt means "restore the
     // loaded HDR", which is not otherwise reachable once a procedural sky has
-    // been applied.
+    // been applied. On a bake/swap failure environmentSky_ deliberately keeps
+    // tracking what the renderer actually shows — later captures then pair the
+    // rolled-back world with the environment still on screen, never with a
+    // value that was requested but never applied.
     if (state.environment != environmentSky_) {
         if (state.environment.has_value()) {
             const asset::HdrImage image = asset::proceduralSky(*state.environment);

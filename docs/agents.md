@@ -11,7 +11,7 @@ viewer 内置两个 LLM 驱动的助手：场景助手（自然语言增删实�
 - `provider.type`：`"anthropic"`（Messages API 及兼容中转端点）或 `"openai"`（Chat Completions——OpenAI 官方及 Ollama / LM Studio / llama.cpp 等本地端点的事实标准）；
 - `provider.base_url`：缺省按 type 取 `https://api.anthropic.com` 或 `http://127.0.0.1:11434`（OpenAI 云端填 `https://api.openai.com`）；
 - **per-agent 端点**（M6）：`agents.scene.*` / `agents.shader.*` 各自可覆盖 `type` / `base_url` / `api_key` / `model`，留空字段按字段继承 `provider.*`——场景/shader 助手可各配一套端点混跑（如 scene 本地 Ollama + shader 云端 GPT），也可全走同一云端；
-- 另有 `provider.max_tokens`、`provider.request_timeout_seconds`；
+- 另有 `provider.max_tokens`（模板默认 16384——shader 整文件替换需要大输出预算）、`provider.request_timeout_seconds`、`provider.reasoning_effort`（OpenAI 推理模型在 chat completions 上带函数工具时须设 `"none"`；留空不发送，兼容旧模型与本地端点）；
 - API key：`provider.api_key`（或 per-agent 的 `api_key`），或环境变量 `KUMO_PROVIDER_API_KEY` / `ANTHROPIC_API_KEY`（anthropic 型端点）/ `OPENAI_API_KEY`（openai 型端点）。解析按端点各自进行、层级优先：进程环境的任一名字 > `.env` 的任一名字 > 配置文件；key 永不落日志。**openai 型且 host 为本机时 key 可空**（Ollama 不校验）；
 - 环境变量覆盖（作用于全局 provider，per-agent 覆盖在其上生效）：`KUMO_PROVIDER_TYPE` / `KUMO_PROVIDER_BASE_URL` / `KUMO_PROVIDER_MODEL`；
 - 某个助手缺 model/key 时仅该页签禁用并给出中文提示，渲染功能完全不受影响。
@@ -54,7 +54,7 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 - 破坏性操作默认直接执行，`agents.confirm_destructive`（或 `--confirm-destructive`）开启中文确认弹窗，拒绝以 `{"status":"cancelled_by_user"}` 返还模型；
 - 单轮工具轮数上限 `agents.max_tool_rounds`（默认 24，最低 2——末轮不执行工具）。
 
-**工具面按助手收窄**：场景助手持有上表十三个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + 下面两个 shader 工具——本地小模型碰不到 shader_write，shader 模型删不了实体。
+**工具面按助手收窄**：场景助手持有上表十三个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + 两个 shader 工具 + `viewer_screenshot`（shader_write 编译通过后自查改完的材质）——本地小模型碰不到 shader_write，shader 模型删不了实体。
 
 **视觉闭环**（M6.97）：场景助手建完场景后截图自评（构图/曝光/比例），修正后最多补一张确认图，随后必须交付。工具结果带 `image_path` 时会话层自动读文件转 base64 附进消息：OpenAI 协议经紧随的 user 图片消息回灌（`detail:"low"`），Anthropic 原生 tool_result 带图；历史中最多保留一张图（新图逐出旧图），压缩估算按每图固定 512 token 计。**需要视觉模型**（如 GPT-4o 系及以上）；非视觉模型调用截图工具会得到端点报错。
 

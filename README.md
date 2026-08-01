@@ -33,7 +33,7 @@ ctest --preset macos-debug
 open build/macos-debug/apps/kumo/kumo_app.app
 ```
 
-场景树 / 视口（左键拖拽旋转、滚轮缩放）/ inspector（变换与材质编辑、shader 查看、⌘Z 撤销）/ 聊天（⌘⇧J，场景与 Shader 双助手）/ 设置（⌘,，API key 入 Keychain）。
+场景树 / 视口（左键拖拽旋转、滚轮缩放、WASD 平移）/ inspector（变换与材质编辑、光照面板、shader 查看、⌘Z 撤销）/ 聊天（⌘⇧J，场景与 Shader 双助手，均可截图自检）/ 场景存读（⌘S / ⌘O，可启动恢复，含自定义 shader）/ 设置（⌘,，API key 入 Keychain，保存即生效）。
 
 **开发 viewer（GLFW + ImGui）**：
 

@@ -33,7 +33,7 @@ ctest --preset macos-debug
 open build/macos-debug/apps/kumo/kumo_app.app
 ```
 
-Scene tree / viewport (left-drag orbits, scroll zooms) / inspector (transform & material editing, shader viewer, ⌘Z undo) / chat (⌘⇧J, scene + shader assistants) / settings (⌘, — API keys go to the Keychain).
+Scene tree / viewport (left-drag orbits, scroll zooms, WASD pans) / inspector (transform & material editing, light panel, shader viewer, ⌘Z undo) / chat (⌘⇧J, scene + shader assistants, both screenshot-checked) / scene save-load (⌘S / ⌘O with optional restore-on-launch, custom shaders included) / settings (⌘, — API keys go to the Keychain, applied live on save).
 
 **Dev viewer (GLFW + ImGui)**:
 

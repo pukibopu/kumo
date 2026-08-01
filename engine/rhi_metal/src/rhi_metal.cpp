@@ -355,7 +355,9 @@ public:
                                                        : MTL::CullModeBack),
           winding_(desc.frontFace == FrontFace::CCW ? MTL::WindingCounterClockwise
                                                     : MTL::WindingClockwise),
-          sampleCount_(desc.sampleCount) {}
+          sampleCount_(desc.sampleCount), depthBias_(desc.depthStencil.depthBias),
+          depthBiasSlopeScale_(desc.depthStencil.depthBiasSlopeScale),
+          depthBiasClamp_(desc.depthStencil.depthBiasClamp) {}
 
     MTL::RenderPipelineState* state() const { return state_.get(); }
     MTL::DepthStencilState* depthStencil() const { return depthStencil_.get(); }
@@ -363,6 +365,9 @@ public:
     MTL::CullMode cullMode() const { return cullMode_; }
     MTL::Winding winding() const { return winding_; }
     std::uint32_t sampleCount() const { return sampleCount_; }
+    float depthBias() const { return depthBias_; }
+    float depthBiasSlopeScale() const { return depthBiasSlopeScale_; }
+    float depthBiasClamp() const { return depthBiasClamp_; }
 
 private:
     NS::SharedPtr<MTL::RenderPipelineState> state_;
@@ -371,6 +376,9 @@ private:
     MTL::CullMode cullMode_;
     MTL::Winding winding_;
     std::uint32_t sampleCount_;
+    float depthBias_;
+    float depthBiasSlopeScale_;
+    float depthBiasClamp_;
 };
 
 class MetalComputePipeline final : public ComputePipeline {
@@ -481,6 +489,8 @@ public:
         }
         encoder_->setCullMode(metalPipeline.cullMode());
         encoder_->setFrontFacingWinding(metalPipeline.winding());
+        encoder_->setDepthBias(metalPipeline.depthBias(), metalPipeline.depthBiasSlopeScale(),
+                               metalPipeline.depthBiasClamp());
         primitive_ = metalPipeline.primitive();
     }
 
@@ -861,6 +871,7 @@ public:
         descriptor->setRAddressMode(toMtl(desc.addressModeW));
         descriptor->setLodMaxClamp(desc.lodMaxClamp);
         descriptor->setMaxAnisotropy(desc.maxAnisotropy);
+        descriptor->setCompareFunction(toMtl(desc.compare));
 
         NS::SharedPtr<MTL::SamplerState> sampler =
             NS::TransferPtr(device_->newSamplerState(descriptor));

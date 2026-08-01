@@ -30,7 +30,7 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 
 ## 工具
 
-十六个场景工具（英文 schema 与错误、变更类只回最小确认、全貌查询走 `scene_list`——ADR 0028）：
+十七个场景工具（英文 schema 与错误、变更类只回最小确认、全貌查询走 `scene_list`——ADR 0028）：
 
 | 工具 | 说明 |
 |---|---|
@@ -46,6 +46,7 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 | `light_remove` | 按 index 删灯（destructive）；后续 index 前移，响应回显剩余灯全表 |
 | `material_set_param` | 实体材质因子（metallic / roughness 截取到 0-1）；共享材质就地修改并报告波及实体数 |
 | `material_set_texture` | 把素材库的一套真实贴图（名字来自 `asset_list`）绑定到实体材质，可选 UV tiling；按贴图套名缓存上传，同名贴图多个实体只传一次；共享材质同 `material_set_param` 语义 |
+| `asset_fetch` | 素材自采（M6.99）：按英文短语从 Poly Haven（CC0）现取一套贴图或一张 HDR 环境到素材库，成功后名字即可像库内素材一样喂给 `material_set_texture` / `environment_set`；无匹配时错误信息带近似候选名 |
 | `scene_define_group` | 定义可复用组合体（≤32 成员），只存不落场景 |
 | `scene_instance_group` | 按显式变换或散布（count / area / seed，确定性）实例化组；实例×成员 ≤256，实例缩放限均匀 |
 | `environment_set` | 真实 HDR 文件（名字来自 `asset_list`）或程序化天空环境：预设 clear_day / sunset / overcast / night / studio + 逐字段覆盖，重烘焙 IBL；file 与预设/逐字段参数互斥；可撤销、随场景持久化 |
@@ -57,13 +58,15 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 - 破坏性操作默认直接执行，`agents.confirm_destructive`（或 `--confirm-destructive`）开启中文确认弹窗，拒绝以 `{"status":"cancelled_by_user"}` 返还模型；
 - 单轮工具轮数上限 `agents.max_tool_rounds`（默认 24，最低 2——末轮不执行工具）。
 
-**工具面按助手收窄**：场景助手持有上表十六个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + 两个 shader 工具 + `viewer_screenshot`（shader_write 编译通过后自查改完的材质）——本地小模型碰不到 shader_write，shader 模型删不了实体。
+**工具面按助手收窄**：场景助手持有上表十七个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + 两个 shader 工具 + `viewer_screenshot`（shader_write 编译通过后自查改完的材质）——本地小模型碰不到 shader_write，shader 模型删不了实体。
 
 **视觉闭环**（M6.97）：场景助手建完场景后截图自评（构图/曝光/比例），修正后最多补一张确认图，随后必须交付。工具结果带 `image_path` 时会话层自动读文件转 base64 附进消息：OpenAI 协议经紧随的 user 图片消息回灌（`detail:"low"`），Anthropic 原生 tool_result 带图；历史中最多保留一张图（新图逐出旧图），压缩估算按每图固定 512 token 计。**需要视觉模型**（如 GPT-4o 系及以上）；非视觉模型调用截图工具会得到端点报错。
 
 **艺术指导**：场景助手的 system prompt 内嵌成稿流程（主题 → 主体 → 前中后景 → 相机 → 布光 → 材质 → 素材）、默认丰富度底线（地面 + 主体 + 支撑元素 + 匹配环境 + 分层布光 + 材质区分 + 贴图化地面/结构物）、按包围盒计算取景、三点布光配方、素材优先原则（真实模型/贴图优于程序化图元与纯色材质，调用 `material_set_texture` 时按贴图实际尺寸估算 tiling）与验证闭环（建完调 `scene_validate` 修完再回复）；shader 助手内嵌材质意图词表（拉丝金属 / 磨砂玻璃近似 / 混凝土等 → 因子组合与手法）与两助手职责边界（场景助手管摆放与 PBR 因子，shader 助手管因子表达不了的效果）。
 
 **素材库**（M6.98 PR-2）：`assetDir` 下 `textures/<name>/{albedo,normal,roughness,metalness,ao}.{png,jpg}`（albedo 必需，其余可选）、`models/<name>.glb`、`env/<name>.hdr` 三类真实素材，供 `asset_list` 枚举、`material_set_texture` / `scene_add_model` / `environment_set`（`file` 字段）消费；除仓库自带的 `DamagedHelmet.glb` 与 `studio_small_09_2k.hdr` 外均为本地拉取产物不入库，首次使用前跑 `./tools/fetch_assets.sh`（幂等、单项失败不中断，全部 CC0，来源见 `assets/README.md`）；`assetDir` 未配置时三个素材工具统一报不支持，与 `environment_set` 无 `applyEnvironment` 回调时的降级方式一致。
+
+**素材自采**（M6.99）：素材库找不到合适的贴图/环境时，场景助手会调用 `asset_fetch` 现从 Poly Haven（无需鉴权、纯 CC0）按查询词找一个最匹配的素材下载进素材库，同名目录/文件已存在则直接判定已取无需联网；查无匹配时错误信息带最多 3 个近似候选名供改写查询词重试。下载在调用工具的主线程同步执行（与其余工具一致的执行模型）——一张 2k HDR（约 5-15MB）可能卡住画面数秒；异步工具是后续里程碑的事。
 
 Shader 工具（M6）：
 
@@ -94,7 +97,7 @@ viewer 内 **K** 存 / **L** 读工作目录的 `kumo_scene.json`：实体 TRS +
 
 ## MCP server（M6.5）
 
-`viewer --mcp` 经 stdio 提供 MCP 端点：外部 MCP 客户端与内嵌助手消费同一工具注册表，工具语义单源（ADR 0041）。工具面 = 场景十六工具 + shader 双工具 + `viewer_screenshot`（离屏渲染当前场景，结果附 PNG 图像，供视觉验证）；该模式下日志全部走 stderr，stdout 只承载 JSON-RPC。
+`viewer --mcp` 经 stdio 提供 MCP 端点：外部 MCP 客户端与内嵌助手消费同一工具注册表，工具语义单源（ADR 0041）。工具面 = 场景十七工具 + shader 双工具 + `viewer_screenshot`（离屏渲染当前场景，结果附 PNG 图像，供视觉验证）；该模式下日志全部走 stderr，stdout 只承载 JSON-RPC。
 
 接入示例：
 

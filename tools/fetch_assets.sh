@@ -147,10 +147,18 @@ fetch_model Avocado     "https://raw.githubusercontent.com/KhronosGroup/glTF-Sam
 fetch_model BoomBox     "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/glTF-Binary/BoomBox.glb"
 fetch_model WaterBottle "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/WaterBottle/glTF-Binary/WaterBottle.glb"
 
-# Env: Poly Haven 2k HDRIs, one each for day / sunset / night lighting.
+# Urban/cyberpunk expansion (all URLs verified like the sets above).
+fetch_texture_set asphalt  Asphalt012
+fetch_texture_set concrete Concrete034
+fetch_texture_set metal    MetalPlates006
+
+# Env: Poly Haven 2k HDRIs — day / sunset / night, plus two city nights for
+# urban scenes.
 fetch_env day    kloofendal_43d_clear_puresky
 fetch_env sunset venice_sunset
 fetch_env night  dikhololo_night
+fetch_env city_night  potsdamer_platz
+fetch_env city_night2 shanghai_bund
 
 log "done: $FETCHED fetched, $SKIPPED skipped, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

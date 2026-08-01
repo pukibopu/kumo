@@ -57,7 +57,7 @@ struct TestRequest {
 
         ChatMessage toolResult;
         toolResult.role = Role::Tool;
-        toolResult.toolResults.push_back({"c1", R"({"status":"ok","entity_id":"0:0"})", false});
+        toolResult.toolResults.push_back({"c1", R"({"status":"ok","entity_id":"0:0"})", false, ""});
         messages.push_back(toolResult);
 
         ChatMessage followUp;
@@ -79,6 +79,35 @@ TEST_CASE("openai codec encodes the canonical request") {
     const TestRequest fixture;
     const json encoded = json::parse(encodeChatCompletionsRequest(fixture.request));
     CHECK(encoded == readFixture("request_tools.json"));
+}
+
+TEST_CASE("openai codec appends an image_url message after an image-bearing tool result") {
+    std::vector<ToolDef> tools{{.name = "viewer_screenshot",
+                                .description = "Take a screenshot.",
+                                .parametersSchema = R"({"type":"object","properties":{}})"}};
+
+    ChatMessage assistant;
+    assistant.role = Role::Assistant;
+    assistant.stopReason = StopReason::ToolUse;
+    assistant.toolCalls.push_back({"c1", "viewer_screenshot", "{}"});
+
+    ChatMessage toolResult;
+    toolResult.role = Role::Tool;
+    toolResult.toolResults.push_back({.callId = "c1",
+                                      .contentJson = R"({"status":"ok","width":640,"height":360})",
+                                      .isError = false,
+                                      // base64("PNGDATA"), independent of the encoder under test.
+                                      .imagePngBase64 = "UE5HREFUQQ=="});
+
+    ChatRequest request;
+    request.model = "test-model";
+    request.systemPrompt = "You are a test.";
+    request.messages = {assistant, toolResult};
+    request.tools = tools;
+    request.maxTokens = 256;
+
+    const json encoded = json::parse(encodeChatCompletionsRequest(request));
+    CHECK(encoded == readFixture("request_image.json"));
 }
 
 TEST_CASE("openai codec decodes a plain text reply") {

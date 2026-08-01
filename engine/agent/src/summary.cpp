@@ -7,18 +7,25 @@
 
 namespace kumo::agent {
 
+// Flat per-image cost: the wire payload is detail-low/already downscaled, not
+// the base64 blob sitting in memory, so counting base64 bytes would trip the
+// compression threshold on every turn an image stays attached.
+constexpr std::size_t kImageTokenEstimate = 512;
+
 std::size_t approxTokens(const ChatMessage& message) {
     std::size_t bytes = message.text.size();
     for (const ToolCall& call : message.toolCalls) {
         bytes += call.argumentsJson.size();
     }
+    std::size_t imageTokens = 0;
     for (const ToolResult& result : message.toolResults) {
         bytes += result.contentJson.size();
+        if (!result.imagePngBase64.empty()) {
+            imageTokens += kImageTokenEstimate;
+        }
     }
-    if (bytes == 0) {
-        return 0;
-    }
-    return std::max<std::size_t>(1, bytes / 4);
+    const std::size_t textTokens = bytes == 0 ? 0 : std::max<std::size_t>(1, bytes / 4);
+    return textTokens + imageTokens;
 }
 
 std::size_t approxTokens(std::span<const ChatMessage> messages) {

@@ -30,24 +30,33 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 
 ## 工具
 
-七个场景工具（英文 schema 与错误、变更类只回最小确认、全貌查询走 `scene_list`——ADR 0028）：
+十三个场景工具（英文 schema 与错误、变更类只回最小确认、全貌查询走 `scene_list`——ADR 0028）：
 
 | 工具 | 说明 |
 |---|---|
-| `scene_list` | 全场景：实体（id / 变换 / world AABB / 材质 / 图元溯源）+ 相机 + 灯 |
-| `scene_add_entity` | 程序化图元 sphere / cube / plane，返回 entity_id |
-| `scene_remove_entity` | 删除实体（唯一 destructive 工具） |
+| `scene_list` | 全场景：实体（id / 变换 / world AABB / 材质 / 图元溯源）+ 相机 + 灯 + 已定义组名 |
+| `scene_add_entity` | 程序化图元 sphere / cube / plane / cylinder / cone / torus / capsule，返回 entity_id；缺省材质为非金属灰（metallic 0 / roughness 0.6） |
+| `scene_add_entities` | 批量创建（单次 ≤128），先全量校验后落地，中途 GPU 失败整体回滚 |
+| `scene_remove_entity` | 删除实体（destructive） |
 | `scene_set_transform` | 位置 / 旋转（欧拉角度数）/ 缩放，缺省字段保持现值 |
 | `camera_set` | 位置 / look_at / fov / near |
 | `light_set` | 修改指定 index 或省略 index 追加新灯（上限 16） |
-| `material_set_param` | 实体材质因子；共享材质就地修改并报告波及实体数 |
+| `light_remove` | 按 index 删灯（destructive）；后续 index 前移，响应回显剩余灯全表 |
+| `material_set_param` | 实体材质因子（metallic / roughness 截取到 0-1）；共享材质就地修改并报告波及实体数 |
+| `scene_define_group` | 定义可复用组合体（≤32 成员），只存不落场景 |
+| `scene_instance_group` | 按显式变换或散布（count / area / seed，确定性）实例化组；实例×成员 ≤256，实例缩放限均匀 |
+| `environment_set` | 程序化天空环境：预设 clear_day / sunset / overcast / night / studio + 逐字段覆盖，重烘焙 IBL；可撤销、随场景持久化 |
+| `scene_validate` | 只读自检：悬浮 / AABB 穿插 / 相机在几何内 / 视锥外实体 / 灯光失衡，只报告不修改 |
 
 - entity id 为 `"index:generation"` 字符串，stale id 得到干净的 not-found；
-- 变更工具全部 staged 原子提交：任一字段校验失败则零副作用；非有限数值、零/负缩放、零向量光方向在工具层拦截；
+- 变更工具全部 staged 原子提交：任一字段校验失败则零副作用；非有限数值、零/负缩放、零向量光方向、越界辐照参数在工具层拦截；
 - 错误一律结构化 `{"status":"error","message":"..."}` 回灌模型自行修正；
-- 破坏性操作默认直接执行，`agents.confirm_destructive`（或 `--confirm-destructive`）开启中文确认弹窗，拒绝以 `{"status":"cancelled_by_user"}` 返还模型。
+- 破坏性操作默认直接执行，`agents.confirm_destructive`（或 `--confirm-destructive`）开启中文确认弹窗，拒绝以 `{"status":"cancelled_by_user"}` 返还模型；
+- 单轮工具轮数上限 `agents.max_tool_rounds`（默认 24，最低 2——末轮不执行工具）。
 
-**工具面按助手收窄**：场景助手持有上表七个工具；shader 助手持有 `scene_list` + 下面两个 shader 工具——本地小模型碰不到 shader_write，shader 模型删不了实体。
+**工具面按助手收窄**：场景助手持有上表十三个工具；shader 助手持有 `scene_list` + 下面两个 shader 工具——本地小模型碰不到 shader_write，shader 模型删不了实体。
+
+**艺术指导**：场景助手的 system prompt 内嵌成稿流程（主题 → 主体 → 前中后景 → 相机 → 布光 → 材质）、默认丰富度底线（地面 + 主体 + 支撑元素 + 匹配环境 + 分层布光 + 材质区分）、按包围盒计算取景、三点布光配方与验证闭环（建完调 `scene_validate` 修完再回复）；shader 助手内嵌材质意图词表（拉丝金属 / 磨砂玻璃近似 / 混凝土等 → 因子组合与手法）与两助手职责边界（场景助手管摆放与 PBR 因子，shader 助手管因子表达不了的效果）。
 
 Shader 工具（M6）：
 
@@ -78,7 +87,7 @@ viewer 内 **K** 存 / **L** 读工作目录的 `kumo_scene.json`：实体 TRS +
 
 ## MCP server（M6.5）
 
-`viewer --mcp` 经 stdio 提供 MCP 端点：外部 MCP 客户端与内嵌助手消费同一工具注册表，工具语义单源（ADR 0041）。工具面 = 场景七工具 + shader 双工具 + `viewer_screenshot`（离屏渲染当前场景，结果附 PNG 图像，供视觉验证）；该模式下日志全部走 stderr，stdout 只承载 JSON-RPC。
+`viewer --mcp` 经 stdio 提供 MCP 端点：外部 MCP 客户端与内嵌助手消费同一工具注册表，工具语义单源（ADR 0041）。工具面 = 场景十三工具 + shader 双工具 + `viewer_screenshot`（离屏渲染当前场景，结果附 PNG 图像，供视觉验证）；该模式下日志全部走 stderr，stdout 只承载 JSON-RPC。
 
 接入示例：
 

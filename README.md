@@ -12,6 +12,7 @@ macOS / iPad 原生 Metal PBR 渲染器，内置 LLM 驱动的场景与 shader �
 - GLSL 单源 → SPIR-V / MSL 交叉编译，支持运行时热重载
 - 场景助手：自然语言增删实体、调整灯光 / 相机 / 材质 / 天空环境，内置构图与布光指导、场景自检与截图自评
 - Shader 助手：自然语言生成材质 shader，编译报错自动修正后热载入
+- 真实素材库：贴图 / glTF 模型 / HDRI 环境（`./tools/fetch_assets.sh` 一键拉取，CC0），助手建场景时优先取用
 
 进度见 [docs/milestones.md](docs/milestones.md)。
 
@@ -69,7 +70,7 @@ viewer 以 Cook-Torrance PBR + IBL 渲染 glTF 场景（MSAA 4x、ACES tone mapp
 
 ### MCP
 
-`viewer --mcp` 经 stdio 提供 MCP 端点，工具面与内嵌助手同源（场景十三工具 + shader 双工具 + 离屏截图工具 `viewer_screenshot`）：
+`viewer --mcp` 经 stdio 提供 MCP 端点，工具面与内嵌助手同源（场景十六工具 + shader 双工具 + 离屏截图工具 `viewer_screenshot`）：
 
 ```sh
 claude mcp add kumo -- "$(pwd)/build/macos-debug/apps/viewer/viewer" --mcp

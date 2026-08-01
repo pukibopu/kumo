@@ -738,22 +738,8 @@ void ForwardRenderer::rebuildMaterialResources() {
         }
     }
 
-    if (environment_.valid()) {
-        iblGroup_ = device_->createBindGroup({
-            .layout = iblLayout_,
-            .entries = {{.binding = 0, .texture = environment_.irradiance},
-                        {.binding = 1, .texture = environment_.prefiltered},
-                        {.binding = 2, .texture = environment_.brdfLut},
-                        {.binding = 3, .sampler = iblSampler_}},
-        });
-        skyboxGroup_ = device_->createBindGroup({
-            .layout = skyboxLayout_,
-            .entries = {{.binding = 0, .texture = environment_.environment},
-                        {.binding = 1, .sampler = iblSampler_}},
-        });
-        if (!iblGroup_ || !skyboxGroup_) {
-            logError("shader reload: ibl/skybox bind group rebuild failed");
-        }
+    if (environment_.valid() && !buildEnvironmentGroups()) {
+        logError("shader reload: ibl/skybox bind group rebuild failed");
     }
     if (hdrResolve_) {
         tonemapGroup_ = device_->createBindGroup({
@@ -771,15 +757,7 @@ bool ForwardRenderer::reloadPipelines() {
     return buildPipelines(false);
 }
 
-bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
-                                const ibl::Environment& environment) {
-    KUMO_ASSERT(device_ != nullptr);
-    if (!environment.valid()) {
-        logError("loadScene: invalid IBL environment");
-        return false;
-    }
-    environment_ = environment;
-
+bool ForwardRenderer::buildEnvironmentGroups() {
     iblGroup_ = device_->createBindGroup({
         .layout = iblLayout_,
         .entries = {{.binding = 0, .texture = environment_.irradiance},
@@ -792,7 +770,35 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
         .entries = {{.binding = 0, .texture = environment_.environment},
                     {.binding = 1, .sampler = iblSampler_}},
     });
-    if (!iblGroup_ || !skyboxGroup_) {
+    return iblGroup_ && skyboxGroup_;
+}
+
+bool ForwardRenderer::setEnvironment(const ibl::Environment& environment) {
+    KUMO_ASSERT(device_ != nullptr);
+    if (!environment.valid()) {
+        logError("setEnvironment: invalid IBL environment");
+        return false;
+    }
+    // The old environment's textures/bind groups may still be referenced by
+    // an in-flight frame (mirrors resize()'s stance).
+    device_->queue().waitIdle();
+    environment_ = environment;
+    if (!buildEnvironmentGroups()) {
+        logError("setEnvironment: ibl/skybox bind group rebuild failed");
+        return false;
+    }
+    return true;
+}
+
+bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
+                                const ibl::Environment& environment) {
+    KUMO_ASSERT(device_ != nullptr);
+    if (!environment.valid()) {
+        logError("loadScene: invalid IBL environment");
+        return false;
+    }
+    environment_ = environment;
+    if (!buildEnvironmentGroups()) {
         return false;
     }
 

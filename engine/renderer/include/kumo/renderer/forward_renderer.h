@@ -35,6 +35,11 @@ public:
 
     bool init(rhi::Device& device, rhi::TextureFormat outputFormat);
     bool loadScene(const asset::SceneAsset& sceneAsset, const ibl::Environment& environment);
+    // Swaps the IBL/skybox environment on an already-loaded scene; rejects an
+    // invalid environment and leaves the current one untouched. Waits for the
+    // GPU like resize() does: the old environment's textures/bind groups may
+    // still be referenced by an in-flight frame.
+    bool setEnvironment(const ibl::Environment& environment);
     void resize(rhi::Extent2D size);
 
     // Incremental uploads on top of a loaded scene; indices stay valid until the
@@ -112,6 +117,10 @@ private:
     // Recreates frame uniform buffers/groups, every material's factor buffers
     // and bind groups, and the ibl/skybox/tonemap groups after a layout change.
     void rebuildMaterialResources();
+    // Builds iblGroup_/skyboxGroup_ from the current environment_; shared by
+    // loadScene, rebuildMaterialResources and setEnvironment so all three
+    // construct the same bind groups from the same layout.
+    bool buildEnvironmentGroups();
     void updateFrameUniforms(const scene::Scene& scene, const math::float4x4& lightViewProj,
                              const math::float4& shadowParams);
     // Writes the current frameSlot_ buffer for every material marked dirty in

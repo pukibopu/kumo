@@ -10,6 +10,7 @@
 #include <kumo/asset/asset.h>
 #include <kumo/asset/primitives.h>
 #include <kumo/asset/procedural_sky.h>
+#include <kumo/core/asset_name.h>
 #include <kumo/core/file.h>
 #include <kumo/core/log.h>
 #include <kumo/gpu/gpu.h>
@@ -397,6 +398,19 @@ SessionPlan planSessions(const agent::AgentConfig& config, bool confirmDestructi
     return plan;
 }
 
+std::vector<std::size_t> materialTextureDiffs(
+    const std::vector<renderer::ForwardRenderer::MaterialTextureIndices>& current,
+    const std::vector<renderer::ForwardRenderer::MaterialTextureIndices>& snapshot) {
+    std::vector<std::size_t> diffs;
+    const std::size_t n = std::min(current.size(), snapshot.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        if (current[i] != snapshot[i]) {
+            diffs.push_back(i);
+        }
+    }
+    return diffs;
+}
+
 } // namespace detail
 
 void EngineRuntime::Notice::set(std::string text) {
@@ -425,12 +439,14 @@ SceneState EngineRuntime::captureSceneState() const {
     const std::uint32_t count = renderer_.materialCount();
     state.materials.reserve(count);
     state.shaderSources.reserve(count);
+    state.materialTextures.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         const MaterialParams* params = renderer_.materialParams(i);
         state.materials.push_back(params != nullptr ? *params : MaterialParams{});
         const std::string* source = renderer_.materialShaderSource(i);
         state.shaderSources.push_back(source != nullptr ? std::make_optional(*source)
                                                         : std::nullopt);
+        state.materialTextures.push_back(renderer_.materialTextureIndices(i));
     }
     return state;
 }
@@ -458,6 +474,19 @@ void EngineRuntime::applySceneState(const SceneState& state) {
         } else if (current != nullptr) {
             renderer_.clearMaterialShader(index);
         }
+    }
+
+    // Texture bindings (ADR 0044 follow-up): only the materials whose bound
+    // textures actually differ get rebound, so undoing an unrelated edit never
+    // triggers setMaterialTextures' waitIdle + bind group rebuild on materials
+    // material_set_texture never touched.
+    std::vector<renderer::ForwardRenderer::MaterialTextureIndices> currentTextures;
+    currentTextures.reserve(currentCount);
+    for (std::uint32_t i = 0; i < currentCount; ++i) {
+        currentTextures.push_back(renderer_.materialTextureIndices(i));
+    }
+    for (std::size_t i : detail::materialTextureDiffs(currentTextures, state.materialTextures)) {
+        renderer_.setMaterialTextures(static_cast<std::uint32_t>(i), state.materialTextures[i]);
     }
 
     // Equality-gated (EnvironmentSource::operator== is defaulted) so undoing
@@ -992,6 +1021,14 @@ bool EngineRuntime::reloadPipelines() {
 bool EngineRuntime::applyEnvironmentSource(const EnvironmentSource& source) {
     asset::HdrImage image;
     if (!source.file.empty()) {
+        // Reachable without going through the scene_tools.cpp tool layer (a
+        // hand-edited saved scene, or an MCP/undo caller), so this facade
+        // entry point enforces the same asset-name rule independently
+        // (ADR 0024 style: log + fail rather than assert in release).
+        if (!isPlainAssetName(source.file)) {
+            logError("applyEnvironment: invalid file name '{}'", source.file);
+            return false;
+        }
         const auto hdr = asset::loadHdr(assetDir_ / "env" / source.file);
         if (!hdr.has_value()) {
             logError("applyEnvironment: failed to load {}: {}", source.file, hdr.error());
@@ -1196,6 +1233,13 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
 }
 
 const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::string& name) {
+    // Single choke point for both instantiateModel and loadScene's saved-entity
+    // path (entity.model), so a hand-edited saved scene cannot escape
+    // assetDir_ either (same reasoning as applyEnvironmentSource above).
+    if (!isPlainAssetName(name)) {
+        logError("loadOrGetModel: invalid model name '{}'", name);
+        return nullptr;
+    }
     if (const auto it = modelCache_.find(name); it != modelCache_.end()) {
         return &it->second;
     }

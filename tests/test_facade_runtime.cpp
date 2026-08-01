@@ -1,10 +1,15 @@
 #include <doctest/doctest.h>
 
 #include <kumo/facade/detail.h>
+#include <kumo/renderer/forward_renderer.h>
+
+#include <vector>
 
 using namespace kumo::agent;
+using kumo::facade::detail::materialTextureDiffs;
 using kumo::facade::detail::planSessions;
 using kumo::facade::detail::SessionPlan;
+using MaterialTextureIndices = kumo::renderer::ForwardRenderer::MaterialTextureIndices;
 
 // EngineRuntime::create() needs a GPU device, so it is out of reach for
 // kumo_tests; what IS pure and CPU-only is the decision of which sessions get
@@ -80,4 +85,49 @@ TEST_CASE("planSessions: unavailable reasons distinguish missing model from miss
 
     CHECK(!plan.shaderEnabled);
     CHECK(plan.shaderUnavailableReason.find("model") != std::string::npos);
+}
+
+// materialTextureDiffs backs applySceneState's "only rebind materials whose
+// textures actually changed" decision (ADR 0044 follow-up: texture bindings
+// were previously invisible to undo/redo). No GPU renderer is needed: the
+// decision only ever compares two plain MaterialTextureIndices vectors.
+
+TEST_CASE("materialTextureDiffs: identical vectors report no diffs") {
+    const std::vector<MaterialTextureIndices> a{{.baseColor = 1}, {.baseColor = 2}};
+    const std::vector<MaterialTextureIndices> b = a;
+    CHECK(materialTextureDiffs(a, b).empty());
+}
+
+TEST_CASE("materialTextureDiffs: reports only the indices that differ") {
+    const std::vector<MaterialTextureIndices> current{
+        {.baseColor = 1}, {.baseColor = 2}, {.baseColor = 3}};
+    const std::vector<MaterialTextureIndices> snapshot{
+        {.baseColor = 1}, {.baseColor = 20}, {.baseColor = 3}};
+    const std::vector<std::size_t> diffs = materialTextureDiffs(current, snapshot);
+    REQUIRE(diffs.size() == 1);
+    CHECK(diffs[0] == 1);
+}
+
+TEST_CASE("materialTextureDiffs: a differing field other than baseColor still counts") {
+    MaterialTextureIndices snapshot;
+    snapshot.normal = 5;
+    const std::vector<MaterialTextureIndices> current{MaterialTextureIndices{}};
+    const std::vector<MaterialTextureIndices> snapshots{snapshot};
+    const std::vector<std::size_t> diffs = materialTextureDiffs(current, snapshots);
+    REQUIRE(diffs.size() == 1);
+    CHECK(diffs[0] == 0);
+}
+
+TEST_CASE("materialTextureDiffs: extra materials past the shorter vector are left alone") {
+    // Mirrors applySceneState's own min(current.size(), snapshot.size()) rule:
+    // materials are only ever appended (ADR 0016), so an index past either
+    // vector was created after the other side's snapshot/current state.
+    const std::vector<MaterialTextureIndices> current{{.baseColor = 1}, {.baseColor = 2}};
+    const std::vector<MaterialTextureIndices> snapshot{{.baseColor = 1}};
+    CHECK(materialTextureDiffs(current, snapshot).empty());
+    CHECK(materialTextureDiffs(snapshot, current).empty());
+}
+
+TEST_CASE("materialTextureDiffs: both empty reports no diffs") {
+    CHECK(materialTextureDiffs({}, {}).empty());
 }

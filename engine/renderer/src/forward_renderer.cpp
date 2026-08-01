@@ -308,14 +308,15 @@ bool ForwardRenderer::buildSharedMaterialSlots(std::size_t materialIndex) {
     return true;
 }
 
-bool ForwardRenderer::appendMaterial(const MaterialParams& params,
-                                     const MaterialTextures& textures) {
+bool ForwardRenderer::appendMaterial(const MaterialParams& params, const MaterialTextures& textures,
+                                     const MaterialTextureIndices& indices) {
     KUMO_ASSERT(device_ != nullptr);
     materialFactorBuffers_.emplace_back();
     materialGroups_.emplace_back();
     materialDirty_.emplace_back();
     materialParams_.push_back(params);
     materialTextures_.push_back(textures);
+    materialTextureIndices_.push_back(indices);
     materialShaders_.emplace_back(std::nullopt);
     const std::size_t index = materialParams_.size() - 1;
     if (!buildSharedMaterialSlots(index)) {
@@ -324,6 +325,7 @@ bool ForwardRenderer::appendMaterial(const MaterialParams& params,
         materialDirty_.pop_back();
         materialParams_.pop_back();
         materialTextures_.pop_back();
+        materialTextureIndices_.pop_back();
         materialShaders_.pop_back();
         return false;
     }
@@ -415,11 +417,13 @@ std::int32_t ForwardRenderer::addMaterial(const MaterialParams& params) {
     if (!materialLayout_ || !defaultWhite_ || !defaultNormal_) {
         return -1;
     }
-    if (!appendMaterial(params, {.baseColor = defaultWhite_,
-                                 .metallicRoughness = defaultWhite_,
-                                 .normal = defaultNormal_,
-                                 .occlusion = defaultWhite_,
-                                 .emissive = defaultWhite_})) {
+    if (!appendMaterial(params,
+                        {.baseColor = defaultWhite_,
+                         .metallicRoughness = defaultWhite_,
+                         .normal = defaultNormal_,
+                         .occlusion = defaultWhite_,
+                         .emissive = defaultWhite_},
+                        MaterialTextureIndices{})) {
         return -1;
     }
     return static_cast<std::int32_t>(materialGroups_.size() - 1);
@@ -432,7 +436,7 @@ std::int32_t ForwardRenderer::addMaterial(const MaterialParams& params,
         return -1;
     }
     const std::optional<MaterialTextures> resolved = resolveMaterialTextures(textures);
-    if (!resolved || !appendMaterial(params, *resolved)) {
+    if (!resolved || !appendMaterial(params, *resolved, textures)) {
         return -1;
     }
     return static_cast<std::int32_t>(materialGroups_.size() - 1);
@@ -476,19 +480,28 @@ bool ForwardRenderer::setMaterialTextures(std::uint32_t materialIndex,
     // An in-flight frame may still reference the old bind groups (mirrors
     // setEnvironment's stance).
     device_->queue().waitIdle();
-    const MaterialTextures previous = materialTextures_[materialIndex];
+    const MaterialTextures previousTextures = materialTextures_[materialIndex];
+    const MaterialTextureIndices previousIndices = materialTextureIndices_[materialIndex];
     materialTextures_[materialIndex] = *resolved;
+    materialTextureIndices_[materialIndex] = textures;
     const bool rebuilt = materialShaders_[materialIndex]
                              ? rebuildCustomMaterialGroups(materialIndex)
                              : buildSharedMaterialSlots(materialIndex);
     if (!rebuilt) {
         // Restore the previous textures so a failed rebuild does not leave
         // materialTextures_ pointing at a bind group that was never built.
-        materialTextures_[materialIndex] = previous;
+        materialTextures_[materialIndex] = previousTextures;
+        materialTextureIndices_[materialIndex] = previousIndices;
         logError("setMaterialTextures: bind group rebuild failed for material {}", materialIndex);
         return false;
     }
     return true;
+}
+
+ForwardRenderer::MaterialTextureIndices
+ForwardRenderer::materialTextureIndices(std::uint32_t index) const {
+    return index < materialTextureIndices_.size() ? materialTextureIndices_[index]
+                                                  : MaterialTextureIndices{};
 }
 
 std::uint32_t ForwardRenderer::meshCount() const {
@@ -1001,12 +1014,20 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
                    ? textures_[static_cast<std::size_t>(index)]
                    : fallback;
     };
+    // mat.*Texture fields are glTF-local indices into sceneAsset.textures,
+    // which textures_ was just rebuilt from in the same order above, so they
+    // double as renderer texture indices; out-of-range collapses to -1
+    // (fallback), matching textureOr's own fallback rule.
+    auto indexOr = [&](std::int32_t index) -> std::int32_t {
+        return index >= 0 && static_cast<std::size_t>(index) < textures_.size() ? index : -1;
+    };
 
     materialFactorBuffers_.clear();
     materialGroups_.clear();
     materialDirty_.clear();
     materialParams_.clear();
     materialTextures_.clear();
+    materialTextureIndices_.clear();
     materialShaders_.clear();
     for (const asset::MaterialData& mat : sceneAsset.materials) {
         const MaterialTextures textures{.baseColor = textureOr(mat.baseColorTexture, defaultWhite_),
@@ -1015,7 +1036,13 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
                                         .normal = textureOr(mat.normalTexture, defaultNormal_),
                                         .occlusion = textureOr(mat.occlusionTexture, defaultWhite_),
                                         .emissive = textureOr(mat.emissiveTexture, defaultWhite_)};
-        if (!appendMaterial(toParams(mat), textures)) {
+        const MaterialTextureIndices indices{.baseColor = indexOr(mat.baseColorTexture),
+                                             .metallicRoughness =
+                                                 indexOr(mat.metallicRoughnessTexture),
+                                             .normal = indexOr(mat.normalTexture),
+                                             .occlusion = indexOr(mat.occlusionTexture),
+                                             .emissive = indexOr(mat.emissiveTexture)};
+        if (!appendMaterial(toParams(mat), textures, indices)) {
             return false;
         }
     }

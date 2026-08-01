@@ -238,13 +238,14 @@ void LightSettings::syncFrom(const kumo::scene::Light& light) {
     color = {light.color.x, light.color.y, light.color.z};
 }
 
-void drawLightPanel(LightSettings& settings, kumo::scene::Light* light) {
+void drawLightPanel(LightSettings& settings, kumo::scene::Light* light, bool& shadowsEnabled) {
     ImGui::SetNextWindowPos({10.0f, 110.0f}, ImGuiCond_FirstUseEver);
     ImGui::Begin("light");
     bool changed = ImGui::SliderFloat("azimuth", &settings.azimuthDeg, -180.0f, 180.0f);
     changed = ImGui::SliderFloat("elevation", &settings.elevationDeg, -85.0f, 85.0f) || changed;
     changed = ImGui::SliderFloat("intensity", &settings.intensity, 0.0f, 10.0f) || changed;
     changed = ImGui::ColorEdit3("color", settings.color.data()) || changed;
+    ImGui::Checkbox("shadows", &shadowsEnabled);
     ImGui::End();
     if (changed && light != nullptr) {
         settings.apply(*light);

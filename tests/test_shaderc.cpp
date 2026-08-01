@@ -65,6 +65,31 @@ void main() { color = texture(sampler2D(t, s), vec2(0.0)); }
     CHECK(contains(result->msl, "[[sampler(7)]]"));
 }
 
+TEST_CASE("shadow sampler reflects as a sampled_texture + sampler and emits sample_compare") {
+    constexpr const char* source = R"(#version 460
+layout(set = 0, binding = 1) uniform texture2D shadowMap;
+layout(set = 0, binding = 2) uniform samplerShadow shadowSampler;
+layout(location = 0) out vec4 color;
+void main() {
+    color = vec4(texture(sampler2DShadow(shadowMap, shadowSampler), vec3(0.5, 0.5, 0.5)));
+}
+)";
+    const auto result = shaderc::compileGlsl(source, shaderc::Stage::Fragment);
+    REQUIRE(result.has_value());
+
+    REQUIRE(result->reflection.bindings.size() == 2);
+    const auto& texBinding = result->reflection.bindings[0];
+    const auto& samplerBinding = result->reflection.bindings[1];
+    CHECK(texBinding.set == 0);
+    CHECK(texBinding.binding == 1);
+    CHECK(texBinding.type == "sampled_texture");
+    CHECK(samplerBinding.set == 0);
+    CHECK(samplerBinding.binding == 2);
+    CHECK(samplerBinding.type == "sampler");
+
+    CHECK(contains(result->msl, "sample_compare"));
+}
+
 TEST_CASE("push constant reflects size and remaps to buffer 24") {
     constexpr const char* source = R"(#version 460
 layout(push_constant) uniform Pc { mat4 m; } pc;

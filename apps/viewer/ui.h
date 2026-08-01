@@ -36,8 +36,9 @@ struct LightSettings {
 
 // Applies slider edits to `light` in the same frame they happen, so the caller
 // never has to arbitrate between stale panel state and agent changes. `light`
-// may be null.
-void drawLightPanel(LightSettings& settings, kumo::scene::Light* light);
+// may be null. `shadowsEnabled` mirrors ForwardRenderer::shadowsEnabled(); the
+// caller applies it back to the renderer.
+void drawLightPanel(LightSettings& settings, kumo::scene::Light* light, bool& shadowsEnabled);
 void drawMaterialPanel(float& metallic, float& roughness);
 
 struct ChatPanel {

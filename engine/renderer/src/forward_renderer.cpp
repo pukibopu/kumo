@@ -6,12 +6,15 @@
 #include <kumo/core/log.h>
 #include <kumo/math/math.h>
 
+#include "shadow.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <utility>
 
 namespace kumo::renderer {
@@ -21,6 +24,10 @@ namespace {
 constexpr std::uint32_t kSampleCount = 4;
 constexpr rhi::TextureFormat kHdrFormat = rhi::TextureFormat::RGBA16Float;
 constexpr rhi::TextureFormat kDepthFormat = rhi::TextureFormat::Depth32Float;
+constexpr std::uint32_t kShadowMapSize = 2048;
+// Slightly larger than a single shadow-map texel at the fitted ortho extent;
+// tuned empirically against the helmet golden scene (ADR 0009).
+constexpr float kShadowDepthBias = 0.0015f;
 
 struct GpuLight {
     math::float4 positionType;
@@ -39,8 +46,10 @@ struct FrameUniformsData {
     float prefilteredMipCount = 1.0f;
     float pad0 = 0.0f;
     float pad1 = 0.0f;
+    math::float4x4 lightViewProj{1.0f};
+    math::float4 shadowParams{0.0f};
 };
-static_assert(sizeof(FrameUniformsData) == 944);
+static_assert(sizeof(FrameUniformsData) == 1024);
 
 struct PerDrawData {
     math::float4x4 model;
@@ -85,6 +94,13 @@ std::uint32_t fullMipChain(std::uint32_t width, std::uint32_t height) {
         ++mips;
     }
     return mips;
+}
+
+math::Aabb mergeAabb(const math::Aabb& a, const math::Aabb& b) {
+    return {
+        .min = {std::min(a.min.x, b.min.x), std::min(a.min.y, b.min.y), std::min(a.min.z, b.min.z)},
+        .max = {std::max(a.max.x, b.max.x), std::max(a.max.y, b.max.y),
+                std::max(a.max.z, b.max.z)}};
 }
 
 // Declared byte size of the uniform_buffer at (set, binding); `fallback` when
@@ -143,13 +159,28 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
         .addressModeV = rhi::AddressMode::ClampToEdge,
         .addressModeW = rhi::AddressMode::ClampToEdge,
     });
-    if (!materialSampler_ || !iblSampler_ || !tonemapSampler_) {
+    shadowSampler_ = device.createSampler({
+        .addressModeU = rhi::AddressMode::ClampToEdge,
+        .addressModeV = rhi::AddressMode::ClampToEdge,
+        .addressModeW = rhi::AddressMode::ClampToEdge,
+        .compare = rhi::CompareFunction::LessEqual,
+    });
+    if (!materialSampler_ || !iblSampler_ || !tonemapSampler_ || !shadowSampler_) {
         return false;
     }
 
     defaultWhite_ = makeSolidTexture(255, 255, 255, 255);
     defaultNormal_ = makeSolidTexture(128, 128, 255, 255);
     if (!defaultWhite_ || !defaultNormal_) {
+        return false;
+    }
+
+    shadowMap_ = device.createTexture({
+        .size = {kShadowMapSize, kShadowMapSize},
+        .format = kDepthFormat,
+        .usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::Sampled,
+    });
+    if (!shadowMap_) {
         return false;
     }
 
@@ -167,9 +198,25 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
         }
         frameGroups_[slot] = device.createBindGroup({
             .layout = frameLayout_,
-            .entries = {{.binding = 0, .buffer = frameUniforms_[slot]}},
+            .entries = {{.binding = 0, .buffer = frameUniforms_[slot]},
+                        {.binding = 1, .texture = shadowMap_},
+                        {.binding = 2, .sampler = shadowSampler_}},
         });
         if (!frameGroups_[slot]) {
+            return false;
+        }
+        shadowUniforms_[slot] = device.createBuffer({
+            .size = sizeof(math::float4x4),
+            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+        });
+        if (!shadowUniforms_[slot]) {
+            return false;
+        }
+        shadowGroups_[slot] = device.createBindGroup({
+            .layout = shadowLayout_,
+            .entries = {{.binding = 0, .buffer = shadowUniforms_[slot]}},
+        });
+        if (!shadowGroups_[slot]) {
             return false;
         }
     }
@@ -516,7 +563,10 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
     auto skyboxFrag = detail::loadStage(*device_, "skybox.frag", shaderc::Stage::Fragment);
     auto fullscreenVert = detail::loadStage(*device_, "fullscreen.vert", shaderc::Stage::Vertex);
     auto tonemapFrag = detail::loadStage(*device_, "tonemap.frag", shaderc::Stage::Fragment);
-    if (!pbrVert || !pbrFrag || !skyboxVert || !skyboxFrag || !fullscreenVert || !tonemapFrag) {
+    auto shadowVert = detail::loadStage(*device_, "shadow.vert", shaderc::Stage::Vertex);
+    auto shadowFrag = detail::loadStage(*device_, "shadow.frag", shaderc::Stage::Fragment);
+    if (!pbrVert || !pbrFrag || !skyboxVert || !skyboxFrag || !fullscreenVert || !tonemapFrag ||
+        !shadowVert || !shadowFrag) {
         return false;
     }
 
@@ -529,10 +579,13 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
     const detail::StageReflection tonemapStages[] = {
         {&fullscreenVert->reflection, rhi::ShaderStage::Vertex},
         {&tonemapFrag->reflection, rhi::ShaderStage::Fragment}};
+    const detail::StageReflection shadowStages[] = {
+        {&shadowVert->reflection, rhi::ShaderStage::Vertex},
+        {&shadowFrag->reflection, rhi::ShaderStage::Fragment}};
 
-    const std::string signature = detail::layoutSignature(pbrStages) + "|" +
-                                  detail::layoutSignature(skyboxStages) + "|" +
-                                  detail::layoutSignature(tonemapStages);
+    const std::string signature =
+        detail::layoutSignature(pbrStages) + "|" + detail::layoutSignature(skyboxStages) + "|" +
+        detail::layoutSignature(tonemapStages) + "|" + detail::layoutSignature(shadowStages);
     // A hot reload (deriveLayouts == false) that changes the binding table
     // rebuilds every dependent resource below instead of rejecting the reload
     // (ADR 0043): existing bind groups reference the layouts being replaced.
@@ -541,9 +594,10 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
         auto pbrLayouts = detail::layoutsFromReflection(*device_, pbrStages);
         auto skyboxLayouts = detail::layoutsFromReflection(*device_, skyboxStages);
         auto tonemapLayouts = detail::layoutsFromReflection(*device_, tonemapStages);
+        auto shadowLayouts = detail::layoutsFromReflection(*device_, shadowStages);
         if (pbrLayouts.size() < 3 || !pbrLayouts[0] || !pbrLayouts[1] || !pbrLayouts[2] ||
             skyboxLayouts.size() < 2 || !skyboxLayouts[1] || tonemapLayouts.size() < 2 ||
-            !tonemapLayouts[1]) {
+            !tonemapLayouts[1] || shadowLayouts.empty() || !shadowLayouts[0]) {
             logError("shader binding layout does not match the set 0/1/2 convention");
             return false;
         }
@@ -552,6 +606,7 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
         iblLayout_ = pbrLayouts[2];
         skyboxLayout_ = skyboxLayouts[1];
         tonemapLayout_ = tonemapLayouts[1];
+        shadowLayout_ = shadowLayouts[0];
         layoutSignature_ = signature;
     }
 
@@ -575,12 +630,31 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
         .bindGroupLayouts = {nullptr, tonemapLayout_},
         .colorFormats = {outputFormat_},
     });
-    if (!pbr || !skybox || !tonemap) {
+    rhi::Ptr<rhi::RenderPipeline> shadow = device_->createRenderPipeline({
+        .vertexShader = shadowVert->module,
+        .fragmentShader = shadowFrag->module,
+        .vertexBuffers = {{.stride = sizeof(asset::Vertex),
+                           .attributes = {{.format = rhi::VertexFormat::Float32x3,
+                                           .offset = 0,
+                                           .shaderLocation = 0}}}},
+        .bindGroupLayouts = {shadowLayout_},
+        .pushConstantSize = 64,
+        .depthStencil = {.format = kDepthFormat,
+                         .depthWriteEnabled = true,
+                         .depthCompare = rhi::CompareFunction::Less,
+                         .depthBias = 4.0f,
+                         .depthBiasSlopeScale = 2.0f,
+                         .depthBiasClamp = 0.0f},
+        .cullMode = rhi::CullMode::Back,
+        .sampleCount = 1,
+    });
+    if (!pbr || !skybox || !tonemap || !shadow) {
         return false;
     }
     pbrPipeline_ = std::move(pbr);
     skyboxPipeline_ = std::move(skybox);
     tonemapPipeline_ = std::move(tonemap);
+    shadowPipeline_ = std::move(shadow);
     pbrVertModule_ = pbrVert->module;
     pbrVertReflection_ = pbrVert->reflection;
     pbrFragReflection_ = pbrFrag->reflection;
@@ -617,10 +691,30 @@ void ForwardRenderer::rebuildMaterialResources() {
         // creation, and the signature that got us here includes visibility.
         frameGroups_[slot] = device_->createBindGroup({
             .layout = frameLayout_,
-            .entries = {{.binding = 0, .buffer = frameUniforms_[slot]}},
+            .entries = {{.binding = 0, .buffer = frameUniforms_[slot]},
+                        {.binding = 1, .texture = shadowMap_},
+                        {.binding = 2, .sampler = shadowSampler_}},
         });
         if (!frameGroups_[slot]) {
             logError("shader reload: frame bind group rebuild failed (slot {})", slot);
+        }
+
+        if (!shadowUniforms_[slot]) {
+            shadowUniforms_[slot] = device_->createBuffer({
+                .size = sizeof(math::float4x4),
+                .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+            });
+            if (!shadowUniforms_[slot]) {
+                logError("shader reload: shadow uniform buffer rebuild failed (slot {})", slot);
+                continue;
+            }
+        }
+        shadowGroups_[slot] = device_->createBindGroup({
+            .layout = shadowLayout_,
+            .entries = {{.binding = 0, .buffer = shadowUniforms_[slot]}},
+        });
+        if (!shadowGroups_[slot]) {
+            logError("shader reload: shadow bind group rebuild failed (slot {})", slot);
         }
     }
 
@@ -806,7 +900,13 @@ void ForwardRenderer::setMaterialOverride(float metallic, float roughness) {
     overrideRoughness_ = roughness;
 }
 
-void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene) {
+void ForwardRenderer::setShadowsEnabled(bool enabled) {
+    shadowsEnabled_ = enabled;
+}
+
+void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene,
+                                          const math::float4x4& lightViewProj,
+                                          const math::float4& shadowParams) {
     FrameUniformsData data;
     const float aspect =
         static_cast<float>(size_.width) / static_cast<float>(std::max(1u, size_.height));
@@ -825,6 +925,8 @@ void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene) {
         data.lights[i].directionRange = math::float4(math::normalize(light.direction), light.range);
     }
     data.prefilteredMipCount = static_cast<float>(std::max(1u, environment_.prefilteredMips));
+    data.lightViewProj = lightViewProj;
+    data.shadowParams = shadowParams;
 
     device_->queue().writeBuffer(*frameUniforms_[frameSlot_], 0, &data, sizeof(data));
 }
@@ -852,10 +954,11 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
     // Two uniform slots track the two frames in flight, so this write never
     // races the buffer the GPU is still reading.
     frameSlot_ = (frameSlot_ + 1) % kFrameSlots;
-    updateFrameUniforms(scene);
     flushDirtyMaterials();
 
     draws_.clear();
+    math::Aabb sceneBounds{math::float3(std::numeric_limits<float>::max()),
+                           math::float3(std::numeric_limits<float>::lowest())};
     scene.entities.forEach([&](scene::EntityId, const scene::Entity& entity) {
         if (entity.meshIndex < 0 || static_cast<std::size_t>(entity.meshIndex) >= meshes_.size()) {
             return;
@@ -865,9 +968,13 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
                     static_cast<std::size_t>(entity.materialIndex) < materialGroups_.size()
                 ? static_cast<std::size_t>(entity.materialIndex)
                 : defaultMaterialIndex_;
+        const math::float4x4 model = entity.transform.matrix();
         draws_.push_back({.meshIndex = static_cast<std::size_t>(entity.meshIndex),
                           .materialIndex = materialIndex,
-                          .model = entity.transform.matrix()});
+                          .model = model});
+        sceneBounds = mergeAabb(
+            sceneBounds, math::transformAabb(
+                             meshes_[static_cast<std::size_t>(entity.meshIndex)].localAabb, model));
     });
     // Shared-pipeline draws first, in their original relative order (a scene
     // with no custom materials never reorders, keeping the command stream and
@@ -882,6 +989,55 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
     std::stable_sort(customBegin, draws_.end(), [](const DrawItem& a, const DrawItem& b) {
         return a.materialIndex < b.materialIndex;
     });
+
+    // Shadow-casting light: the first directional light in the scene (ADR 0009;
+    // CSM/multi-light shadows are a later extension). fitDirectionalShadow
+    // returns identity for a degenerate direction/bounds, which also disables
+    // the pass below.
+    std::int32_t shadowLightIndex = -1;
+    const std::span<const scene::Light> lights = scene.lights();
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        if (lights[i].type == scene::LightType::Directional) {
+            shadowLightIndex = static_cast<std::int32_t>(i);
+            break;
+        }
+    }
+    math::float4x4 lightViewProj(1.0f);
+    math::float4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
+    bool renderShadowPass = false;
+    if (shadowsEnabled_ && shadowLightIndex >= 0 && !draws_.empty()) {
+        const math::float4x4 fitted = detail::fitDirectionalShadow(
+            sceneBounds, lights[static_cast<std::size_t>(shadowLightIndex)].direction);
+        if (fitted != math::float4x4(1.0f)) {
+            lightViewProj = fitted;
+            shadowParams = {1.0f, 1.0f / static_cast<float>(kShadowMapSize), kShadowDepthBias,
+                            static_cast<float>(shadowLightIndex)};
+            renderShadowPass = true;
+            device_->queue().writeBuffer(*shadowUniforms_[frameSlot_], 0, &lightViewProj,
+                                         sizeof(lightViewProj));
+        }
+    }
+    updateFrameUniforms(scene, lightViewProj, shadowParams);
+
+    if (renderShadowPass) {
+        rhi::RenderPassEncoder& shadowPass = encoder.beginRenderPass({
+            .depthAttachment = {.texture = shadowMap_.get(),
+                                .loadOp = rhi::LoadOp::Clear,
+                                .storeOp = rhi::StoreOp::Store,
+                                .clearDepth = 1.0f},
+        });
+        shadowPass.setPipeline(*shadowPipeline_);
+        shadowPass.setBindGroup(0, *shadowGroups_[frameSlot_]);
+        for (const DrawItem& drawItem : draws_) {
+            const GpuMesh& mesh = meshes_[drawItem.meshIndex];
+            shadowPass.setPushConstants(rhi::ShaderStage::Vertex, &drawItem.model,
+                                        sizeof(drawItem.model));
+            shadowPass.setVertexBuffer(0, *mesh.vertexBuffer);
+            shadowPass.setIndexBuffer(*mesh.indexBuffer, rhi::IndexFormat::Uint32);
+            shadowPass.drawIndexed(mesh.indexCount);
+        }
+        shadowPass.end();
+    }
 
     rhi::RenderPassEncoder& scenePass = encoder.beginRenderPass({
         .colorAttachments = {{.texture = hdrMsaa_.get(),

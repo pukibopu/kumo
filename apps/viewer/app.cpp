@@ -161,6 +161,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     ui::ChatPanel shaderPanel;
     float overrideMetallic = 1.0f;
     float overrideRoughness = 1.0f;
+    bool shadowsEnabled = runtime->renderer().shadowsEnabled();
 
     glfwSetWindowUserPointer(window, &input);
     // Installed before ImGui so its backend chains to this callback.
@@ -169,9 +170,9 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
     bool reloadPending = false;
     kumo::FileWatcher shaderWatcher;
     auto onShaderChange = [&](const std::filesystem::path&) { reloadPending = true; };
-    const std::array<const char*, 7> watchedShaders = {
-        "pbr.vert",        "pbr.frag",     "skybox.vert",        "skybox.frag",
-        "fullscreen.vert", "tonemap.frag", "include/common.glsl"};
+    const std::array<const char*, 10> watchedShaders = {
+        "pbr.vert",     "pbr.frag",    "skybox.vert", "skybox.frag",         "fullscreen.vert",
+        "tonemap.frag", "shadow.vert", "shadow.frag", "include/common.glsl", "include/shadow.glsl"};
     for (const char* name : watchedShaders) {
         shaderWatcher.watch(std::filesystem::path(KUMO_SHADER_DIR) / name, onShaderChange);
     }
@@ -221,6 +222,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
             lightSettings.syncFrom(*light);
         }
         runtime->renderer().setMaterialOverride(overrideMetallic, overrideRoughness);
+        runtime->renderer().setShadowsEnabled(shadowsEnabled);
 
         const bool sDown = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
         const bool screenshotRequested =
@@ -249,7 +251,7 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
             runtime->render(*encoder, target, [&](rhi::RenderPassEncoder& pass) {
                 ui::beginFrame(pass);
                 ui::drawStatsPanel(fbWidth, fbHeight);
-                ui::drawLightPanel(lightSettings, runtime->world().light(0));
+                ui::drawLightPanel(lightSettings, runtime->world().light(0), shadowsEnabled);
                 ui::drawMaterialPanel(overrideMetallic, overrideRoughness);
                 ui::drawAgentPanels(scenePanel, runtime->sceneSession(),
                                     &runtime->sceneRetryNotice(), shaderPanel,

@@ -71,6 +71,8 @@ struct SamplerDesc {
     // Prefiltered-env sampling needs the full mip range.
     float lodMaxClamp = 1000.0f;
     std::uint32_t maxAnisotropy = 1;
+    // Never disables comparison sampling; set for shadow map samplers (samplerShadow).
+    CompareFunction compare = CompareFunction::Never;
 };
 
 class Sampler {
@@ -140,6 +142,10 @@ struct DepthStencilState {
     bool depthWriteEnabled = false;
     // Reversed-Z: near is 1, far is 0.
     CompareFunction depthCompare = CompareFunction::GreaterEqual;
+    // Slope-scaled depth bias for shadow-map passes; zero is a no-op.
+    float depthBias = 0.0f;
+    float depthBiasSlopeScale = 0.0f;
+    float depthBiasClamp = 0.0f;
 };
 
 struct RenderPipelineDesc {

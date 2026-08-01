@@ -46,6 +46,13 @@ inline float4x4 perspectiveInfinite(float fovYRadians, float aspect, float nearZ
     return m;
 }
 
+// Directional shadow frusta are orthographic with linear depth, so reversed-Z
+// (ADR 0027) has no precision benefit here; clip depth stays conventional [0, 1].
+inline float4x4 orthographic(float left, float right, float bottom, float top, float nearZ,
+                             float farZ) {
+    return glm::orthoRH_ZO(left, right, bottom, top, nearZ, farZ);
+}
+
 // Quaternion orienting -Z onto `forward`, right-handed (matches the camera convention).
 // Falls back to a stable up axis when `up` is parallel to `forward`.
 inline quat quatLookAt(const float3& forward, const float3& up) {

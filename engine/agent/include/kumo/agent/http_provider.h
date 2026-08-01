@@ -20,6 +20,9 @@ struct HttpRequest {
     std::string url;
     std::vector<std::pair<std::string, std::string>> headers;
     std::string body;
+    // Every provider below is POST-only; asset_fetch.cpp's Poly Haven client is
+    // the one caller that sets this to "GET" (no body).
+    std::string method = "POST";
 };
 
 struct HttpResponse {

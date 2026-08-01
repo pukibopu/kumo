@@ -1,0 +1,45 @@
+{
+  "hdri": {
+    "1k": {
+      "exr": {
+        "md5": "cc2274e43961e5b5bc43247528c7010d",
+        "size": 1648294,
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/1k/dikhololo_night_1k.exr"
+      },
+      "hdr": {
+        "md5": "4a760813214ec4d97da8e1739bb616a5",
+        "size": 1745132,
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/dikhololo_night_1k.hdr"
+      }
+    },
+    "2k": {
+      "exr": {
+        "md5": "c7a5f6a88eca59b0ebd074ccbd1c5455",
+        "size": 6707292,
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/2k/dikhololo_night_2k.exr"
+      },
+      "hdr": {
+        "md5": "fcc8200f34360993e938d4012e2e446a",
+        "size": 7050455,
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/dikhololo_night_2k.hdr"
+      }
+    },
+    "4k": {
+      "exr": {
+        "md5": "9589cd0cf8479826784fe83fea38018b",
+        "size": 27709403,
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/4k/dikhololo_night_4k.exr"
+      },
+      "hdr": {
+        "md5": "5ad95d262e8cc7f79d23c4e4ab772e62",
+        "size": 28440057,
+        "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/dikhololo_night_4k.hdr"
+      }
+    }
+  },
+  "tonemapped": {
+    "md5": "c7c2696f81a984cd26aa38f8a064804c",
+    "size": 9443888,
+    "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/extra/Tonemapped%20JPG/dikhololo_night.jpg"
+  }
+}

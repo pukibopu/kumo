@@ -1219,9 +1219,16 @@ std::string materialSetTexture(const SceneToolContext& context, const json& args
         renderer.setMaterialParams(materialIndex, params);
     }
 
+    // Save/load provenance (M6.99): every entity sharing this material gets
+    // the texture-set name recorded too, not just the one the call named,
+    // since setMaterialTextures above already applies to all of them (they
+    // share one GPU material record). Without this, reload would rebuild
+    // those other entities' materials untextured (EngineRuntime::loadScene
+    // only knows procedural-primitive/model provenance, not texture sets).
     std::size_t sharers = 0;
-    context.scene->entities.forEach([&](scene::EntityId, const scene::Entity& other) {
+    context.scene->entities.forEach([&](scene::EntityId, scene::Entity& other) {
         if (other.materialIndex == lookup->entity->materialIndex) {
+            other.textureSet = textureName;
             ++sharers;
         }
     });
@@ -1232,6 +1239,46 @@ std::string materialSetTexture(const SceneToolContext& context, const json& args
         return json{{"status", "ok"}, {"entities_sharing_material", sharers}}.dump();
     }
     return okJson();
+}
+
+// Downloads a CC0 asset from Poly Haven into the asset library on demand
+// (M6.99), for when asset_list shows nothing that fits. Mutates only the
+// on-disk library, never the scene, so it needs no undo checkpoint (see
+// kReadOnlyTools in engine_runtime.cpp) and no confirmation gate.
+std::string assetFetch(const SceneToolContext& context, const json& args) {
+    if (!context.fetchAsset) {
+        return errorJson("asset fetching is not available");
+    }
+    std::string kind;
+    std::string error;
+    if (!readString(args, "kind", kind, error)) {
+        return errorJson(error);
+    }
+    if (kind != "texture" && kind != "env") {
+        return errorJson("kind must be one of: texture, env");
+    }
+    const auto queryIt = args.find("query");
+    if (queryIt == args.end() || !queryIt->is_string()) {
+        return errorJson("query (string) is required");
+    }
+    const std::string query = queryIt->get<std::string>();
+    if (query.empty() || query.size() > 64) {
+        return errorJson("query must be 1-64 characters");
+    }
+
+    std::expected<FetchedAsset, std::string> result = context.fetchAsset(kind, query);
+    if (!result.has_value()) {
+        return errorJson(result.error());
+    }
+    json out{{"status", "ok"},
+             {"kind", kind},
+             {"name", result->name},
+             {"maps", result->maps},
+             {"already_present", result->alreadyPresent}};
+    if (!result->alternatives.empty()) {
+        out["alternatives"] = result->alternatives;
+    }
+    return dumpSafe(out);
 }
 
 // Places a real glTF model from the asset library (mirrors scene_add_entity's
@@ -1852,6 +1899,18 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         false, [](const SceneToolContext& ctx, const json& args) {
             return materialSetTexture(ctx, args);
         });
+
+    add("asset_fetch",
+        "Download a CC0 texture set or HDR environment from Poly Haven into the asset library "
+        "when asset_list has nothing that fits; then use the returned name like any library "
+        "asset (material_set_texture / environment_set). Runs synchronously and can take several "
+        "seconds, longer for env. On a near-miss the error lists close alternative names to retry "
+        "with.",
+        R"({"type":"object","properties":{
+"kind":{"type":"string","enum":["texture","env"]},
+"query":{"type":"string","minLength":1,"maxLength":64,"description":"Short English search term, e.g. asphalt, snow, night city"}},
+"required":["kind","query"]})",
+        false, [](const SceneToolContext& ctx, const json& args) { return assetFetch(ctx, args); });
 
     add("scene_define_group",
         "Define a reusable named assembly of primitives (local transforms relative to the group "

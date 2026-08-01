@@ -22,13 +22,15 @@ HttpTransport makeUrlSessionTransport() {
                                    .message = "invalid url: " + request.url});
             }
             NSMutableURLRequest* urlRequest = [NSMutableURLRequest requestWithURL:url];
-            urlRequest.HTTPMethod = @"POST";
+            urlRequest.HTTPMethod = [NSString stringWithUTF8String:request.method.c_str()];
             for (const auto& [name, value] : request.headers) {
                 [urlRequest setValue:[NSString stringWithUTF8String:value.c_str()]
                     forHTTPHeaderField:[NSString stringWithUTF8String:name.c_str()]];
             }
-            urlRequest.HTTPBody = [NSData dataWithBytes:request.body.data()
-                                                 length:request.body.size()];
+            if (!request.body.empty()) {
+                urlRequest.HTTPBody = [NSData dataWithBytes:request.body.data()
+                                                     length:request.body.size()];
+            }
 
             NSURLSessionConfiguration* configuration =
                 [NSURLSessionConfiguration ephemeralSessionConfiguration];

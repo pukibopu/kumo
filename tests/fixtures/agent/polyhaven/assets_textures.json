@@ -1,0 +1,133 @@
+{
+  "aerial_asphalt_01": {
+    "categories": [
+      "asphalt",
+      "outdoor",
+      "floor",
+      "road",
+      "man made",
+      "aerial"
+    ],
+    "name": "Aerial Asphalt 01",
+    "tags": [
+      "road",
+      "flat",
+      "cracked"
+    ]
+  },
+  "asphalt_01": {
+    "categories": [
+      "asphalt",
+      "floor",
+      "outdoor",
+      "road"
+    ],
+    "name": "Asphalt 01",
+    "tags": [
+      "rough",
+      "dirty",
+      "asphalt",
+      "road",
+      "worn"
+    ]
+  },
+  "asphalt_02": {
+    "categories": [
+      "terrain",
+      "road",
+      "man made",
+      "outdoor",
+      "floor"
+    ],
+    "name": "Asphalt 02",
+    "tags": [
+      "asphalt",
+      "cracked",
+      "flat",
+      "road",
+      "asphalt road",
+      "tarmac road",
+      "gritty",
+      "weathered",
+      "grey",
+      "cracking",
+      "tar",
+      "cracks"
+    ]
+  },
+  "metal_plate": {
+    "categories": [
+      "metal",
+      "floor",
+      "man made",
+      "indoor",
+      "outdoor",
+      "dirty"
+    ],
+    "name": "Metal Plate",
+    "tags": [
+      "bare",
+      "painted",
+      "rusty",
+      "pattern",
+      "iron",
+      "factory",
+      "industrial",
+      "steel"
+    ]
+  },
+  "snow_01": {
+    "categories": [
+      "terrain",
+      "natural",
+      "outdoor",
+      "snow"
+    ],
+    "name": "Snow 01",
+    "tags": [
+      "snow",
+      "rough",
+      "uneven",
+      "footprints",
+      "powdery",
+      "trail",
+      "snowfield"
+    ]
+  },
+  "snow_02": {
+    "categories": [
+      "terrain",
+      "natural",
+      "outdoor",
+      "snow"
+    ],
+    "name": "Snow 02",
+    "tags": [
+      "snow",
+      "uneven",
+      "smooth",
+      "powdery",
+      "frosty",
+      "snowfield",
+      "soft",
+      "wintery"
+    ]
+  },
+  "snow_field_aerial": {
+    "categories": [
+      "terrain",
+      "snow",
+      "outdoor",
+      "dirty",
+      "natural",
+      "aerial"
+    ],
+    "name": "Snow Field Aerial",
+    "tags": [
+      "snow",
+      "mud",
+      "field",
+      "uneven"
+    ]
+  }
+}

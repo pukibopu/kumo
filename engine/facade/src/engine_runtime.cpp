@@ -496,6 +496,7 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
             sceneDesc.model = plan.sceneEndpoint.model;
             sceneDesc.systemPrompt = kSceneSystemPrompt;
             sceneDesc.maxTokens = config->maxTokens;
+            sceneDesc.reasoningEffort = config->reasoningEffort;
             sceneDesc.maxToolRounds = config->maxToolRounds;
             sceneDesc.summaryThresholdTokens = config->summaryThresholdTokens;
             // The key never reaches the log (ADR 0012).
@@ -512,6 +513,7 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
             shaderDesc.model = plan.shaderEndpoint.model;
             shaderDesc.systemPrompt = kShaderSystemPrompt;
             shaderDesc.maxTokens = config->maxTokens;
+            shaderDesc.reasoningEffort = config->reasoningEffort;
             shaderDesc.maxToolRounds = config->maxToolRounds;
             shaderDesc.summaryThresholdTokens = config->summaryThresholdTokens;
             logInfo("shader agent ready: {} {} at {}",

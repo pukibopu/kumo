@@ -113,6 +113,7 @@ void AgentSession::runTurn(std::string userText) {
         request.messages = history_;
         request.tools = registry_.defs();
         request.maxTokens = desc_.maxTokens;
+        request.reasoningEffort = desc_.reasoningEffort;
         CompleteResult result = provider_.complete(request);
         if (abort_.load()) {
             return;

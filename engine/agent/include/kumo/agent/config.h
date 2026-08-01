@@ -32,6 +32,10 @@ struct AgentConfig {
     AgentEndpoint scene;
     AgentEndpoint shader;
     std::uint32_t maxTokens = 4096;
+    // provider.reasoning_effort; empty = omitted from requests. OpenAI's newer
+    // reasoning models reject function tools on chat completions unless this
+    // is "none".
+    std::string reasoningEffort;
     std::chrono::seconds requestTimeout{120};
     bool confirmDestructive = false;
     // agents.summary_threshold_tokens; 0 disables history compression.

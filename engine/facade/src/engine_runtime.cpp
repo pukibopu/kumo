@@ -1,6 +1,14 @@
 #include <kumo/facade/detail.h>
 #include <kumo/facade/engine_runtime.h>
 
+// Private kumo_agent header (engine/agent/src), not a public interface,
+// reached into the same way tests reach into kumo_agent's retry_after.h
+// (engine/facade/CMakeLists.txt adds the include path): engine_runtime.cpp is
+// the composition root and needs the concrete PolyHavenClient type to
+// construct one (asset_fetch's FetchedAsset itself IS public, in scene_tools.h,
+// since SceneToolContext::fetchAsset needs it as a complete type).
+#include "asset_fetch.h"
+
 #include <kumo/agent/config.h>
 #include <kumo/agent/entity_id.h>
 #include <kumo/agent/fake_provider.h>
@@ -10,6 +18,7 @@
 #include <kumo/asset/asset.h>
 #include <kumo/asset/primitives.h>
 #include <kumo/asset/procedural_sky.h>
+#include <kumo/asset/texture_set.h>
 #include <kumo/core/asset_name.h>
 #include <kumo/core/file.h>
 #include <kumo/core/log.h>
@@ -108,7 +117,10 @@ constexpr const char* kSceneSystemPrompt =
     "grass or rock, structures get planks or bark) and set tiling so texels stay roughly "
     "square — a 20 m ground with a 1 m texture wants tiling around 20. Prefer an HDR file "
     "environment (environment_set file) over the procedural sky when one matches the "
-    "scene's mood; fall back to procedural for stylized looks.\n\n"
+    "scene's mood; fall back to procedural for stylized looks. If the library lacks a "
+    "fitting texture or environment, call asset_fetch with a short English query (asphalt, "
+    "snow, night city); then use the returned name like any library asset. If it fails or "
+    "you are offline, fall back to the closest library asset or the procedural sky.\n\n"
     "Placement. Rest objects on their support: the AABB bottom sits on the ground or the "
     "surface below, sunk 1-2 cm so nothing floats. Elevated objects need visible support — "
     "build the structure before its attachments (a sign mounts on a building wall, a lamp "
@@ -328,12 +340,14 @@ EnvironmentSource toEnvironmentSource(const scene::SavedEnvironment& saved) {
 
 // Tool names the undo hook must not record a checkpoint for (ADR 0044): pure
 // reads, so they never change scene/renderer state, plus scene_define_group
-// (M6.9), which only stores a validated assembly and never touches the scene.
-// environment_set is NOT here: it mutates environmentSky_/the renderer and
-// gets its undo checkpoint from this same hook like every other scene tool.
-constexpr std::array<std::string_view, 6> kReadOnlyTools{"scene_list",        "shader_read",
-                                                         "viewer_screenshot", "scene_define_group",
-                                                         "scene_validate",    "asset_list"};
+// (M6.9), which only stores a validated assembly and never touches the scene,
+// plus asset_fetch (M6.99), which only writes into the asset library on disk
+// and never touches the scene or renderer either. environment_set is NOT
+// here: it mutates environmentSky_/the renderer and gets its undo checkpoint
+// from this same hook like every other scene tool.
+constexpr std::array<std::string_view, 7> kReadOnlyTools{
+    "scene_list",     "shader_read", "viewer_screenshot", "scene_define_group",
+    "scene_validate", "asset_list",  "asset_fetch"};
 
 bool isFinite3(const math::float3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -672,8 +686,12 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     // scene_add_model report themselves unsupported instead of touching the
     // filesystem (SceneToolContext's own contract).
     sceneTools.assetDir = self->assetDir_;
-    sceneTools.textureSets =
+    // Shared with loadScene's texture-set provenance rebuild (M6.99) via
+    // textureSetCache_, so a set uploaded through either path is never
+    // uploaded twice.
+    self->textureSetCache_ =
         std::make_shared<std::unordered_map<std::string, agent::TextureSetIndices>>();
+    sceneTools.textureSets = self->textureSetCache_;
     sceneTools.instantiateModel =
         [runtime = self.get()](
             const scene::Transform& root,
@@ -692,6 +710,26 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     };
     sceneTools.applyEnvironmentFile = [runtime = self.get()](const std::string& file) {
         return runtime->applyEnvironmentFile(file);
+    };
+    // asset_fetch (M6.99): the real NSURLSession transport, same as the LLM
+    // providers use. Downloads run synchronously on whichever thread calls
+    // the tool (the main thread, per the tool execution model, ADR 0005) — a
+    // 2k HDR (~5-15MB) can freeze the frame for several seconds; an async
+    // tool pattern is a later milestone (see docs/agents.md).
+    self->polyHavenClient_ =
+        std::make_unique<agent::PolyHavenClient>(agent::makeUrlSessionTransport());
+    sceneTools.fetchAsset = [runtime = self.get()](std::string_view kind, std::string_view query)
+        -> std::expected<agent::FetchedAsset, std::string> {
+        if (runtime->assetDir_.empty()) {
+            return std::unexpected(std::string("asset directory not configured"));
+        }
+        if (kind == "texture") {
+            return runtime->polyHavenClient_->fetchTexture(query, runtime->assetDir_ / "textures");
+        }
+        if (kind == "env") {
+            return runtime->polyHavenClient_->fetchEnvironment(query, runtime->assetDir_ / "env");
+        }
+        return std::unexpected(std::string("unknown asset kind: ") + std::string(kind));
     };
     agent::registerSceneTools(self->sceneToolRegistry_, sceneTools);
     agent::registerSceneListTool(self->shaderToolRegistry_, sceneTools);
@@ -1208,6 +1246,21 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
                                             toMaterialParams(*savedEntity.material));
             }
         }
+        // Texture-set provenance (M6.99): material_set_texture records which
+        // set an entity's material wears (on every entity sharing that
+        // material), independent of mesh/model/primitive provenance above —
+        // reapplied last so it wins over a model's or glTF's own textures,
+        // matching what material_set_texture actually did before save. A
+        // missing/bad set on disk never blocks the load; the entity just
+        // keeps whatever textures its branch above already gave it.
+        if (!entity.textureSet.empty() && entity.materialIndex >= 0) {
+            if (!applyTextureSet(entity.textureSet,
+                                 static_cast<std::uint32_t>(entity.materialIndex))) {
+                logError("scene load: texture set '{}' for entity '{}' failed to apply, leaving "
+                         "it as-is",
+                         entity.textureSet, entity.name);
+            }
+        }
         // Custom shader (shader-assistant output, ADR 0011): installed after the
         // material's factors are in place so the rebuilt factor buffer picks up
         // the saved values. A compile failure never blocks the load; the entity
@@ -1229,6 +1282,73 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
     }
     logInfo("scene loaded: {} entities, {} lights", loaded, saved.lights.size());
     markDirty();
+    return true;
+}
+
+// Mirrors material_set_texture's (scene_tools.cpp) upload logic: same cache
+// contract (TextureSetIndices per name), same map-presence handling. Kept
+// separate rather than shared because that logic lives in the agent tool
+// layer and returns tool-facing error strings, while this one is a facade-
+// internal step that only logs (ADR 0037 layering: renderer/scene stay
+// reachable from both, but neither layer calls into the other's private code).
+bool EngineRuntime::applyTextureSet(const std::string& name, std::uint32_t materialIndex) {
+    if (!isPlainAssetName(name)) {
+        logError("applyTextureSet: invalid texture set name '{}'", name);
+        return false;
+    }
+    agent::TextureSetIndices indices;
+    const auto cacheIt = textureSetCache_->find(name);
+    if (cacheIt != textureSetCache_->end()) {
+        indices = cacheIt->second;
+    } else {
+        const std::expected<asset::TextureSetData, std::string> textureSet =
+            asset::loadTextureSet(assetDir_ / "textures" / name);
+        if (!textureSet.has_value()) {
+            logError("applyTextureSet: texture set '{}' not found: {}", name, textureSet.error());
+            return false;
+        }
+        if (textureSet->baseColor.has_value()) {
+            indices.baseColor = renderer_.addTexture(*textureSet->baseColor);
+            if (indices.baseColor < 0) {
+                logError("applyTextureSet: gpu upload failed for texture set '{}'", name);
+                return false;
+            }
+        }
+        if (textureSet->metallicRoughness.has_value()) {
+            indices.metallicRoughness = renderer_.addTexture(*textureSet->metallicRoughness);
+            if (indices.metallicRoughness < 0) {
+                logError("applyTextureSet: gpu upload failed for texture set '{}'", name);
+                return false;
+            }
+        }
+        if (textureSet->normal.has_value()) {
+            indices.normal = renderer_.addTexture(*textureSet->normal);
+            if (indices.normal < 0) {
+                logError("applyTextureSet: gpu upload failed for texture set '{}'", name);
+                return false;
+            }
+        }
+        if (textureSet->occlusion.has_value()) {
+            indices.occlusion = renderer_.addTexture(*textureSet->occlusion);
+            if (indices.occlusion < 0) {
+                logError("applyTextureSet: gpu upload failed for texture set '{}'", name);
+                return false;
+            }
+        }
+        (*textureSetCache_)[name] = indices;
+    }
+    const renderer::ForwardRenderer::MaterialTextureIndices toBind{
+        .baseColor = indices.baseColor,
+        .metallicRoughness = indices.metallicRoughness,
+        .normal = indices.normal,
+        .occlusion = indices.occlusion,
+        .emissive = indices.emissive,
+    };
+    if (!renderer_.setMaterialTextures(materialIndex, toBind)) {
+        logError("applyTextureSet: failed to bind texture set '{}' to material {}", name,
+                 materialIndex);
+        return false;
+    }
     return true;
 }
 
@@ -1365,7 +1485,8 @@ std::vector<EngineRuntime::EntityInfo> EngineRuntime::listEntities() const {
         out.push_back({.id = agent::formatEntityId(id),
                        .name = entity.name,
                        .primitive = entity.primitive,
-                       .model = entity.model});
+                       .model = entity.model,
+                       .textureSet = entity.textureSet});
     });
     return out;
 }
@@ -1385,6 +1506,7 @@ EngineRuntime::EntityDetail EngineRuntime::entityDetail(const std::string& id) c
     detail.name = entity->name;
     detail.primitive = entity->primitive;
     detail.model = entity->model;
+    detail.textureSet = entity->textureSet;
     detail.position = entity->transform.position;
     detail.eulerDeg = math::eulerDegrees(entity->transform.rotation);
     detail.scale = entity->transform.scale;

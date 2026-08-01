@@ -134,16 +134,39 @@ TEST_CASE("setMismatch: a custom fragment that adds a set 0 binding is rejected"
     const std::string variantSource =
         replaceOnce(*source, "#include \"common.glsl\"\n",
                     "#include \"common.glsl\"\n"
-                    "layout(set = 0, binding = 1) uniform texture2D extraDebugTex;\n");
+                    "layout(set = 0, binding = 3) uniform texture2D extraDebugTex;\n");
     const auto variant = compilePbrFragVariant(variantSource, "variant.frag");
     REQUIRE(variant.has_value());
 
     const auto mismatch = renderer::detail::setMismatch(variant->reflection, shared->reflection, 0);
     REQUIRE(mismatch.has_value());
     CHECK(contains(*mismatch, "set 0"));
-    CHECK(contains(*mismatch, "binding 1"));
+    CHECK(contains(*mismatch, "binding 3"));
 
     // set 2 is untouched by this edit.
+    CHECK(!renderer::detail::setMismatch(variant->reflection, shared->reflection, 2).has_value());
+}
+
+TEST_CASE("setMismatch: a material fragment with common.glsl but not shadow.glsl stays set 0/2 "
+          "compatible") {
+    const auto pbrFragPath = std::filesystem::path(KUMO_SHADER_DIR) / "pbr.frag";
+    const auto source = readTextFile(pbrFragPath);
+    REQUIRE(source.has_value());
+
+    const auto shared = compilePbrFragVariant(*source, "pbr.frag");
+    REQUIRE(shared.has_value());
+
+    // shadowMap/shadowSampler live in common.glsl, not shadow.glsl (ADR 0009);
+    // dropping the include (and the one call site) must not change set 0/2.
+    std::string variantSource = replaceOnce(*source, "#include \"shadow.glsl\"\n", "");
+    variantSource = replaceOnce(
+        variantSource,
+        "float shadow = i == int(frame.shadowParams.w) ? kumoShadowPcf(vWorldPos) : 1.0;",
+        "float shadow = 1.0;");
+    const auto variant = compilePbrFragVariant(variantSource, "no_shadow.frag");
+    REQUIRE(variant.has_value());
+
+    CHECK(!renderer::detail::setMismatch(variant->reflection, shared->reflection, 0).has_value());
     CHECK(!renderer::detail::setMismatch(variant->reflection, shared->reflection, 2).has_value());
 }
 

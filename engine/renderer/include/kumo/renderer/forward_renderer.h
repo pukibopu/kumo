@@ -65,6 +65,10 @@ public:
 
     // Multipliers on top of the material metallic/roughness factors.
     void setMaterialOverride(float metallic, float roughness);
+    // Directional-light PCF shadow mapping (ADR 0009); disabling clears shadowParams
+    // so the frame stops sampling the shadow map, leaving its stale contents unused.
+    void setShadowsEnabled(bool enabled);
+    bool shadowsEnabled() const { return shadowsEnabled_; }
     // Recompiles every shader and swaps the pipelines; keeps the current ones on
     // any error, so a broken edit never interrupts rendering.
     bool reloadPipelines();
@@ -108,7 +112,8 @@ private:
     // Recreates frame uniform buffers/groups, every material's factor buffers
     // and bind groups, and the ibl/skybox/tonemap groups after a layout change.
     void rebuildMaterialResources();
-    void updateFrameUniforms(const scene::Scene& scene);
+    void updateFrameUniforms(const scene::Scene& scene, const math::float4x4& lightViewProj,
+                             const math::float4& shadowParams);
     // Writes the current frameSlot_ buffer for every material marked dirty in
     // that slot; called once per render() before recording the scene pass.
     void flushDirtyMaterials();
@@ -134,12 +139,14 @@ private:
     rhi::Ptr<rhi::BindGroupLayout> iblLayout_;
     rhi::Ptr<rhi::BindGroupLayout> skyboxLayout_;
     rhi::Ptr<rhi::BindGroupLayout> tonemapLayout_;
+    rhi::Ptr<rhi::BindGroupLayout> shadowLayout_;
     // Bind groups outlive reloads, so a reload must reproduce this signature.
     std::string layoutSignature_;
 
     rhi::Ptr<rhi::RenderPipeline> pbrPipeline_;
     rhi::Ptr<rhi::RenderPipeline> skyboxPipeline_;
     rhi::Ptr<rhi::RenderPipeline> tonemapPipeline_;
+    rhi::Ptr<rhi::RenderPipeline> shadowPipeline_;
 
     // Shared pbr vertex stage + its reflection, reused when building a custom
     // material pipeline (ADR 0011); the shared fragment reflection is the
@@ -154,14 +161,21 @@ private:
     rhi::Ptr<rhi::Texture> depth_;
     rhi::Ptr<rhi::BindGroup> tonemapGroup_;
 
+    // Fixed size, allocated once in init(); resize() never touches it.
+    rhi::Ptr<rhi::Texture> shadowMap_;
+
     static constexpr std::uint32_t kFrameSlots = 2;
     rhi::Ptr<rhi::Buffer> frameUniforms_[kFrameSlots];
     rhi::Ptr<rhi::BindGroup> frameGroups_[kFrameSlots];
+    rhi::Ptr<rhi::Buffer> shadowUniforms_[kFrameSlots];
+    rhi::Ptr<rhi::BindGroup> shadowGroups_[kFrameSlots];
     std::uint32_t frameSlot_ = 0;
+    bool shadowsEnabled_ = true;
 
     rhi::Ptr<rhi::Sampler> materialSampler_;
     rhi::Ptr<rhi::Sampler> iblSampler_;
     rhi::Ptr<rhi::Sampler> tonemapSampler_;
+    rhi::Ptr<rhi::Sampler> shadowSampler_;
 
     ibl::Environment environment_;
     rhi::Ptr<rhi::BindGroup> iblGroup_;

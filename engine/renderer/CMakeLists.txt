@@ -2,6 +2,7 @@ add_library(kumo_renderer STATIC
     src/forward_renderer.cpp
     src/ibl.cpp
     src/shader_load.cpp
+    src/shadow.cpp
 )
 target_include_directories(kumo_renderer PUBLIC include)
 # shaderc is PUBLIC: forward_renderer.h's setMaterialShader (ADR 0011) returns

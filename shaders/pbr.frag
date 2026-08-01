@@ -2,6 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "common.glsl"
+#include "shadow.glsl"
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
@@ -115,7 +116,8 @@ void main() {
         vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 1e-4);
         vec3 kd = (1.0 - F) * (1.0 - metallic);
 
-        vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
+        float shadow = i == int(frame.shadowParams.w) ? kumoShadowPcf(vWorldPos) : 1.0;
+        vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation * shadow;
         direct += (kd * albedo / PI + specular) * radiance * NdotL;
     }
 

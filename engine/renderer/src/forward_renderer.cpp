@@ -782,9 +782,18 @@ bool ForwardRenderer::setEnvironment(const ibl::Environment& environment) {
     // The old environment's textures/bind groups may still be referenced by
     // an in-flight frame (mirrors resize()'s stance).
     device_->queue().waitIdle();
+    // A failed build drops both groups, so restore the previous environment
+    // rather than leave render() a half-built state mid-session.
+    const ibl::Environment previous = environment_;
     environment_ = environment;
     if (!buildEnvironmentGroups()) {
-        logError("setEnvironment: ibl/skybox bind group rebuild failed");
+        environment_ = previous;
+        if (previous.valid() && buildEnvironmentGroups()) {
+            logError("setEnvironment: bind group rebuild failed; previous environment restored");
+        } else {
+            logError("setEnvironment: bind group rebuild failed and the previous environment "
+                     "could not be restored");
+        }
         return false;
     }
     return true;
@@ -1056,33 +1065,38 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
                             .storeOp = rhi::StoreOp::DontCare,
                             .clearDepth = 0.0f},
     });
-    scenePass.setPipeline(*pbrPipeline_);
-    scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
-    scenePass.setBindGroup(2, *iblGroup_);
-    rhi::RenderPipeline* currentPipeline = pbrPipeline_.get();
-    for (const DrawItem& drawItem : draws_) {
-        rhi::RenderPipeline* pipeline =
-            usesCustomPipeline(drawItem) ? materialShaders_[drawItem.materialIndex]->pipeline.get()
-                                         : pbrPipeline_.get();
-        if (pipeline != currentPipeline) {
-            // Metal's argument table state survives a pipeline switch, but
-            // re-binding on switch is the safe contract across backends.
-            scenePass.setPipeline(*pipeline);
-            scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
-            scenePass.setBindGroup(2, *iblGroup_);
-            currentPipeline = pipeline;
-        }
-        scenePass.setBindGroup(1, *materialGroups_[drawItem.materialIndex][frameSlot_]);
+    // Null only after a doubly-failed environment swap (logged there); skip
+    // the geometry rather than dereference it — the frame clears to black.
+    if (iblGroup_) {
+        scenePass.setPipeline(*pbrPipeline_);
+        scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
+        scenePass.setBindGroup(2, *iblGroup_);
+        rhi::RenderPipeline* currentPipeline = pbrPipeline_.get();
+        for (const DrawItem& drawItem : draws_) {
+            rhi::RenderPipeline* pipeline =
+                usesCustomPipeline(drawItem)
+                    ? materialShaders_[drawItem.materialIndex]->pipeline.get()
+                    : pbrPipeline_.get();
+            if (pipeline != currentPipeline) {
+                // Metal's argument table state survives a pipeline switch, but
+                // re-binding on switch is the safe contract across backends.
+                scenePass.setPipeline(*pipeline);
+                scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
+                scenePass.setBindGroup(2, *iblGroup_);
+                currentPipeline = pipeline;
+            }
+            scenePass.setBindGroup(1, *materialGroups_[drawItem.materialIndex][frameSlot_]);
 
-        const GpuMesh& mesh = meshes_[drawItem.meshIndex];
-        PerDrawData draw;
-        draw.model = drawItem.model;
-        draw.normalMatrix = math::transpose(math::inverse(draw.model));
-        scenePass.setPushConstants(rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment, &draw,
-                                   sizeof(draw));
-        scenePass.setVertexBuffer(0, *mesh.vertexBuffer);
-        scenePass.setIndexBuffer(*mesh.indexBuffer, rhi::IndexFormat::Uint32);
-        scenePass.drawIndexed(mesh.indexCount);
+            const GpuMesh& mesh = meshes_[drawItem.meshIndex];
+            PerDrawData draw;
+            draw.model = drawItem.model;
+            draw.normalMatrix = math::transpose(math::inverse(draw.model));
+            scenePass.setPushConstants(rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment, &draw,
+                                       sizeof(draw));
+            scenePass.setVertexBuffer(0, *mesh.vertexBuffer);
+            scenePass.setIndexBuffer(*mesh.indexBuffer, rhi::IndexFormat::Uint32);
+            scenePass.drawIndexed(mesh.indexCount);
+        }
     }
     if (skyboxGroup_) {
         scenePass.setPipeline(*skyboxPipeline_);

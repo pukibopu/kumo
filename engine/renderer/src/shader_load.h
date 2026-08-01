@@ -49,6 +49,19 @@ std::string layoutSignature(std::span<const StageReflection> stages);
 std::optional<std::string> setMismatch(const shaderc::Reflection& custom,
                                        const shaderc::Reflection& shared, std::uint32_t set);
 
+// Decides how many bytes of MaterialFactorsData's engine-written prefix
+// (baseColor, metallicRoughness, emissive, uvTiling — 64B total) a material's
+// set-1 factors block accepts. Declared byte size alone cannot tell an
+// appended custom member from uvTiling: std140 rounds a block up in 16B
+// steps, so an old shader with its own vec4 member after emissive reflects
+// the same 64B bufferSize as the current uvTiling layout. This checks the
+// block's 4th member name instead; only "uvTiling" there unlocks the full
+// 64B write, otherwise (including blocks with fewer than 4 members) only the
+// 48B baseColor/metallicRoughness/emissive prefix is written. Either way the
+// result is clamped to bufferSize, so it never writes past what the shader
+// itself declared.
+std::uint32_t factorPrefixSize(const shaderc::ReflectionBinding& factors);
+
 // True when `source` textually references frame.timeParams (a substring match,
 // including inside comments — a false positive there only costs a spurious
 // redraw). Drives ForwardRenderer::hasAnimatedMaterials so the app keeps

@@ -655,17 +655,19 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
     }
 
     // Buffer is sized from reflection exactly, so an older custom shader that
-    // never picked up uvTiling (still reflecting the pre-M6.98 48B block)
-    // gets a 48B buffer, not one padded to the current CPU struct: the
-    // engine-written prefix below is clamped to this size, so it never writes
-    // past what the shader itself declared (no stomping an appended member
-    // that happens to sit right after emissive).
+    // never picked up uvTiling gets a buffer matching its own declared size,
+    // not one padded to the current CPU struct. Declared byte size alone
+    // cannot decide how much of it the engine may write: std140 rounds a
+    // block up in 16B steps, so a pre-uvTiling shader that appends its own
+    // vec4 member after emissive reflects the same 64B bufferSize as the
+    // current uvTiling layout. detail::factorPrefixSize checks the block's
+    // member name instead, so the engine-written prefix never stomps a
+    // shader's own member sitting right after emissive.
     const std::uint32_t bufferSize = factors->bufferSize;
+    const std::uint32_t writeSize = detail::factorPrefixSize(*factors);
     const MaterialFactorsData factorsData = toFactors(materialParams_[materialIndex]);
     std::vector<std::byte> payload(bufferSize, std::byte{0});
-    const std::size_t copySize =
-        std::min(sizeof(factorsData), static_cast<std::size_t>(bufferSize));
-    std::memcpy(payload.data(), &factorsData, copySize);
+    std::memcpy(payload.data(), &factorsData, writeSize);
 
     const MaterialTextures& textures = materialTextures_[materialIndex];
     std::array<gpu::Ptr<gpu::Buffer>, kFrameSlots> buffers;
@@ -711,6 +713,7 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
         .materialLayout = std::move(materialLayout),
         .factorBufferBinding = factors->binding,
         .factorBufferSize = bufferSize,
+        .factorWriteSize = writeSize,
         .referencesTime = detail::sourceReferencesTime(source),
     };
     return {};
@@ -1109,12 +1112,15 @@ void ForwardRenderer::flushDirtyMaterials() {
         }
         const MaterialFactorsData factors = toFactors(materialParams_[i]);
         if (gpu::Ptr<gpu::Buffer>& buffer = materialFactorBuffers_[i][frameSlot_]) {
-            // Clamped to the buffer's actual size: an older custom shader's
-            // factor buffer may be smaller than the current CPU struct (its
-            // reflection never grew to include uvTiling), and writing past it
-            // would overflow the buffer.
-            const std::uint64_t writeSize =
-                std::min<std::uint64_t>(sizeof(factors), buffer->size());
+            // Shared-pipeline materials always write the full block (their
+            // buffer is the template's); a custom shader's write size was
+            // decided once at install time by detail::factorPrefixSize, from
+            // its block's member names rather than its byte size (byte size
+            // alone can't tell an appended member from uvTiling under std140
+            // padding).
+            const std::uint32_t writeSize = materialShaders_[i]
+                                                ? materialShaders_[i]->factorWriteSize
+                                                : static_cast<std::uint32_t>(sizeof(factors));
             device_->queue().writeBuffer(*buffer, 0, &factors, writeSize);
         }
         materialDirty_[i][frameSlot_] = false;

@@ -35,7 +35,7 @@ bool reflectionsMatch(const shaderc::Reflection& lhs, const shaderc::Reflection&
         const auto& a = lhs.bindings[i];
         const auto& b = rhs.bindings[i];
         if (a.set != b.set || a.binding != b.binding || a.type != b.type || a.name != b.name ||
-            a.bufferSize != b.bufferSize) {
+            a.bufferSize != b.bufferSize || a.members != b.members) {
             return false;
         }
     }
@@ -162,6 +162,41 @@ void main() { color = pc.m[0]; }
 
     CHECK(result->reflection.pushConstantSize == 64);
     CHECK(contains(result->msl, "[[buffer(24)]]"));
+}
+
+TEST_CASE("uniform block reflects member names in declaration order") {
+    constexpr const char* source = R"(#version 460
+layout(set = 1, binding = 0) uniform Params {
+    vec4 baseColor;
+    vec4 metallicRoughness;
+    vec4 emissive;
+    vec4 uvTiling;
+} params;
+layout(location = 0) out vec4 color;
+void main() { color = params.baseColor; }
+)";
+    const auto result = shaderc::compileGlsl(source, shaderc::Stage::Fragment);
+    REQUIRE(result.has_value());
+
+    REQUIRE(result->reflection.bindings.size() == 1);
+    const std::vector<std::string> expected = {"baseColor", "metallicRoughness", "emissive",
+                                               "uvTiling"};
+    CHECK(result->reflection.bindings[0].members == expected);
+}
+
+TEST_CASE("non-uniform-buffer bindings do not reflect member names") {
+    constexpr const char* source = R"(#version 460
+layout(set = 1, binding = 0) uniform texture2D t;
+layout(set = 1, binding = 1) uniform sampler s;
+layout(location = 0) out vec4 color;
+void main() { color = texture(sampler2D(t, s), vec2(0.0)); }
+)";
+    const auto result = shaderc::compileGlsl(source, shaderc::Stage::Fragment);
+    REQUIRE(result.has_value());
+
+    REQUIRE(result->reflection.bindings.size() == 2);
+    CHECK(result->reflection.bindings[0].members.empty());
+    CHECK(result->reflection.bindings[1].members.empty());
 }
 
 TEST_CASE("syntax error yields structured error list") {

@@ -135,6 +135,11 @@ private:
         gpu::Ptr<gpu::BindGroupLayout> materialLayout;
         std::uint32_t factorBufferBinding = 0;
         std::uint32_t factorBufferSize = 0;
+        // Bytes of MaterialFactorsData's engine-written prefix this material
+        // accepts (48 or 64), decided once at install time by
+        // detail::factorPrefixSize from the block's reflected member names;
+        // reused by every subsequent flushDirtyMaterials write.
+        std::uint32_t factorWriteSize = 0;
         // Cached detail::sourceReferencesTime(fragmentSource): backs
         // hasAnimatedMaterials() without re-scanning the source every frame.
         bool referencesTime = false;

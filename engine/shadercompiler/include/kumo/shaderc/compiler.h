@@ -28,6 +28,10 @@ struct ReflectionBinding {
     std::string name;
     // Declared byte size for uniform_buffer/storage_buffer bindings, 0 otherwise.
     std::uint32_t bufferSize = 0;
+    // Member names in declaration order, uniform_buffer bindings only (empty
+    // otherwise). Byte size alone can't tell an appended member from a
+    // std140-padded one of the same total size; the name can.
+    std::vector<std::string> members;
 };
 
 struct Reflection {

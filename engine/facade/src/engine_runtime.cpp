@@ -46,6 +46,11 @@ constexpr gpu::TextureFormat kSwapchainFormat = gpu::TextureFormat::BGRA8Unorm;
 // wire regardless of viewport size.
 constexpr std::uint32_t kScreenshotMaxLongSide = 640;
 
+// Seeded into a freshly rebuilt session's transcript by reloadAgentSessions()
+// (settings hot apply): the chat window otherwise goes silently empty with no
+// explanation for why the earlier conversation is gone.
+constexpr const char* kAgentReloadNotice = "Agent 配置已重新加载，会话历史已重置。";
+
 // English for tool-call stability; the closing instruction keeps replies in the
 // user's language (ADR 0028). The craft sections raise the default output from
 // tech-demo to composed scene; budgets mirror the tool-layer caps.
@@ -134,7 +139,9 @@ constexpr const char* kShaderSystemPrompt =
     "zero until driven. Rendering is linear-light with reversed-Z, right-handed Y-up. "
     "Compile errors return structured with file and line; fix the source and retry, at "
     "most 5 attempts, then stop and explain. Keep the existing lighting structure unless "
-    "asked otherwise.\n\n"
+    "asked otherwise. After a shader_write that compiles, call viewer_screenshot once to "
+    "inspect the material in situ; if — and only if — the look is clearly wrong, fix it and "
+    "confirm with at most one more screenshot. Never loop beyond that.\n\n"
     "Material intent guide. Translate named intents into factors plus technique: brushed "
     "metal — metallic 1, roughness 0.3-0.45, tangent-aligned streak noise on roughness; "
     "polished ceramic — metallic 0, roughness 0.05-0.12, strong fresnel rim; rough "
@@ -151,6 +158,9 @@ constexpr const char* kShaderSystemPrompt =
     "custom shader, include \"shadow.glsl\" and multiply the shadow-casting light's "
     "radiance by kumoShadowPcf(vWorldPos, N) (N = the shader's world-space normal) the way "
     "pbr.frag does. "
+    "frame.timeParams.x holds seconds elapsed since the renderer launched, for animation "
+    "(flickering flames, flowing water, pulsing neon); using it keeps the viewport "
+    "redrawing automatically. "
     "Always reply in the user's language.";
 
 // Exercises the incremental upload path: meshes and materials created after
@@ -457,6 +467,83 @@ void EngineRuntime::applySceneState(const SceneState& state) {
     }
 }
 
+// Reads configPath_/envFilePath_/offline_/confirmDestructiveOverride_ (or
+// replays the --offline script) and (re)builds sceneProvider_/shaderProvider_/
+// confirmGate_/sceneSession_/shaderSession_ from scratch. Assumes those five
+// are already reset/empty; create() starts that way, reloadAgentSessions()
+// tears them down first. `isReload` is the only difference between the two
+// call sites: it seeds the freshly built sessions' transcripts with a note
+// that history was just reset, since a reload never happens on session
+// construction from create().
+void EngineRuntime::assembleAgentSessions(bool isReload) {
+    agent::AgentSession::Desc sceneDesc;
+    agent::AgentSession::Desc shaderDesc;
+    bool wantConfirm = confirmDestructiveOverride_;
+    if (offline_) {
+        sceneProvider_ = std::make_unique<agent::FakeProvider>(makeOfflineScript(world_),
+                                                               "离线演示脚本已播放完毕。");
+        sceneDesc.model = "offline";
+        logInfo("offline agent script ready");
+    } else if (auto config = agent::loadAgentConfig(configPath_, envFilePath_);
+               !config.has_value()) {
+        logError("agent config: {}", config.error());
+    } else {
+        const detail::SessionPlan plan = detail::planSessions(*config, confirmDestructiveOverride_);
+        wantConfirm = plan.confirmDestructive;
+        if (plan.sceneEnabled) {
+            sceneProvider_ =
+                makeHttpProvider(plan.sceneEndpoint, config->requestTimeout, sceneRetryNotice_);
+            sceneDesc.model = plan.sceneEndpoint.model;
+            sceneDesc.systemPrompt = kSceneSystemPrompt;
+            sceneDesc.maxTokens = config->maxTokens;
+            sceneDesc.reasoningEffort = config->reasoningEffort;
+            sceneDesc.maxToolRounds = config->maxToolRounds;
+            sceneDesc.summaryThresholdTokens = config->summaryThresholdTokens;
+            // The key never reaches the log (ADR 0012).
+            logInfo("agent provider ready: {} {} at {}",
+                    plan.sceneEndpoint.type == agent::ProviderType::OpenAi ? "openai" : "anthropic",
+                    plan.sceneEndpoint.model, plan.sceneEndpoint.baseUrl);
+        } else {
+            // Rendering stays fully functional; the panel shows a Chinese hint.
+            logInfo("agent disabled: {}", plan.sceneUnavailableReason);
+        }
+        if (plan.shaderEnabled) {
+            shaderProvider_ =
+                makeHttpProvider(plan.shaderEndpoint, config->requestTimeout, shaderRetryNotice_);
+            shaderDesc.model = plan.shaderEndpoint.model;
+            shaderDesc.systemPrompt = kShaderSystemPrompt;
+            shaderDesc.maxTokens = config->maxTokens;
+            shaderDesc.reasoningEffort = config->reasoningEffort;
+            shaderDesc.maxToolRounds = config->maxToolRounds;
+            shaderDesc.summaryThresholdTokens = config->summaryThresholdTokens;
+            logInfo("shader agent ready: {} {} at {}",
+                    plan.shaderEndpoint.type == agent::ProviderType::OpenAi ? "openai"
+                                                                            : "anthropic",
+                    plan.shaderEndpoint.model, plan.shaderEndpoint.baseUrl);
+        } else {
+            logInfo("shader agent disabled: {}", plan.shaderUnavailableReason);
+        }
+    }
+    if (wantConfirm) {
+        confirmGate_.emplace();
+    }
+    if (isReload) {
+        // Chat transcripts live app-side; the app keeps whatever it already
+        // drained, so the new session's own transcript needs its own note that
+        // history was just reset, not carried over from the old one.
+        sceneDesc.initialNotice = kAgentReloadNotice;
+        shaderDesc.initialNotice = kAgentReloadNotice;
+    }
+    if (sceneProvider_ != nullptr) {
+        sceneSession_.emplace(*sceneProvider_, sceneToolRegistry_, mainQueue_,
+                              confirmGate_.has_value() ? &*confirmGate_ : nullptr, sceneDesc);
+    }
+    if (shaderProvider_ != nullptr) {
+        shaderSession_.emplace(*shaderProvider_, shaderToolRegistry_, mainQueue_,
+                               confirmGate_.has_value() ? &*confirmGate_ : nullptr, shaderDesc);
+    }
+}
+
 std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const Desc& desc) {
     auto sceneAsset = asset::loadGltf(desc.modelPath);
     if (!sceneAsset) {
@@ -476,6 +563,10 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     self->device_ = &device;
     self->modelPath_ = desc.modelPath;
     self->envPath_ = desc.envPath;
+    self->configPath_ = desc.configPath;
+    self->envFilePath_ = desc.envFilePath;
+    self->offline_ = desc.offline;
+    self->confirmDestructiveOverride_ = desc.confirmDestructive;
 
     if (!self->renderer_.init(device, kSwapchainFormat)) {
         return nullptr;
@@ -602,6 +693,9 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     // of which caller is driving it.
     shaderTools.failureCounts = std::make_shared<std::unordered_map<std::int32_t, int>>();
     agent::registerShaderTools(self->shaderToolRegistry_, shaderTools);
+    // Lets the shader assistant look at its own edits in situ (docs/agents.md);
+    // same tool def and handler as the scene assistant's copy above.
+    self->shaderToolRegistry_.add(screenshotToolDef, viewerScreenshot);
 
     // The MCP registry exposes the full scene tool set (unlike the shader
     // assistant's registry above, which only gets scene_list) plus the shader
@@ -655,66 +749,7 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
         self->mcpToolRegistry_.setAfterInvoke(after);
     }
 
-    std::optional<agent::ConfirmationGate> confirmGate;
-    agent::AgentSession::Desc sceneDesc;
-    agent::AgentSession::Desc shaderDesc;
-    bool wantConfirm = desc.confirmDestructive;
-    if (desc.offline) {
-        self->sceneProvider_ = std::make_unique<agent::FakeProvider>(
-            makeOfflineScript(self->world_), "离线演示脚本已播放完毕。");
-        sceneDesc.model = "offline";
-        logInfo("offline agent script ready");
-    } else if (auto config = agent::loadAgentConfig(desc.configPath, desc.envFilePath);
-               !config.has_value()) {
-        logError("agent config: {}", config.error());
-    } else {
-        const detail::SessionPlan plan = detail::planSessions(*config, desc.confirmDestructive);
-        wantConfirm = plan.confirmDestructive;
-        if (plan.sceneEnabled) {
-            self->sceneProvider_ = makeHttpProvider(plan.sceneEndpoint, config->requestTimeout,
-                                                    self->sceneRetryNotice_);
-            sceneDesc.model = plan.sceneEndpoint.model;
-            sceneDesc.systemPrompt = kSceneSystemPrompt;
-            sceneDesc.maxTokens = config->maxTokens;
-            sceneDesc.maxToolRounds = config->maxToolRounds;
-            sceneDesc.summaryThresholdTokens = config->summaryThresholdTokens;
-            // The key never reaches the log (ADR 0012).
-            logInfo("agent provider ready: {} {} at {}",
-                    plan.sceneEndpoint.type == agent::ProviderType::OpenAi ? "openai" : "anthropic",
-                    plan.sceneEndpoint.model, plan.sceneEndpoint.baseUrl);
-        } else {
-            // Rendering stays fully functional; the panel shows a Chinese hint.
-            logInfo("agent disabled: {}", plan.sceneUnavailableReason);
-        }
-        if (plan.shaderEnabled) {
-            self->shaderProvider_ = makeHttpProvider(plan.shaderEndpoint, config->requestTimeout,
-                                                     self->shaderRetryNotice_);
-            shaderDesc.model = plan.shaderEndpoint.model;
-            shaderDesc.systemPrompt = kShaderSystemPrompt;
-            shaderDesc.maxTokens = config->maxTokens;
-            shaderDesc.maxToolRounds = config->maxToolRounds;
-            shaderDesc.summaryThresholdTokens = config->summaryThresholdTokens;
-            logInfo("shader agent ready: {} {} at {}",
-                    plan.shaderEndpoint.type == agent::ProviderType::OpenAi ? "openai"
-                                                                            : "anthropic",
-                    plan.shaderEndpoint.model, plan.shaderEndpoint.baseUrl);
-        } else {
-            logInfo("shader agent disabled: {}", plan.shaderUnavailableReason);
-        }
-    }
-    if (wantConfirm) {
-        self->confirmGate_.emplace();
-    }
-    if (self->sceneProvider_ != nullptr) {
-        self->sceneSession_.emplace(
-            *self->sceneProvider_, self->sceneToolRegistry_, self->mainQueue_,
-            self->confirmGate_.has_value() ? &*self->confirmGate_ : nullptr, sceneDesc);
-    }
-    if (self->shaderProvider_ != nullptr) {
-        self->shaderSession_.emplace(
-            *self->shaderProvider_, self->shaderToolRegistry_, self->mainQueue_,
-            self->confirmGate_.has_value() ? &*self->confirmGate_ : nullptr, shaderDesc);
-    }
+    self->assembleAgentSessions(/*isReload=*/false);
 
     // MCP stdio pump (ADR 0041): one JSON-RPC line in, at most one line out.
     // handleMessage runs on the main thread by being posted through mainQueue,
@@ -770,6 +805,26 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     return self;
 }
 
+bool EngineRuntime::reloadAgentSessions() {
+    if ((sceneSession_.has_value() && sceneSession_->busy()) ||
+        (shaderSession_.has_value() && shaderSession_->busy())) {
+        logInfo("agent reload: a session is still running a turn; try again once it finishes");
+        return false;
+    }
+    // Tear down before rebuilding: assembleAgentSessions() assumes these five
+    // start empty, same as create() finds them. AgentSession's destructor
+    // aborts/joins safely (verified idle above, so this is instant), and no
+    // tool call can be mid-confirmation while both sessions are idle.
+    sceneSession_.reset();
+    shaderSession_.reset();
+    sceneProvider_.reset();
+    shaderProvider_.reset();
+    confirmGate_.reset();
+    assembleAgentSessions(/*isReload=*/true);
+    logInfo("agent sessions reloaded");
+    return true;
+}
+
 EngineRuntime::~EngineRuntime() {
     if (mcpReader_.joinable()) {
         // The reader may be waiting on a posted item the loop will never drain
@@ -792,6 +847,13 @@ bool EngineRuntime::pump() {
     // an agent/MCP caller made off the render loop; the product shell needs a
     // frame to pick it up.
     if (mainQueue_.drain() > 0) {
+        markDirty();
+    }
+    // Animated materials (frame.timeParams) need a fresh render every pump even
+    // with no other state change, or an on-demand viewport would freeze on the
+    // frame the shader was installed; the GLFW viewer renders unconditionally so
+    // this is a no-op for it.
+    if (renderer_.hasAnimatedMaterials()) {
         markDirty();
     }
     // Orbit arbitration (ADR 0039): user input wins and is written onto the
@@ -818,6 +880,16 @@ void EngineRuntime::orbitZoom(float delta) {
     orbit_.zoom(delta);
     orbitMoved_ = true;
     markDirty();
+}
+
+void EngineRuntime::orbitPan(float forward, float right) {
+    orbit_.pan(forward, right);
+    orbitMoved_ = true;
+    markDirty();
+}
+
+float EngineRuntime::orbitDistance() const {
+    return orbit_.distance();
 }
 
 void EngineRuntime::render(gpu::CommandEncoder& encoder, gpu::Texture* output,
@@ -902,11 +974,20 @@ bool EngineRuntime::saveScene(const std::filesystem::path& path) const {
             renderer_.materialParams(static_cast<std::uint32_t>(materialIndex));
         return params != nullptr ? std::make_optional(toSavedMaterial(*params)) : std::nullopt;
     };
+    const scene::ShaderLookup shaderLookup =
+        [this](std::int32_t materialIndex) -> std::optional<std::string> {
+        if (materialIndex < 0) {
+            return std::nullopt;
+        }
+        const std::string* source =
+            renderer_.materialShaderSource(static_cast<std::uint32_t>(materialIndex));
+        return source != nullptr ? std::make_optional(*source) : std::nullopt;
+    };
     const std::optional<scene::SavedEnvironment> savedEnvironment =
         environmentSky_.has_value() ? std::make_optional(toSavedEnvironment(*environmentSky_))
                                     : std::nullopt;
     const std::string json =
-        scene::saveSceneJson(world_, modelPath_.string(), lookup, savedEnvironment);
+        scene::saveSceneJson(world_, modelPath_.string(), lookup, savedEnvironment, shaderLookup);
     std::ofstream out(path, std::ios::binary);
     out << json;
     if (!out) {
@@ -994,6 +1075,22 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
             if (savedEntity.material.has_value() && entity.materialIndex >= 0) {
                 renderer_.setMaterialParams(static_cast<std::uint32_t>(entity.materialIndex),
                                             toMaterialParams(*savedEntity.material));
+            }
+        }
+        // Custom shader (shader-assistant output, ADR 0011): installed after the
+        // material's factors are in place so the rebuilt factor buffer picks up
+        // the saved values. A compile failure never blocks the load; the entity
+        // simply keeps rendering with the standard pbr pipeline.
+        if (savedEntity.shaderSource.has_value() && entity.materialIndex >= 0) {
+            if (auto result = renderer_.setMaterialShader(
+                    static_cast<std::uint32_t>(entity.materialIndex), *savedEntity.shaderSource);
+                !result.has_value()) {
+                logError("scene load: custom shader for entity '{}' failed to compile, keeping "
+                         "the standard pipeline",
+                         entity.name);
+                for (const shaderc::CompileError& error : result.error()) {
+                    logError("{}", error.message);
+                }
             }
         }
         world_.entities.insert(entity);
@@ -1160,6 +1257,47 @@ std::filesystem::path EngineRuntime::generatedShaderPath(const std::string& id) 
         return {};
     }
     return generatedShaderDir_ / ("material_" + std::to_string(entity->materialIndex) + ".frag");
+}
+
+EngineRuntime::LightState EngineRuntime::sunLightState() const {
+    LightState state;
+    const auto lights = world_.lights();
+    if (lights.empty()) {
+        return state;
+    }
+    state.found = true;
+    // Mirrors apps/viewer/ui.cpp's LightSettings::syncFrom.
+    const scene::Light& light = lights[0];
+    const math::float3 toSource = -light.direction;
+    const float len = math::length(toSource);
+    if (len > 1e-4f) {
+        const math::float3 dir = toSource / len;
+        state.elevationDeg = math::degrees(std::asin(std::clamp(dir.y, -1.0f, 1.0f)));
+        state.azimuthDeg = math::degrees(std::atan2(dir.x, dir.z));
+    }
+    state.intensity = light.intensity;
+    state.color = light.color;
+    return state;
+}
+
+bool EngineRuntime::setSunLight(float azimuthDeg, float elevationDeg, float intensity,
+                                math::float3 color) {
+    scene::Light* light = world_.light(0);
+    if (light == nullptr || !std::isfinite(azimuthDeg) || !std::isfinite(elevationDeg) ||
+        !std::isfinite(intensity) || !isFinite3(color)) {
+        return false;
+    }
+    // Mirrors apps/viewer/ui.cpp's LightSettings::apply.
+    const float az = math::radians(azimuthDeg);
+    const float el = math::radians(elevationDeg);
+    const math::float3 toSource{std::cos(el) * std::sin(az), std::sin(el),
+                                std::cos(el) * std::cos(az)};
+    light->direction = -toSource;
+    light->intensity = intensity;
+    light->color = color;
+    undo_.commitPending();
+    markDirty();
+    return true;
 }
 
 bool EngineRuntime::undoAvailable() const {

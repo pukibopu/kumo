@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
@@ -48,8 +49,9 @@ struct FrameUniformsData {
     float pad1 = 0.0f;
     math::float4x4 lightViewProj{1.0f};
     math::float4 shadowParams{0.0f};
+    math::float4 timeParams{0.0f};
 };
-static_assert(sizeof(FrameUniformsData) == 1024);
+static_assert(sizeof(FrameUniformsData) == 1040);
 
 struct PerDrawData {
     math::float4x4 model;
@@ -147,6 +149,7 @@ gpu::RenderPipelineDesc pbrPipelineDesc(
 bool ForwardRenderer::init(gpu::Device& device, gpu::TextureFormat outputFormat) {
     device_ = &device;
     outputFormat_ = outputFormat;
+    initTime_ = std::chrono::steady_clock::now();
 
     materialSampler_ = device.createSampler({.maxAnisotropy = 8});
     iblSampler_ = device.createSampler({
@@ -414,6 +417,15 @@ const std::string* ForwardRenderer::materialShaderSource(std::uint32_t materialI
     return &materialShaders_[materialIndex]->fragmentSource;
 }
 
+bool ForwardRenderer::hasAnimatedMaterials() const {
+    for (const std::optional<MaterialShaderRecord>& record : materialShaders_) {
+        if (record.has_value() && record->referencesTime) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::expected<void, std::vector<shaderc::CompileError>>
 ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_view source) {
     KUMO_ASSERT(device_ != nullptr);
@@ -558,6 +570,7 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
         .materialLayout = std::move(materialLayout),
         .factorBufferBinding = factors->binding,
         .factorBufferSize = bufferSize,
+        .referencesTime = detail::sourceReferencesTime(source),
     };
     return {};
 }
@@ -952,6 +965,9 @@ void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene,
     data.prefilteredMipCount = static_cast<float>(std::max(1u, environment_.prefilteredMips));
     data.lightViewProj = lightViewProj;
     data.shadowParams = shadowParams;
+    const float secondsSinceInit =
+        std::chrono::duration<float>(std::chrono::steady_clock::now() - initTime_).count();
+    data.timeParams = {secondsSinceInit, 0.0f, 0.0f, 0.0f};
 
     device_->queue().writeBuffer(*frameUniforms_[frameSlot_], 0, &data, sizeof(data));
 }

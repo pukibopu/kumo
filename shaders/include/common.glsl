@@ -18,6 +18,7 @@ layout(set = 0, binding = 0, std140) uniform FrameUniforms {
     float prefilteredMipCount;
     mat4 lightViewProj;  // std140 offset 944 (8B pad after prefilteredMipCount)
     vec4 shadowParams;   // x enabled, y texel size, z depth bias, w shadow-casting light index
+    vec4 timeParams;     // x seconds since renderer init, yzw reserved
 }
 frame;
 

@@ -25,6 +25,10 @@ struct SavedMaterial {
 struct SavedEntity {
     Entity entity;
     std::optional<SavedMaterial> material;
+    // Shader-assistant output (ADR 0011); plain source text so the scene layer
+    // never depends on the renderer. Absent when the material uses the shared
+    // pbr pipeline.
+    std::optional<std::string> shaderSource;
 };
 
 // Renderer/asset-free mirror of asset::ProceduralSkyDesc (scene must not
@@ -50,12 +54,17 @@ struct SavedScene {
 };
 
 using MaterialLookup = std::function<std::optional<SavedMaterial>(std::int32_t materialIndex)>;
+// Renderer-side custom fragment shader for a material index, nullopt when
+// uncustomized (mirrors ForwardRenderer::materialShaderSource).
+using ShaderLookup = std::function<std::optional<std::string>(std::int32_t materialIndex)>;
 
 // `environment` is nullopt when the scene uses no procedural sky (e.g. the
 // glTF-supplied HDR is still active); the key is then omitted entirely.
+// `shaders` is defaulted-empty for callers that never persist custom shaders.
 std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
                           const MaterialLookup& materials,
-                          const std::optional<SavedEnvironment>& environment = std::nullopt);
+                          const std::optional<SavedEnvironment>& environment = std::nullopt,
+                          const ShaderLookup& shaders = {});
 std::expected<SavedScene, std::string> parseSceneJson(std::string_view json);
 
 } // namespace kumo::scene

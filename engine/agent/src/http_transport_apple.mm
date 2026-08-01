@@ -57,6 +57,12 @@ HttpTransport makeUrlSessionTransport() {
                         if (data != nil) {
                             response.body.assign(static_cast<const char*>(data.bytes), data.length);
                         }
+                        // Only header the retry policy needs (ADR 0030 update);
+                        // field lookup is case-insensitive.
+                        if (NSString* retryAfter = [http valueForHTTPHeaderField:@"Retry-After"];
+                            retryAfter != nil) {
+                            response.retryAfter = std::string(retryAfter.UTF8String);
+                        }
                     }
                     dispatch_semaphore_signal(done);
                   }];

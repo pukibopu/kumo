@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Product shell entry point (ADR 0044): NavigationSplitView with a scene-tree
 // sidebar, the engine viewport with a collapsible chat pane, and an inspector
@@ -56,7 +58,21 @@ struct KumoApp: App {
                 }
             }
             .onReceive(refreshTimer) { _ in refresh() }
-            .onChange(of: holder.engine == nil) { _, _ in refresh() }
+            .onChange(of: holder.engine == nil) { _, isNilNow in
+                refresh()
+                if !isNilNow { restoreSceneOnLaunchIfNeeded() }
+            }
+        }
+        .commands {
+            CommandGroup(after: .newItem) {
+                Divider()
+                Button("保存场景…") { saveScene() }
+                    .keyboardShortcut("s", modifiers: [.command])
+                    .disabled(holder.engine == nil)
+                Button("打开场景…") { openScene() }
+                    .keyboardShortcut("o", modifiers: [.command])
+                    .disabled(holder.engine == nil)
+            }
         }
         Settings {
             SettingsView(holder: holder)
@@ -87,5 +103,49 @@ struct KumoApp: App {
     private func handleEdit() {
         refreshToken += 1
         refresh()
+    }
+
+    // Scene save/load (Cmd+S/Cmd+O): both run the panel modally from a
+    // user-initiated menu command, on the main thread.
+    private func saveScene() {
+        guard let engine = holder.engine else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "kumo_scene.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if engine.saveScene(toPath: url.path) {
+            UserDefaults.standard.set(url.path, forKey: "lastScenePath")
+        } else {
+            NSLog("kumo: scene save failed: \(url.path)")
+        }
+    }
+
+    private func openScene() {
+        guard let engine = holder.engine else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if engine.loadScene(fromPath: url.path) {
+            UserDefaults.standard.set(url.path, forKey: "lastScenePath")
+            handleEdit()
+        } else {
+            NSLog("kumo: scene load failed: \(url.path)")
+        }
+    }
+
+    // Launch restore (Settings' "启动时恢复上次场景" toggle): failure just logs,
+    // no dialog, since there is no user-initiated action to attach one to.
+    private func restoreSceneOnLaunchIfNeeded() {
+        guard let engine = holder.engine else { return }
+        guard UserDefaults.standard.bool(forKey: "restoreSceneOnLaunch") else { return }
+        guard let path = UserDefaults.standard.string(forKey: "lastScenePath"),
+              FileManager.default.fileExists(atPath: path) else { return }
+        if engine.loadScene(fromPath: path) {
+            handleEdit()
+        } else {
+            NSLog("kumo: failed to restore scene at launch: \(path)")
+        }
     }
 }

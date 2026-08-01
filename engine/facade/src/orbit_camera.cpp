@@ -16,6 +16,18 @@ void OrbitCamera::zoom(float scroll) {
     distance_ = std::clamp(distance_ * std::exp(-scroll * 0.12f), 0.5f, std::max(20.0f, distance_));
 }
 
+void OrbitCamera::pan(float forwardMeters, float rightMeters) {
+    // Forward/right restricted to the horizontal (XZ) plane: the projected
+    // forward's length is exactly |cos(pitch_)| once normalized (pitch cancels
+    // out of the direction), so this is an exact zero-check, not a heuristic.
+    math::float3 forward{0.0f, 0.0f, 0.0f};
+    if (std::abs(std::cos(pitch_)) > 1e-4f) {
+        forward = {-std::sin(yaw_), 0.0f, -std::cos(yaw_)};
+    }
+    const math::float3 right{std::cos(yaw_), 0.0f, -std::sin(yaw_)};
+    target_ += forward * forwardMeters + right * rightMeters;
+}
+
 void OrbitCamera::apply(scene::Camera& camera) const {
     const math::float3 offset{std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_),
                               std::cos(pitch_) * std::cos(yaw_)};

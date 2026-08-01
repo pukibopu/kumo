@@ -48,6 +48,10 @@ struct ChatRequest {
     std::vector<ChatMessage> messages;
     std::span<const ToolDef> tools;
     std::uint32_t maxTokens = 4096;
+    // OpenAI reasoning models: sent as reasoning_effort when non-empty. Newer
+    // models reject function tools on chat completions unless this is "none";
+    // the anthropic codec ignores it.
+    std::string reasoningEffort;
 };
 
 struct ProviderError {

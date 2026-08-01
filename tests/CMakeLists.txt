@@ -37,7 +37,11 @@ target_compile_definitions(kumo_tests PRIVATE
 # test_renderer_compat.cpp reaches into kumo_renderer's private detail:: helpers
 # (shader_load.h is not a public header); kumo_agent already links kumo_renderer
 # PRIVATE, which does not propagate the include path.
-target_include_directories(kumo_tests PRIVATE ${CMAKE_SOURCE_DIR}/engine/renderer/src)
+# test_agent_http_provider.cpp reaches into kumo_agent's private detail::
+# parseRetryAfterSeconds (retry_after.h is not a public header) the same way.
+target_include_directories(kumo_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/engine/renderer/src
+    ${CMAKE_SOURCE_DIR}/engine/agent/src)
 kumo_target_warnings(kumo_tests)
 if(MSVC)
     # doctest 2.4.12 specializes std::tuple, which recent MSVC flags as C5285.

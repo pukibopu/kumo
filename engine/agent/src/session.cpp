@@ -19,7 +19,11 @@ namespace kumo::agent {
 AgentSession::AgentSession(ILLMProvider& provider, const ToolRegistry& registry,
                            MainThreadQueue& queue, ConfirmationGate* confirm, Desc desc)
     : provider_(provider), registry_(registry), queue_(queue), confirm_(confirm),
-      desc_(std::move(desc)), worker_([this] { workerLoop(); }) {}
+      desc_(std::move(desc)), worker_([this] { workerLoop(); }) {
+    if (!desc_.initialNotice.empty()) {
+        pushEntry({.kind = TranscriptEntry::Kind::Info, .text = desc_.initialNotice});
+    }
+}
 
 AgentSession::~AgentSession() {
     // The worker unblocks itself: awaitJson() and ConfirmationGate::ask() poll
@@ -109,6 +113,7 @@ void AgentSession::runTurn(std::string userText) {
         request.messages = history_;
         request.tools = registry_.defs();
         request.maxTokens = desc_.maxTokens;
+        request.reasoningEffort = desc_.reasoningEffort;
         CompleteResult result = provider_.complete(request);
         if (abort_.load()) {
             return;

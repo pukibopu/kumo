@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace kumo::renderer::detail {
@@ -47,5 +48,11 @@ std::string layoutSignature(std::span<const StageReflection> stages);
 // nullopt when the set is compatible.
 std::optional<std::string> setMismatch(const shaderc::Reflection& custom,
                                        const shaderc::Reflection& shared, std::uint32_t set);
+
+// True when `source` textually references frame.timeParams (a substring match,
+// including inside comments — a false positive there only costs a spurious
+// redraw). Drives ForwardRenderer::hasAnimatedMaterials so the app keeps
+// redrawing an on-demand viewport while an animated material is installed.
+bool sourceReferencesTime(std::string_view source);
 
 } // namespace kumo::renderer::detail

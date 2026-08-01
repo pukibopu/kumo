@@ -222,6 +222,7 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
                 !readField(provider, "api_key", baseApiKey, error) ||
                 !readField(provider, "model", baseModel, error) ||
                 !readField(provider, "max_tokens", config.maxTokens, error) ||
+                !readField(provider, "reasoning_effort", config.reasoningEffort, error) ||
                 !readField(provider, "request_timeout_seconds", timeoutSeconds, error)) {
                 return std::unexpected("provider." + error);
             }

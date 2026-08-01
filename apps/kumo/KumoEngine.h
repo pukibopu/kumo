@@ -13,6 +13,17 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) NSString* primitive; // empty when glTF-sourced
 @end
 
+// Sun light (world().light(0)) snapshot: mirrors apps/viewer/ui.cpp's
+// LightSettings az/el<->direction formulas. `found` is NO when index 0 does
+// not exist (empty scene); every other field is meaningless in that case.
+@interface KumoLightDetail : NSObject
+@property(nonatomic, readonly) BOOL found;
+@property(nonatomic, readonly) float azimuthDeg;
+@property(nonatomic, readonly) float elevationDeg;
+@property(nonatomic, readonly) float intensity;
+@property(nonatomic, readonly) float colorR, colorG, colorB;
+@end
+
 // Inspector snapshot of one entity (ADR 0044): a flattened, value-typed mirror
 // of kumo::facade::EngineRuntime::EntityDetail. Flat floats (not simd) keep it
 // Swift-friendly and match the setEntityTransform/setEntityMaterial signatures
@@ -90,6 +101,11 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
 // downward); AppKit's mouse events are y-up, so the caller flips the sign.
 - (void)orbitRotateDX:(float)dx dy:(float)dy;
 - (void)orbitZoom:(float)delta;
+// Pans the pivot along the camera's horizontal forward/right axes, meters
+// (ADR 0039 arbitration, same as orbitRotate/orbitZoom). Product GUI's WASD.
+- (void)panCameraForward:(float)forward right:(float)right;
+// Current orbit distance, for scaling WASD pan speed by the framing.
+- (float)orbitDistance;
 
 // Scene tree + inspector (ADR 0044).
 - (NSArray<KumoEntityInfo*>*)listEntities;
@@ -123,6 +139,22 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
 - (BOOL)clearEntityShader:(NSString*)entityId; // records its own undo point
 - (nullable NSString*)generatedShaderPath:(NSString*)entityId;
 
+// Sun light editor (light index 0) + shadow toggle: reuses the same
+// beginEdit/commit undo model as setEntityTransform/setEntityMaterial above.
+// `setSunLight...` returns NO (no undo step, pending snapshot left open) when
+// light 0 does not exist; the Swift side hides/disables the section then.
+- (KumoLightDetail*)sunLightDetail;
+- (BOOL)setSunLightAzimuthDeg:(float)azimuthDeg
+                 elevationDeg:(float)elevationDeg
+                    intensity:(float)intensity
+                            r:(float)r
+                            g:(float)g
+                            b:(float)b;
+// ForwardRenderer::shadowsEnabled mirror: a renderer setting, not scene state,
+// so it is not part of the undo stack (matches the GLFW viewer's checkbox).
+- (BOOL)shadowsEnabled;
+- (void)setShadowsEnabled:(BOOL)enabled;
+
 - (BOOL)undoAvailable;
 - (BOOL)redoAvailable;
 - (NSString*)undoLabel; // empty when none
@@ -151,6 +183,18 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
 // Full path to kumo.config.json, for the settings form to read/overlay/write
 // (api_key fields excluded; those live in the Keychain only).
 - (NSString*)configPath;
+
+// Scene persistence (ADR 0044 slice: product GUI's Cmd+S/Cmd+O). `path` is a
+// full file path chosen by the caller's NSSavePanel/NSOpenPanel.
+- (BOOL)saveSceneToPath:(NSString*)path;
+- (BOOL)loadSceneFromPath:(NSString*)path;
+
+// Settings hot apply (ADR 0044 slice G4): re-seeds the process env from the
+// Keychain with overwrite (the user just changed a key in-app, unlike the
+// launch-time seed which never clobbers a real env var), then rebuilds both
+// agent sessions from the current config/env. NO when a session is still
+// mid-turn (unchanged, logged); the caller does not retry automatically.
+- (BOOL)reloadAgentSessions;
 
 @end
 

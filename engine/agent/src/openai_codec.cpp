@@ -44,6 +44,11 @@ const char* roleName(Role role) {
 std::string encodeChatCompletionsRequest(const ChatRequest& request) {
     // Current OpenAI models reject the legacy max_tokens name.
     json body{{"model", request.model}, {"max_completion_tokens", request.maxTokens}};
+    // Only when configured: non-reasoning models and OpenAI-compatible local
+    // endpoints reject unknown request fields.
+    if (!request.reasoningEffort.empty()) {
+        body["reasoning_effort"] = request.reasoningEffort;
+    }
 
     json messages = json::array();
     if (!request.systemPrompt.empty()) {

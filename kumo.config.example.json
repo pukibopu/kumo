@@ -5,11 +5,22 @@
         "api_key": "",
         "model": "gpt-5.4",
         "max_tokens": 16384,
-        "request_timeout_seconds": 120
+        "request_timeout_seconds": 120,
+        "reasoning_effort": ""
     },
     "agents": {
-        "scene": { "type": "", "base_url": "", "api_key": "", "model": "" },
-        "shader": { "type": "", "base_url": "", "api_key": "", "model": "" },
+        "scene": {
+            "type": "",
+            "base_url": "",
+            "api_key": "",
+            "model": ""
+        },
+        "shader": {
+            "type": "",
+            "base_url": "",
+            "api_key": "",
+            "model": ""
+        },
         "confirm_destructive": false,
         "summary_threshold_tokens": 8000
     }

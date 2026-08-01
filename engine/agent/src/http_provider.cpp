@@ -1,5 +1,7 @@
 #include <kumo/agent/http_provider.h>
 
+#include "retry_after.h"
+
 #include <kumo/agent/claude_codec.h>
 #include <kumo/agent/openai_codec.h>
 
@@ -57,14 +59,15 @@ void HttpLLMProvider::abort() noexcept {
     abort_.store(true);
 }
 
-void HttpLLMProvider::backoffSleep(int completedAttempt) {
-    // 1s then 4s base, +-20% jitter (ADR 0030).
-    const double base = completedAttempt == 0 ? 1000.0 : 4000.0;
+double HttpLLMProvider::jitterFactor() {
     const double jitter = options_.random01
                               ? options_.random01()
                               : std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
-    const auto delay = std::chrono::milliseconds(
-        static_cast<long long>(base * (0.8 + 0.4 * std::clamp(jitter, 0.0, 1.0))));
+    // +-20% (ADR 0030).
+    return 0.8 + 0.4 * std::clamp(jitter, 0.0, 1.0);
+}
+
+void HttpLLMProvider::sleepFor(std::chrono::milliseconds delay) {
     if (options_.sleep) {
         options_.sleep(delay);
         return;
@@ -73,6 +76,18 @@ void HttpLLMProvider::backoffSleep(int completedAttempt) {
     while (std::chrono::steady_clock::now() < deadline && !abort_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+}
+
+void HttpLLMProvider::backoffSleep(int completedAttempt) {
+    const double base = completedAttempt == 0 ? 1000.0 : 4000.0;
+    sleepFor(std::chrono::milliseconds(static_cast<long long>(base * jitterFactor())));
+}
+
+void HttpLLMProvider::retryAfterSleep(double retryAfterSeconds) {
+    // Same jitter envelope as backoffSleep; capped so a server-specified
+    // Retry-After can never stall a turn far beyond the blind-backoff worst case.
+    const double capped = std::min(retryAfterSeconds * jitterFactor(), 30.0);
+    sleepFor(std::chrono::milliseconds(static_cast<long long>(capped * 1000.0)));
 }
 
 CompleteResult HttpLLMProvider::complete(const ChatRequest& request) {
@@ -86,11 +101,16 @@ CompleteResult HttpLLMProvider::complete(const ChatRequest& request) {
     }
 
     ProviderError lastError;
-    for (int attempt = 0; attempt <= options_.maxRetries; ++attempt) {
+    for (int attempt = 0;; ++attempt) {
         if (abort_.load()) {
             return std::unexpected(cancelledError(attempt));
         }
         const auto response = transport_(encoded, options_.requestTimeout, abort_);
+        // Retry budget for whatever failure this attempt hit; 429 gets a
+        // larger one (ADR 0030 update) so a well-behaved server's Retry-After
+        // actually gets honored instead of giving up early.
+        int maxRetriesForFailure = options_.maxRetries;
+        std::optional<double> retryAfterSeconds;
         if (!response.has_value()) {
             if (response.error().kind == TransportError::Kind::Cancelled) {
                 return std::unexpected(cancelledError(attempt));
@@ -114,7 +134,16 @@ CompleteResult HttpLLMProvider::complete(const ChatRequest& request) {
                                                      .retriesUsed = attempt});
             }
             return *decoded;
-        } else if (response->status == 429 || response->status >= 500) {
+        } else if (response->status == 429) {
+            lastError = {.kind = ProviderError::Kind::Http,
+                         .httpStatus = response->status,
+                         .message = extractErrorMessage(response->body),
+                         .retriesUsed = attempt};
+            maxRetriesForFailure = options_.maxRetries429;
+            if (response->retryAfter.has_value()) {
+                retryAfterSeconds = detail::parseRetryAfterSeconds(*response->retryAfter);
+            }
+        } else if (response->status >= 500) {
             lastError = {.kind = ProviderError::Kind::Http,
                          .httpStatus = response->status,
                          .message = extractErrorMessage(response->body),
@@ -128,13 +157,17 @@ CompleteResult HttpLLMProvider::complete(const ChatRequest& request) {
                                                  .retriesUsed = attempt});
         }
 
-        if (attempt == options_.maxRetries) {
+        if (attempt >= maxRetriesForFailure) {
             break;
         }
         if (options_.onRetry) {
-            options_.onRetry(attempt + 1, options_.maxRetries);
+            options_.onRetry(attempt + 1, maxRetriesForFailure);
         }
-        backoffSleep(attempt);
+        if (retryAfterSeconds.has_value()) {
+            retryAfterSleep(*retryAfterSeconds);
+        } else {
+            backoffSleep(attempt);
+        }
     }
     return std::unexpected(lastError);
 }

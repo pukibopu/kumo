@@ -81,6 +81,16 @@ TEST_CASE("openai codec encodes the canonical request") {
     CHECK(encoded == readFixture("request_tools.json"));
 }
 
+TEST_CASE("openai codec sends reasoning_effort only when configured") {
+    TestRequest fixture;
+    // The canonical fixture above proves absence for the empty default; this
+    // case pins presence and the exact value when set.
+    fixture.request.reasoningEffort = "none";
+    const json encoded = json::parse(encodeChatCompletionsRequest(fixture.request));
+    REQUIRE(encoded.contains("reasoning_effort"));
+    CHECK(encoded["reasoning_effort"] == "none");
+}
+
 TEST_CASE("openai codec appends an image_url message after an image-bearing tool result") {
     std::vector<ToolDef> tools{{.name = "viewer_screenshot",
                                 .description = "Take a screenshot.",

@@ -245,6 +245,20 @@ TEST_CASE("agents.max_tool_rounds defaults to 24 and can be overridden") {
     CHECK(overridden->maxToolRounds == 40);
 }
 
+TEST_CASE("provider.reasoning_effort defaults to empty and parses when set") {
+    ConfigSandbox sandbox;
+    const auto defaulted = sandbox.load();
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->reasoningEffort.empty());
+
+    sandbox.writeConfig(R"({
+        "provider": { "reasoning_effort": "none" }
+    })");
+    const auto overridden = sandbox.load();
+    REQUIRE(overridden.has_value());
+    CHECK(overridden->reasoningEffort == "none");
+}
+
 TEST_CASE("agents.max_tool_rounds below 2 is rejected") {
     // The final round never executes tools, so 0 or 1 would silently disable
     // the agent rather than limit it.

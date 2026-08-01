@@ -46,9 +46,14 @@ enum KeychainStore {
 // Settings scene (ADR 0044 slice G4): per-agent endpoint overrides plus a
 // global provider section write straight into kumo.config.json (the same
 // file the engine loads); API keys go to the Keychain only, never into that
-// file. Changes apply on next launch, not live.
+// file. Saving hot-applies (Item D): the Keychain keys are re-seeded into the
+// process env with overwrite, then KumoEngine.reloadAgentSessions() rebuilds
+// both agent sessions from the fresh config/env — refused (unchanged) while a
+// session is mid-turn, surfaced inline rather than retried automatically.
 struct SettingsView: View {
     @ObservedObject var holder: EngineHolder
+
+    @AppStorage("restoreSceneOnLaunch") private var restoreSceneOnLaunch = false
 
     @State private var globalType = "anthropic"
     @State private var globalBaseUrl = ""
@@ -86,10 +91,10 @@ struct SettingsView: View {
                                 model: $shaderModel)
                     globalSection
                     apiKeySection
+                    Section("启动") {
+                        Toggle("启动时恢复上次场景", isOn: $restoreSceneOnLaunch)
+                    }
                     Section {
-                        Text("更改在下次启动生效。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
                         if let statusMessage {
                             Text(statusMessage)
                                 .font(.footnote)
@@ -244,9 +249,19 @@ struct SettingsView: View {
         }
         do {
             try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-            statusMessage = "已保存，重启后生效。"
         } catch {
             statusMessage = "保存失败：\(error.localizedDescription)"
+            return
+        }
+
+        // Settings hot apply (Item D): reseeds the process env (overwrite,
+        // unlike the launch-time seed) and rebuilds both agent sessions from
+        // the config/env just written. False means a session is mid-turn; do
+        // not retry automatically, the user saves again once it is done.
+        if engine.reloadAgentSessions() {
+            statusMessage = "已生效，会话已重置"
+        } else {
+            statusMessage = "会话进行中，完成后再保存生效"
         }
     }
 }

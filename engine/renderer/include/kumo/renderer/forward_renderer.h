@@ -7,6 +7,7 @@
 #include <kumo/shaderc/compiler.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -67,6 +68,9 @@ public:
     bool clearMaterialShader(std::uint32_t materialIndex);
     // Null when the material has no custom shader.
     const std::string* materialShaderSource(std::uint32_t materialIndex) const;
+    // True when any installed custom shader's source references frame.timeParams
+    // (ADR: animated materials keep an on-demand viewport redrawing every frame).
+    bool hasAnimatedMaterials() const;
 
     // Multipliers on top of the material metallic/roughness factors.
     void setMaterialOverride(float metallic, float roughness);
@@ -105,6 +109,9 @@ private:
         gpu::Ptr<gpu::BindGroupLayout> materialLayout;
         std::uint32_t factorBufferBinding = 0;
         std::uint32_t factorBufferSize = 0;
+        // Cached detail::sourceReferencesTime(fragmentSource): backs
+        // hasAnimatedMaterials() without re-scanning the source every frame.
+        bool referencesTime = false;
     };
 
     struct DrawItem {
@@ -180,6 +187,9 @@ private:
     gpu::Ptr<gpu::BindGroup> shadowGroups_[kFrameSlots];
     std::uint32_t frameSlot_ = 0;
     bool shadowsEnabled_ = true;
+    // Set once in init(); frame.timeParams.x is seconds elapsed since then
+    // (float precision is fine for hours of runtime).
+    std::chrono::steady_clock::time_point initTime_;
 
     gpu::Ptr<gpu::Sampler> materialSampler_;
     gpu::Ptr<gpu::Sampler> iblSampler_;

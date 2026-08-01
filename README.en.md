@@ -10,7 +10,7 @@ A native Metal PBR renderer for macOS / iPad with an LLM-powered scene and shade
 - Cook-Torrance PBR, IBL, HDR + ACES, MSAA 4x, directional shadows
 - glTF 2.0 static scene loading
 - Single-source GLSL → SPIR-V / MSL cross-compilation with runtime hot reload
-- Scene assistant: add/remove entities, tweak lights, camera, materials and the sky environment in natural language, with built-in composition guidance and scene validation
+- Scene assistant: add/remove entities, tweak lights, camera, materials and the sky environment in natural language, with built-in composition guidance, scene validation and screenshot self-review
 - Shader assistant: generate material shaders from natural language, self-correcting on compile errors, hot-reloaded live
 
 See [docs/milestones.md](docs/milestones.md) for progress.

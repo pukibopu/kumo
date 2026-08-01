@@ -54,7 +54,9 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 - 破坏性操作默认直接执行，`agents.confirm_destructive`（或 `--confirm-destructive`）开启中文确认弹窗，拒绝以 `{"status":"cancelled_by_user"}` 返还模型；
 - 单轮工具轮数上限 `agents.max_tool_rounds`（默认 24，最低 2——末轮不执行工具）。
 
-**工具面按助手收窄**：场景助手持有上表十三个工具；shader 助手持有 `scene_list` + 下面两个 shader 工具——本地小模型碰不到 shader_write，shader 模型删不了实体。
+**工具面按助手收窄**：场景助手持有上表十三个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + 下面两个 shader 工具——本地小模型碰不到 shader_write，shader 模型删不了实体。
+
+**视觉闭环**（M6.97）：场景助手建完场景后截图自评（构图/曝光/比例），修正后最多补一张确认图，随后必须交付。工具结果带 `image_path` 时会话层自动读文件转 base64 附进消息：OpenAI 协议经紧随的 user 图片消息回灌（`detail:"low"`），Anthropic 原生 tool_result 带图；历史中最多保留一张图（新图逐出旧图），压缩估算按每图固定 512 token 计。**需要视觉模型**（如 GPT-4o 系及以上）；非视觉模型调用截图工具会得到端点报错。
 
 **艺术指导**：场景助手的 system prompt 内嵌成稿流程（主题 → 主体 → 前中后景 → 相机 → 布光 → 材质）、默认丰富度底线（地面 + 主体 + 支撑元素 + 匹配环境 + 分层布光 + 材质区分）、按包围盒计算取景、三点布光配方与验证闭环（建完调 `scene_validate` 修完再回复）；shader 助手内嵌材质意图词表（拉丝金属 / 磨砂玻璃近似 / 混凝土等 → 因子组合与手法）与两助手职责边界（场景助手管摆放与 PBR 因子，shader 助手管因子表达不了的效果）。
 

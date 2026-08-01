@@ -10,7 +10,7 @@ macOS / iPad 原生 Metal PBR 渲染器，内置 LLM 驱动的场景与 shader �
 - Cook-Torrance PBR、IBL、HDR + ACES、MSAA 4x、平行光阴影
 - glTF 2.0 静态场景加载
 - GLSL 单源 → SPIR-V / MSL 交叉编译，支持运行时热重载
-- 场景助手：自然语言增删实体、调整灯光 / 相机 / 材质 / 天空环境，内置构图与布光指导、场景自检
+- 场景助手：自然语言增删实体、调整灯光 / 相机 / 材质 / 天空环境，内置构图与布光指导、场景自检与截图自评
 - Shader 助手：自然语言生成材质 shader，编译报错自动修正后热载入
 
 进度见 [docs/milestones.md](docs/milestones.md)。

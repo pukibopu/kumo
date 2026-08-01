@@ -212,7 +212,8 @@ CompileResult compileGlsl(std::string_view source, Stage stage, const CompileOpt
         return std::unexpected(std::move(errors));
     }
 
-    std::vector<CompileError> mslErrors = detail::translateToMsl(result, stage);
+    std::vector<CompileError> mslErrors =
+        detail::translateToMsl(result, stage, options.mslPlatform);
     if (!mslErrors.empty()) {
         errors.insert(errors.end(), std::make_move_iterator(mslErrors.begin()),
                       std::make_move_iterator(mslErrors.end()));

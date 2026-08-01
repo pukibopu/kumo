@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <iterator>
 #include <string>
 
 using namespace kumo;
@@ -24,6 +25,24 @@ bool contains(const std::string& haystack, const char* needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
+bool reflectionsMatch(const shaderc::Reflection& lhs, const shaderc::Reflection& rhs) {
+    if (lhs.bindings.size() != rhs.bindings.size() ||
+        lhs.pushConstantSize != rhs.pushConstantSize ||
+        lhs.vertexInputLocations != rhs.vertexInputLocations) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.bindings.size(); ++i) {
+        const auto& a = lhs.bindings[i];
+        const auto& b = rhs.bindings[i];
+        if (a.set != b.set || a.binding != b.binding || a.type != b.type || a.name != b.name ||
+            a.bufferSize != b.bufferSize) {
+            return false;
+        }
+    }
+    return std::equal(std::begin(lhs.workgroupSize), std::end(lhs.workgroupSize),
+                      std::begin(rhs.workgroupSize));
+}
+
 } // namespace
 
 TEST_CASE("valid vertex and fragment compile to spirv and msl") {
@@ -38,6 +57,26 @@ TEST_CASE("valid vertex and fragment compile to spirv and msl") {
     CHECK(!frag->spirv.empty());
     CHECK(contains(frag->msl, "main0"));
     CHECK(frag->mslEntryPoint == "main0");
+}
+
+TEST_CASE("macOS and iOS MSL targets preserve shader reflection") {
+    constexpr const char* source = R"(#version 460
+layout(set = 1, binding = 0) uniform Params { vec4 tint; } params;
+layout(location = 0) out vec4 color;
+void main() { color = params.tint; }
+)";
+    const auto macos = shaderc::compileGlsl(
+        source, shaderc::Stage::Fragment,
+        {.sourceName = "platform.frag", .mslPlatform = shaderc::MslPlatform::MacOS});
+    const auto ios = shaderc::compileGlsl(
+        source, shaderc::Stage::Fragment,
+        {.sourceName = "platform.frag", .mslPlatform = shaderc::MslPlatform::IOS});
+
+    REQUIRE(macos.has_value());
+    REQUIRE(ios.has_value());
+    CHECK(!macos->msl.empty());
+    CHECK(!ios->msl.empty());
+    CHECK(reflectionsMatch(macos->reflection, ios->reflection));
 }
 
 TEST_CASE("separate texture and sampler reflect and remap") {

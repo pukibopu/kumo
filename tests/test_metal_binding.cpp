@@ -1,8 +1,8 @@
 #include <doctest/doctest.h>
 
-#include <kumo/rhi_metal/binding_map.h>
+#include <kumo/shaderabi/metal_binding.h>
 
-using namespace kumo::rhi::metal;
+using namespace kumo::shaderabi::metal;
 
 TEST_CASE("metal binding map keeps argument table regions disjoint") {
     CHECK(resourceIndex(0, 0) == 0);

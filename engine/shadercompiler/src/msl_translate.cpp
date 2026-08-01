@@ -1,6 +1,12 @@
 #include "internal.h"
 
+#include <kumo/shaderabi/metal_binding.h>
+
 #include <spirv_msl.hpp>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <algorithm>
 #include <exception>
@@ -11,14 +17,25 @@
 namespace kumo::shaderc::detail {
 namespace {
 
-// Mirror of kumo::rhi::metal in engine/rhi_metal/include/kumo/rhi_metal/binding_map.h.
-// Duplicated locally so shaderc does not depend on the Metal backend module.
-constexpr std::uint32_t kMaxBindingsPerSet = 8;
-constexpr std::uint32_t kMaxSets = 3;
-constexpr std::uint32_t kPushConstantBufferIndex = 24;
-// Metal's sampler argument table has 16 entries; samplers use a stride-6 remap.
-constexpr std::uint32_t kSamplerTableStride = 6;
-constexpr std::uint32_t kMaxSamplerIndex = 15;
+namespace metalBinding = shaderabi::metal;
+
+spirv_cross::CompilerMSL::Options::Platform toMslPlatform(MslPlatform platform) {
+    using Platform = spirv_cross::CompilerMSL::Options::Platform;
+
+    switch (platform) {
+    case MslPlatform::MacOS:
+        return Platform::macOS;
+    case MslPlatform::IOS:
+        return Platform::iOS;
+    case MslPlatform::Native:
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        return Platform::iOS;
+#else
+        return Platform::macOS;
+#endif
+    }
+    return Platform::macOS;
+}
 
 spv::ExecutionModel toExecutionModel(Stage stage) {
     switch (stage) {
@@ -50,14 +67,14 @@ void collect(spirv_cross::CompilerMSL& compiler,
                                        .name = res.name,
                                        .bufferSize = bufferSize});
 
-        const std::uint32_t flat = set * kMaxBindingsPerSet + binding;
+        const std::uint32_t flat = metalBinding::resourceIndex(set, binding);
         spirv_cross::MSLResourceBinding remap{};
         remap.stage = model;
         remap.desc_set = set;
         remap.binding = binding;
         remap.msl_buffer = flat;
         remap.msl_texture = flat;
-        remap.msl_sampler = isSampler ? set * kSamplerTableStride + binding : flat;
+        remap.msl_sampler = isSampler ? metalBinding::samplerIndex(set, binding) : flat;
         compiler.add_msl_resource_binding(remap);
     }
 }
@@ -65,17 +82,19 @@ void collect(spirv_cross::CompilerMSL& compiler,
 std::vector<CompileError> validateBindingRanges(const Reflection& reflection) {
     std::vector<CompileError> errors;
     for (const ReflectionBinding& b : reflection.bindings) {
-        if (b.set >= kMaxSets || b.binding >= kMaxBindingsPerSet) {
+        if (b.set >= metalBinding::kMaxBindGroups ||
+            b.binding >= metalBinding::kMaxBindingsPerSet) {
             errors.push_back(CompileError{
                 .file = {},
                 .line = 0,
                 .message = std::format("binding out of range: set={} binding={} (sets 0-{}, "
                                        "bindings 0-{})",
-                                       b.set, b.binding, kMaxSets - 1, kMaxBindingsPerSet - 1),
+                                       b.set, b.binding, metalBinding::kMaxBindGroups - 1,
+                                       metalBinding::kMaxBindingsPerSet - 1),
                 .secondStage = true,
             });
         } else if (b.type == "sampler" &&
-                   b.set * kSamplerTableStride + b.binding > kMaxSamplerIndex) {
+                   metalBinding::samplerIndex(b.set, b.binding) > metalBinding::kMaxSamplerIndex) {
             errors.push_back(CompileError{
                 .file = {},
                 .line = 0,
@@ -91,12 +110,13 @@ std::vector<CompileError> validateBindingRanges(const Reflection& reflection) {
 
 } // namespace
 
-std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage) {
+std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage,
+                                         MslPlatform platform) {
     try {
         spirv_cross::CompilerMSL compiler(shader.spirv);
 
         spirv_cross::CompilerMSL::Options options;
-        options.platform = spirv_cross::CompilerMSL::Options::macOS;
+        options.platform = toMslPlatform(platform);
         options.set_msl_version(2, 4);
         compiler.set_msl_options(options);
 
@@ -123,7 +143,7 @@ std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage) {
             remap.stage = model;
             remap.desc_set = spirv_cross::kPushConstDescSet;
             remap.binding = spirv_cross::kPushConstBinding;
-            remap.msl_buffer = kPushConstantBufferIndex;
+            remap.msl_buffer = metalBinding::kPushConstantBufferIndex;
             compiler.add_msl_resource_binding(remap);
         }
 

@@ -12,8 +12,7 @@ kumo_target_warnings(viewer)
 
 if(APPLE)
     set_source_files_properties(metal_layer_glue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    # kumo_facade transitively provides kumo_rhi/kumo_shaderc/kumo_scene/kumo_asset/
-    # kumo_renderer/kumo_agent (all PUBLIC in its own link); kumo_rhi_metal is the
-    # concrete Device the shell creates, which facade itself stays agnostic of.
-    target_link_libraries(viewer PRIVATE kumo_facade kumo_rhi_metal imgui_lib "-framework Cocoa")
+    # kumo_facade transitively provides the engine stack; the shell links the
+    # concrete Metal GPU facade to create its device and surface.
+    target_link_libraries(viewer PRIVATE kumo_facade kumo_gpu imgui_lib "-framework Cocoa")
 endif()

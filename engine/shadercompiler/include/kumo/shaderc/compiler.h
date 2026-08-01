@@ -9,6 +9,7 @@
 namespace kumo::shaderc {
 
 enum class Stage { Vertex, Fragment, Compute };
+enum class MslPlatform { Native, MacOS, IOS };
 
 struct CompileError {
     std::string file; // "" for the main source, else include name
@@ -46,6 +47,7 @@ struct CompiledShader {
 struct CompileOptions {
     std::string sourceName = "shader";    // used in error messages
     std::vector<std::string> includeDirs; // for GL_GOOGLE_include_directive
+    MslPlatform mslPlatform = MslPlatform::Native;
 };
 
 using CompileResult = std::expected<CompiledShader, std::vector<CompileError>>;

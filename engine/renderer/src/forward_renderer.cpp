@@ -22,8 +22,8 @@ namespace kumo::renderer {
 namespace {
 
 constexpr std::uint32_t kSampleCount = 4;
-constexpr rhi::TextureFormat kHdrFormat = rhi::TextureFormat::RGBA16Float;
-constexpr rhi::TextureFormat kDepthFormat = rhi::TextureFormat::Depth32Float;
+constexpr gpu::TextureFormat kHdrFormat = gpu::TextureFormat::RGBA16Float;
+constexpr gpu::TextureFormat kDepthFormat = gpu::TextureFormat::Depth32Float;
 constexpr std::uint32_t kShadowMapSize = 2048;
 // Slightly larger than a single shadow-map texel at the fitted ortho extent;
 // tuned empirically against the helmet golden scene (ADR 0009).
@@ -118,58 +118,58 @@ std::uint32_t bindingBufferSize(const shaderc::Reflection& reflection, std::uint
 // The pbr pipeline's fixed shape (vertex layout, targets, depth/cull/MSAA);
 // shared by the pbr pipeline itself and every per-material custom pipeline
 // (ADR 0011), which may only differ in fragment shader and set-1 layout.
-rhi::RenderPipelineDesc pbrPipelineDesc(
-    rhi::Ptr<rhi::ShaderModule> vertexShader, rhi::Ptr<rhi::ShaderModule> fragmentShader,
-    std::vector<rhi::Ptr<rhi::BindGroupLayout>> bindGroupLayouts, std::uint32_t pushConstantSize) {
+gpu::RenderPipelineDesc pbrPipelineDesc(
+    gpu::Ptr<gpu::ShaderModule> vertexShader, gpu::Ptr<gpu::ShaderModule> fragmentShader,
+    std::vector<gpu::Ptr<gpu::BindGroupLayout>> bindGroupLayouts, std::uint32_t pushConstantSize) {
     return {
         .vertexShader = std::move(vertexShader),
         .fragmentShader = std::move(fragmentShader),
         .vertexBuffers =
             {{.stride = sizeof(asset::Vertex),
               .attributes =
-                  {{.format = rhi::VertexFormat::Float32x3, .offset = 0, .shaderLocation = 0},
-                   {.format = rhi::VertexFormat::Float32x3, .offset = 12, .shaderLocation = 1},
-                   {.format = rhi::VertexFormat::Float32x4, .offset = 24, .shaderLocation = 2},
-                   {.format = rhi::VertexFormat::Float32x2, .offset = 40, .shaderLocation = 3}}}},
+                  {{.format = gpu::VertexFormat::Float32x3, .offset = 0, .shaderLocation = 0},
+                   {.format = gpu::VertexFormat::Float32x3, .offset = 12, .shaderLocation = 1},
+                   {.format = gpu::VertexFormat::Float32x4, .offset = 24, .shaderLocation = 2},
+                   {.format = gpu::VertexFormat::Float32x2, .offset = 40, .shaderLocation = 3}}}},
         .bindGroupLayouts = std::move(bindGroupLayouts),
         .pushConstantSize = pushConstantSize,
         .colorFormats = {kHdrFormat},
         .depthStencil = {.format = kDepthFormat,
                          .depthWriteEnabled = true,
-                         .depthCompare = rhi::CompareFunction::GreaterEqual},
-        .cullMode = rhi::CullMode::Back,
+                         .depthCompare = gpu::CompareFunction::GreaterEqual},
+        .cullMode = gpu::CullMode::Back,
         .sampleCount = kSampleCount,
     };
 }
 
 } // namespace
 
-bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat) {
+bool ForwardRenderer::init(gpu::Device& device, gpu::TextureFormat outputFormat) {
     device_ = &device;
     outputFormat_ = outputFormat;
 
     materialSampler_ = device.createSampler({.maxAnisotropy = 8});
     iblSampler_ = device.createSampler({
-        .addressModeU = rhi::AddressMode::ClampToEdge,
-        .addressModeV = rhi::AddressMode::ClampToEdge,
-        .addressModeW = rhi::AddressMode::ClampToEdge,
+        .addressModeU = gpu::AddressMode::ClampToEdge,
+        .addressModeV = gpu::AddressMode::ClampToEdge,
+        .addressModeW = gpu::AddressMode::ClampToEdge,
     });
     tonemapSampler_ = device.createSampler({
-        .addressModeU = rhi::AddressMode::ClampToEdge,
-        .addressModeV = rhi::AddressMode::ClampToEdge,
-        .addressModeW = rhi::AddressMode::ClampToEdge,
+        .addressModeU = gpu::AddressMode::ClampToEdge,
+        .addressModeV = gpu::AddressMode::ClampToEdge,
+        .addressModeW = gpu::AddressMode::ClampToEdge,
     });
     shadowSampler_ = device.createSampler({
-        .addressModeU = rhi::AddressMode::ClampToEdge,
-        .addressModeV = rhi::AddressMode::ClampToEdge,
-        .addressModeW = rhi::AddressMode::ClampToEdge,
-        .compare = rhi::CompareFunction::LessEqual,
+        .addressModeU = gpu::AddressMode::ClampToEdge,
+        .addressModeV = gpu::AddressMode::ClampToEdge,
+        .addressModeW = gpu::AddressMode::ClampToEdge,
+        .compare = gpu::CompareFunction::LessEqual,
     });
     // PCSS blocker search needs raw depth values, not a pass/fail compare.
     shadowRawSampler_ = device.createSampler({
-        .addressModeU = rhi::AddressMode::ClampToEdge,
-        .addressModeV = rhi::AddressMode::ClampToEdge,
-        .addressModeW = rhi::AddressMode::ClampToEdge,
+        .addressModeU = gpu::AddressMode::ClampToEdge,
+        .addressModeV = gpu::AddressMode::ClampToEdge,
+        .addressModeW = gpu::AddressMode::ClampToEdge,
     });
     if (!materialSampler_ || !iblSampler_ || !tonemapSampler_ || !shadowSampler_ ||
         !shadowRawSampler_) {
@@ -185,7 +185,7 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
     shadowMap_ = device.createTexture({
         .size = {kShadowMapSize, kShadowMapSize},
         .format = kDepthFormat,
-        .usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::Sampled,
+        .usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::Sampled,
     });
     if (!shadowMap_) {
         return false;
@@ -198,7 +198,7 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
     for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
         frameUniforms_[slot] = device.createBuffer({
             .size = sizeof(FrameUniformsData),
-            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+            .usage = gpu::BufferUsage::Uniform | gpu::BufferUsage::CopyDst,
         });
         if (!frameUniforms_[slot]) {
             return false;
@@ -215,7 +215,7 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
         }
         shadowUniforms_[slot] = device.createBuffer({
             .size = sizeof(math::float4x4),
-            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+            .usage = gpu::BufferUsage::Uniform | gpu::BufferUsage::CopyDst,
         });
         if (!shadowUniforms_[slot]) {
             return false;
@@ -231,13 +231,13 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
     return true;
 }
 
-rhi::Ptr<rhi::Texture> ForwardRenderer::makeSolidTexture(std::uint8_t r, std::uint8_t g,
+gpu::Ptr<gpu::Texture> ForwardRenderer::makeSolidTexture(std::uint8_t r, std::uint8_t g,
                                                          std::uint8_t b, std::uint8_t a) {
     KUMO_ASSERT(device_ != nullptr);
-    rhi::Ptr<rhi::Texture> texture = device_->createTexture({
+    gpu::Ptr<gpu::Texture> texture = device_->createTexture({
         .size = {1, 1},
-        .format = rhi::TextureFormat::RGBA8Unorm,
-        .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDst,
+        .format = gpu::TextureFormat::RGBA8Unorm,
+        .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::CopyDst,
     });
     if (texture) {
         const std::uint8_t pixel[4] = {r, g, b, a};
@@ -251,9 +251,9 @@ bool ForwardRenderer::uploadMesh(const asset::MeshData& mesh, GpuMesh& out) {
     const std::uint64_t vertexBytes = mesh.vertices.size() * sizeof(asset::Vertex);
     const std::uint64_t indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
     out.vertexBuffer = device_->createBuffer(
-        {.size = vertexBytes, .usage = rhi::BufferUsage::Vertex | rhi::BufferUsage::CopyDst});
+        {.size = vertexBytes, .usage = gpu::BufferUsage::Vertex | gpu::BufferUsage::CopyDst});
     out.indexBuffer = device_->createBuffer(
-        {.size = indexBytes, .usage = rhi::BufferUsage::Index | rhi::BufferUsage::CopyDst});
+        {.size = indexBytes, .usage = gpu::BufferUsage::Index | gpu::BufferUsage::CopyDst});
     if (!out.vertexBuffer || !out.indexBuffer) {
         return false;
     }
@@ -270,12 +270,12 @@ bool ForwardRenderer::buildSharedMaterialSlots(std::size_t materialIndex) {
     const MaterialFactorsData factors = toFactors(materialParams_[materialIndex]);
     const MaterialTextures& textures = materialTextures_[materialIndex];
 
-    std::array<rhi::Ptr<rhi::Buffer>, kFrameSlots> buffers;
-    std::array<rhi::Ptr<rhi::BindGroup>, kFrameSlots> groups;
+    std::array<gpu::Ptr<gpu::Buffer>, kFrameSlots> buffers;
+    std::array<gpu::Ptr<gpu::BindGroup>, kFrameSlots> groups;
     for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
         buffers[slot] = device_->createBuffer({
             .size = sizeof(MaterialFactorsData),
-            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+            .usage = gpu::BufferUsage::Uniform | gpu::BufferUsage::CopyDst,
         });
         if (!buffers[slot]) {
             return false;
@@ -468,10 +468,9 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
              .secondStage = false}});
     }
 
-    rhi::Ptr<rhi::ShaderModule> fragmentModule = device_->createShaderModule({
-        .stage = rhi::ShaderStage::Fragment,
-        .language = rhi::ShaderSourceLanguage::MSL,
-        .source = compiled->msl,
+    gpu::Ptr<gpu::ShaderModule> fragmentModule = device_->createShaderModule({
+        .stage = gpu::ShaderStage::Fragment,
+        .mslSource = compiled->msl,
         .entryPoint = compiled->mslEntryPoint,
     });
     if (!fragmentModule) {
@@ -483,9 +482,9 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
     }
 
     const detail::StageReflection layoutStages[] = {
-        {&pbrVertReflection_, rhi::ShaderStage::Vertex},
-        {&compiled->reflection, rhi::ShaderStage::Fragment}};
-    std::vector<rhi::Ptr<rhi::BindGroupLayout>> layouts =
+        {&pbrVertReflection_, gpu::ShaderStage::Vertex},
+        {&compiled->reflection, gpu::ShaderStage::Fragment}};
+    std::vector<gpu::Ptr<gpu::BindGroupLayout>> layouts =
         detail::layoutsFromReflection(*device_, layoutStages);
     if (layouts.size() < 2 || !layouts[1]) {
         return std::unexpected(std::vector<shaderc::CompileError>{
@@ -494,9 +493,9 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
              .message = "binding interface: failed to derive the set 1 layout",
              .secondStage = false}});
     }
-    rhi::Ptr<rhi::BindGroupLayout> materialLayout = std::move(layouts[1]);
+    gpu::Ptr<gpu::BindGroupLayout> materialLayout = std::move(layouts[1]);
 
-    rhi::Ptr<rhi::RenderPipeline> pipeline = device_->createRenderPipeline(pbrPipelineDesc(
+    gpu::Ptr<gpu::RenderPipeline> pipeline = device_->createRenderPipeline(pbrPipelineDesc(
         pbrVertModule_, fragmentModule, {frameLayout_, materialLayout, iblLayout_}, pushSize));
     if (!pipeline) {
         return std::unexpected(
@@ -516,12 +515,12 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
     std::memcpy(payload.data(), &factorsData, sizeof(factorsData));
 
     const MaterialTextures& textures = materialTextures_[materialIndex];
-    std::array<rhi::Ptr<rhi::Buffer>, kFrameSlots> buffers;
-    std::array<rhi::Ptr<rhi::BindGroup>, kFrameSlots> groups;
+    std::array<gpu::Ptr<gpu::Buffer>, kFrameSlots> buffers;
+    std::array<gpu::Ptr<gpu::BindGroup>, kFrameSlots> groups;
     for (std::uint32_t slot = 0; slot < kFrameSlots; ++slot) {
         buffers[slot] = device_->createBuffer({
             .size = bufferSize,
-            .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+            .usage = gpu::BufferUsage::Uniform | gpu::BufferUsage::CopyDst,
         });
         if (!buffers[slot]) {
             return std::unexpected(
@@ -579,17 +578,17 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
     }
 
     const detail::StageReflection pbrStages[] = {
-        {&pbrVert->reflection, rhi::ShaderStage::Vertex},
-        {&pbrFrag->reflection, rhi::ShaderStage::Fragment}};
+        {&pbrVert->reflection, gpu::ShaderStage::Vertex},
+        {&pbrFrag->reflection, gpu::ShaderStage::Fragment}};
     const detail::StageReflection skyboxStages[] = {
-        {&skyboxVert->reflection, rhi::ShaderStage::Vertex},
-        {&skyboxFrag->reflection, rhi::ShaderStage::Fragment}};
+        {&skyboxVert->reflection, gpu::ShaderStage::Vertex},
+        {&skyboxFrag->reflection, gpu::ShaderStage::Fragment}};
     const detail::StageReflection tonemapStages[] = {
-        {&fullscreenVert->reflection, rhi::ShaderStage::Vertex},
-        {&tonemapFrag->reflection, rhi::ShaderStage::Fragment}};
+        {&fullscreenVert->reflection, gpu::ShaderStage::Vertex},
+        {&tonemapFrag->reflection, gpu::ShaderStage::Fragment}};
     const detail::StageReflection shadowStages[] = {
-        {&shadowVert->reflection, rhi::ShaderStage::Vertex},
-        {&shadowFrag->reflection, rhi::ShaderStage::Fragment}};
+        {&shadowVert->reflection, gpu::ShaderStage::Vertex},
+        {&shadowFrag->reflection, gpu::ShaderStage::Fragment}};
 
     const std::string signature =
         detail::layoutSignature(pbrStages) + "|" + detail::layoutSignature(skyboxStages) + "|" +
@@ -620,40 +619,40 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
 
     const std::uint32_t pushSize =
         std::max(pbrVert->reflection.pushConstantSize, pbrFrag->reflection.pushConstantSize);
-    rhi::Ptr<rhi::RenderPipeline> pbr = device_->createRenderPipeline(pbrPipelineDesc(
+    gpu::Ptr<gpu::RenderPipeline> pbr = device_->createRenderPipeline(pbrPipelineDesc(
         pbrVert->module, pbrFrag->module, {frameLayout_, materialLayout_, iblLayout_}, pushSize));
-    rhi::Ptr<rhi::RenderPipeline> skybox = device_->createRenderPipeline({
+    gpu::Ptr<gpu::RenderPipeline> skybox = device_->createRenderPipeline({
         .vertexShader = skyboxVert->module,
         .fragmentShader = skyboxFrag->module,
         .bindGroupLayouts = {frameLayout_, skyboxLayout_},
         .colorFormats = {kHdrFormat},
         .depthStencil = {.format = kDepthFormat,
                          .depthWriteEnabled = false,
-                         .depthCompare = rhi::CompareFunction::GreaterEqual},
+                         .depthCompare = gpu::CompareFunction::GreaterEqual},
         .sampleCount = kSampleCount,
     });
-    rhi::Ptr<rhi::RenderPipeline> tonemap = device_->createRenderPipeline({
+    gpu::Ptr<gpu::RenderPipeline> tonemap = device_->createRenderPipeline({
         .vertexShader = fullscreenVert->module,
         .fragmentShader = tonemapFrag->module,
         .bindGroupLayouts = {nullptr, tonemapLayout_},
         .colorFormats = {outputFormat_},
     });
-    rhi::Ptr<rhi::RenderPipeline> shadow = device_->createRenderPipeline({
+    gpu::Ptr<gpu::RenderPipeline> shadow = device_->createRenderPipeline({
         .vertexShader = shadowVert->module,
         .fragmentShader = shadowFrag->module,
         .vertexBuffers = {{.stride = sizeof(asset::Vertex),
-                           .attributes = {{.format = rhi::VertexFormat::Float32x3,
+                           .attributes = {{.format = gpu::VertexFormat::Float32x3,
                                            .offset = 0,
                                            .shaderLocation = 0}}}},
         .bindGroupLayouts = {shadowLayout_},
         .pushConstantSize = 64,
         .depthStencil = {.format = kDepthFormat,
                          .depthWriteEnabled = true,
-                         .depthCompare = rhi::CompareFunction::Less,
+                         .depthCompare = gpu::CompareFunction::Less,
                          .depthBias = 4.0f,
                          .depthBiasSlopeScale = 2.0f,
                          .depthBiasClamp = 0.0f},
-        .cullMode = rhi::CullMode::Back,
+        .cullMode = gpu::CullMode::Back,
         .sampleCount = 1,
     });
     if (!pbr || !skybox || !tonemap || !shadow) {
@@ -688,7 +687,7 @@ void ForwardRenderer::rebuildMaterialResources() {
         if (!frameUniforms_[slot] || frameUniforms_[slot]->size() != frameBufferSize) {
             frameUniforms_[slot] = device_->createBuffer({
                 .size = frameBufferSize,
-                .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+                .usage = gpu::BufferUsage::Uniform | gpu::BufferUsage::CopyDst,
             });
             if (!frameUniforms_[slot]) {
                 logError("shader reload: frame uniform buffer rebuild failed (slot {})", slot);
@@ -711,7 +710,7 @@ void ForwardRenderer::rebuildMaterialResources() {
         if (!shadowUniforms_[slot]) {
             shadowUniforms_[slot] = device_->createBuffer({
                 .size = sizeof(math::float4x4),
-                .usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::CopyDst,
+                .usage = gpu::BufferUsage::Uniform | gpu::BufferUsage::CopyDst,
             });
             if (!shadowUniforms_[slot]) {
                 logError("shader reload: shadow uniform buffer rebuild failed (slot {})", slot);
@@ -829,16 +828,16 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
         meshes_.push_back(std::move(gpu));
     }
 
-    rhi::Ptr<rhi::CommandEncoder> encoder = device_->queue().createCommandEncoder();
+    gpu::Ptr<gpu::CommandEncoder> encoder = device_->queue().createCommandEncoder();
 
     textures_.clear();
     for (const asset::TextureData& tex : sceneAsset.textures) {
-        rhi::Ptr<rhi::Texture> texture = device_->createTexture({
+        gpu::Ptr<gpu::Texture> texture = device_->createTexture({
             .size = {tex.width, tex.height},
             .format =
-                tex.srgb ? rhi::TextureFormat::RGBA8UnormSrgb : rhi::TextureFormat::RGBA8Unorm,
-            .usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopySrc |
-                     rhi::TextureUsage::CopyDst,
+                tex.srgb ? gpu::TextureFormat::RGBA8UnormSrgb : gpu::TextureFormat::RGBA8Unorm,
+            .usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::CopySrc |
+                     gpu::TextureUsage::CopyDst,
             .mipLevelCount = fullMipChain(tex.width, tex.height),
         });
         if (!texture) {
@@ -851,7 +850,7 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
         textures_.push_back(std::move(texture));
     }
 
-    auto textureOr = [&](std::int32_t index, const rhi::Ptr<rhi::Texture>& fallback) {
+    auto textureOr = [&](std::int32_t index, const gpu::Ptr<gpu::Texture>& fallback) {
         return index >= 0 && static_cast<std::size_t>(index) < textures_.size()
                    ? textures_[static_cast<std::size_t>(index)]
                    : fallback;
@@ -884,7 +883,7 @@ bool ForwardRenderer::loadScene(const asset::SceneAsset& sceneAsset,
     return true;
 }
 
-void ForwardRenderer::resize(rhi::Extent2D size) {
+void ForwardRenderer::resize(gpu::Extent2D size) {
     KUMO_ASSERT(device_ != nullptr);
     if (size.width == 0 || size.height == 0) {
         return;
@@ -898,19 +897,21 @@ void ForwardRenderer::resize(rhi::Extent2D size) {
     hdrMsaa_ = device_->createTexture({
         .size = size,
         .format = kHdrFormat,
-        .usage = rhi::TextureUsage::RenderTarget,
+        .usage = gpu::TextureUsage::RenderTarget,
         .sampleCount = kSampleCount,
+        .storageMode = gpu::StorageMode::TransientAttachment,
     });
     hdrResolve_ = device_->createTexture({
         .size = size,
         .format = kHdrFormat,
-        .usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::Sampled,
+        .usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::Sampled,
     });
     depth_ = device_->createTexture({
         .size = size,
         .format = kDepthFormat,
-        .usage = rhi::TextureUsage::RenderTarget,
+        .usage = gpu::TextureUsage::RenderTarget,
         .sampleCount = kSampleCount,
+        .storageMode = gpu::StorageMode::TransientAttachment,
     });
     tonemapGroup_ = device_->createBindGroup({
         .layout = tonemapLayout_,
@@ -961,15 +962,15 @@ void ForwardRenderer::flushDirtyMaterials() {
             continue;
         }
         const MaterialFactorsData factors = toFactors(materialParams_[i]);
-        if (rhi::Ptr<rhi::Buffer>& buffer = materialFactorBuffers_[i][frameSlot_]) {
+        if (gpu::Ptr<gpu::Buffer>& buffer = materialFactorBuffers_[i][frameSlot_]) {
             device_->queue().writeBuffer(*buffer, 0, &factors, sizeof(factors));
         }
         materialDirty_[i][frameSlot_] = false;
     }
 }
 
-void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& scene,
-                             rhi::Texture* output, const Overlay& overlay) {
+void ForwardRenderer::render(gpu::CommandEncoder& encoder, const scene::Scene& scene,
+                             gpu::Texture* output, const Overlay& overlay) {
     KUMO_ASSERT(device_ != nullptr);
     if (output == nullptr || !pbrPipeline_ || !hdrMsaa_ ||
         defaultMaterialIndex_ >= materialGroups_.size()) {
@@ -1044,34 +1045,34 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
     updateFrameUniforms(scene, lightViewProj, shadowParams);
 
     if (renderShadowPass) {
-        rhi::RenderPassEncoder& shadowPass = encoder.beginRenderPass({
+        gpu::RenderPassEncoder& shadowPass = encoder.beginRenderPass({
             .depthAttachment = {.texture = shadowMap_.get(),
-                                .loadOp = rhi::LoadOp::Clear,
-                                .storeOp = rhi::StoreOp::Store,
+                                .loadOp = gpu::LoadOp::Clear,
+                                .storeOp = gpu::StoreOp::Store,
                                 .clearDepth = 1.0f},
         });
         shadowPass.setPipeline(*shadowPipeline_);
         shadowPass.setBindGroup(0, *shadowGroups_[frameSlot_]);
         for (const DrawItem& drawItem : draws_) {
             const GpuMesh& mesh = meshes_[drawItem.meshIndex];
-            shadowPass.setPushConstants(rhi::ShaderStage::Vertex, &drawItem.model,
+            shadowPass.setPushConstants(gpu::ShaderStage::Vertex, &drawItem.model,
                                         sizeof(drawItem.model));
             shadowPass.setVertexBuffer(0, *mesh.vertexBuffer);
-            shadowPass.setIndexBuffer(*mesh.indexBuffer, rhi::IndexFormat::Uint32);
+            shadowPass.setIndexBuffer(*mesh.indexBuffer, gpu::IndexFormat::Uint32);
             shadowPass.drawIndexed(mesh.indexCount);
         }
         shadowPass.end();
     }
 
-    rhi::RenderPassEncoder& scenePass = encoder.beginRenderPass({
+    gpu::RenderPassEncoder& scenePass = encoder.beginRenderPass({
         .colorAttachments = {{.texture = hdrMsaa_.get(),
-                              .loadOp = rhi::LoadOp::Clear,
-                              .storeOp = rhi::StoreOp::DontCare,
+                              .loadOp = gpu::LoadOp::Clear,
+                              .storeOp = gpu::StoreOp::DontCare,
                               .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
                               .resolveTarget = hdrResolve_.get()}},
         .depthAttachment = {.texture = depth_.get(),
-                            .loadOp = rhi::LoadOp::Clear,
-                            .storeOp = rhi::StoreOp::DontCare,
+                            .loadOp = gpu::LoadOp::Clear,
+                            .storeOp = gpu::StoreOp::DontCare,
                             .clearDepth = 0.0f},
     });
     // Null only after a doubly-failed environment swap (logged there); skip
@@ -1080,9 +1081,9 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
         scenePass.setPipeline(*pbrPipeline_);
         scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
         scenePass.setBindGroup(2, *iblGroup_);
-        rhi::RenderPipeline* currentPipeline = pbrPipeline_.get();
+        gpu::RenderPipeline* currentPipeline = pbrPipeline_.get();
         for (const DrawItem& drawItem : draws_) {
-            rhi::RenderPipeline* pipeline =
+            gpu::RenderPipeline* pipeline =
                 usesCustomPipeline(drawItem)
                     ? materialShaders_[drawItem.materialIndex]->pipeline.get()
                     : pbrPipeline_.get();
@@ -1100,10 +1101,10 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
             PerDrawData draw;
             draw.model = drawItem.model;
             draw.normalMatrix = math::transpose(math::inverse(draw.model));
-            scenePass.setPushConstants(rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment, &draw,
+            scenePass.setPushConstants(gpu::ShaderStage::Vertex | gpu::ShaderStage::Fragment, &draw,
                                        sizeof(draw));
             scenePass.setVertexBuffer(0, *mesh.vertexBuffer);
-            scenePass.setIndexBuffer(*mesh.indexBuffer, rhi::IndexFormat::Uint32);
+            scenePass.setIndexBuffer(*mesh.indexBuffer, gpu::IndexFormat::Uint32);
             scenePass.drawIndexed(mesh.indexCount);
         }
     }
@@ -1115,9 +1116,9 @@ void ForwardRenderer::render(rhi::CommandEncoder& encoder, const scene::Scene& s
     }
     scenePass.end();
 
-    rhi::RenderPassEncoder& tonemapPass = encoder.beginRenderPass({
+    gpu::RenderPassEncoder& tonemapPass = encoder.beginRenderPass({
         .colorAttachments = {{.texture = output,
-                              .loadOp = rhi::LoadOp::Clear,
+                              .loadOp = gpu::LoadOp::Clear,
                               .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}}},
     });
     tonemapPass.setPipeline(*tonemapPipeline_);

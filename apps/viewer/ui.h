@@ -1,7 +1,7 @@
 #pragma once
 
 #include <kumo/facade/engine_runtime.h>
-#include <kumo/rhi/rhi.h>
+#include <kumo/gpu/gpu.h>
 #include <kumo/scene/light.h>
 
 #include <array>
@@ -15,10 +15,10 @@ struct GLFWwindow;
 namespace ui {
 
 // Creates the ImGui context with a CJK-capable font and both backends.
-void init(kumo::rhi::Device& device, GLFWwindow* window);
+void init(kumo::gpu::Device& device, GLFWwindow* window);
 void shutdown();
-void beginFrame(kumo::rhi::RenderPassEncoder& pass);
-void endFrame(kumo::rhi::CommandEncoder& encoder, kumo::rhi::RenderPassEncoder& pass);
+void beginFrame(kumo::gpu::RenderPassEncoder& pass);
+void endFrame(kumo::gpu::CommandEncoder& encoder, kumo::gpu::RenderPassEncoder& pass);
 
 void drawStatsPanel(int fbWidth, int fbHeight);
 

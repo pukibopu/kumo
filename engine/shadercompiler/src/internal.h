@@ -9,6 +9,6 @@
 namespace kumo::shaderc::detail {
 
 // Empty on success; otherwise the translation/validation errors.
-std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage);
+std::vector<CompileError> translateToMsl(CompiledShader& shader, Stage stage, MslPlatform platform);
 
 } // namespace kumo::shaderc::detail

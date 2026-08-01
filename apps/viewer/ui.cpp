@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include <kumo/gpu/metal_interop.h>
 #include <kumo/math/math.h>
 
 #include <Metal/Metal.hpp>
@@ -176,14 +177,14 @@ void drainInto(ChatPanel& panel, AgentSession* session) {
 
 } // namespace
 
-void init(kumo::rhi::Device& device, GLFWwindow* window) {
+void init(kumo::gpu::Device& device, GLFWwindow* window) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr; // no imgui.ini in the working directory
     ImGui::StyleColorsDark();
     addCjkFont();
     ImGui_ImplGlfw_InitForOther(window, true);
-    ImGui_ImplMetal_Init(static_cast<MTL::Device*>(device.nativeHandles().device));
+    ImGui_ImplMetal_Init(kumo::gpu::metal::nativeDevice(device));
 }
 
 void shutdown() {
@@ -192,18 +193,17 @@ void shutdown() {
     ImGui::DestroyContext();
 }
 
-void beginFrame(kumo::rhi::RenderPassEncoder& pass) {
-    ImGui_ImplMetal_NewFrame(
-        static_cast<MTL::RenderPassDescriptor*>(pass.nativePassDescriptorHandle()));
+void beginFrame(kumo::gpu::RenderPassEncoder& pass) {
+    ImGui_ImplMetal_NewFrame(kumo::gpu::metal::nativeRenderPassDescriptor(pass));
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 }
 
-void endFrame(kumo::rhi::CommandEncoder& encoder, kumo::rhi::RenderPassEncoder& pass) {
+void endFrame(kumo::gpu::CommandEncoder& encoder, kumo::gpu::RenderPassEncoder& pass) {
     ImGui::Render();
-    ImGui_ImplMetal_RenderDrawData(
-        ImGui::GetDrawData(), static_cast<MTL::CommandBuffer*>(encoder.nativeCommandBufferHandle()),
-        static_cast<MTL::RenderCommandEncoder*>(pass.nativeEncoderHandle()));
+    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
+                                   kumo::gpu::metal::nativeCommandBuffer(encoder),
+                                   kumo::gpu::metal::nativeRenderCommandEncoder(pass));
 }
 
 void drawStatsPanel(int fbWidth, int fbHeight) {

@@ -13,40 +13,40 @@ namespace kumo::renderer::detail {
 
 namespace {
 
-rhi::ShaderStage toRhiStage(shaderc::Stage stage) {
+gpu::ShaderStage toGpuStage(shaderc::Stage stage) {
     switch (stage) {
     case shaderc::Stage::Vertex:
-        return rhi::ShaderStage::Vertex;
+        return gpu::ShaderStage::Vertex;
     case shaderc::Stage::Fragment:
-        return rhi::ShaderStage::Fragment;
+        return gpu::ShaderStage::Fragment;
     case shaderc::Stage::Compute:
-        return rhi::ShaderStage::Compute;
+        return gpu::ShaderStage::Compute;
     }
-    return rhi::ShaderStage::None;
+    return gpu::ShaderStage::None;
 }
 
-std::optional<rhi::BindingType> toBindingType(const std::string& type) {
+std::optional<gpu::BindingType> toBindingType(const std::string& type) {
     if (type == "uniform_buffer") {
-        return rhi::BindingType::UniformBuffer;
+        return gpu::BindingType::UniformBuffer;
     }
     if (type == "storage_buffer") {
-        return rhi::BindingType::StorageBuffer;
+        return gpu::BindingType::StorageBuffer;
     }
     if (type == "sampled_texture") {
-        return rhi::BindingType::Texture;
+        return gpu::BindingType::Texture;
     }
     if (type == "storage_texture") {
-        return rhi::BindingType::StorageTexture;
+        return gpu::BindingType::StorageTexture;
     }
     if (type == "sampler") {
-        return rhi::BindingType::Sampler;
+        return gpu::BindingType::Sampler;
     }
     return std::nullopt;
 }
 
 struct MergedBinding {
-    rhi::BindingType type = rhi::BindingType::UniformBuffer;
-    rhi::ShaderStage visibility = rhi::ShaderStage::None;
+    gpu::BindingType type = gpu::BindingType::UniformBuffer;
+    gpu::ShaderStage visibility = gpu::ShaderStage::None;
     std::uint32_t bufferSize = 0;
 };
 
@@ -72,7 +72,7 @@ mergeBindings(std::span<const StageReflection> stages) {
 
 } // namespace
 
-std::optional<CompiledStage> loadStage(rhi::Device& device, const char* file,
+std::optional<CompiledStage> loadStage(gpu::Device& device, const char* file,
                                        shaderc::Stage stage) {
     const std::filesystem::path path = std::filesystem::path(KUMO_SHADER_DIR) / file;
     auto source = readTextFile(path);
@@ -91,10 +91,9 @@ std::optional<CompiledStage> loadStage(rhi::Device& device, const char* file,
         return std::nullopt;
     }
 
-    rhi::Ptr<rhi::ShaderModule> module = device.createShaderModule({
-        .stage = toRhiStage(stage),
-        .language = rhi::ShaderSourceLanguage::MSL,
-        .source = compiled->msl,
+    gpu::Ptr<gpu::ShaderModule> module = device.createShaderModule({
+        .stage = toGpuStage(stage),
+        .mslSource = compiled->msl,
         .entryPoint = compiled->mslEntryPoint,
     });
     if (!module) {
@@ -103,17 +102,17 @@ std::optional<CompiledStage> loadStage(rhi::Device& device, const char* file,
     return CompiledStage{std::move(module), std::move(compiled->reflection)};
 }
 
-std::vector<rhi::Ptr<rhi::BindGroupLayout>>
-layoutsFromReflection(rhi::Device& device, std::span<const StageReflection> stages) {
+std::vector<gpu::Ptr<gpu::BindGroupLayout>>
+layoutsFromReflection(gpu::Device& device, std::span<const StageReflection> stages) {
     const auto merged = mergeBindings(stages);
     std::uint32_t setCount = 0;
     for (const auto& [key, binding] : merged) {
         setCount = std::max(setCount, key.first + 1);
     }
 
-    std::vector<rhi::Ptr<rhi::BindGroupLayout>> layouts(setCount);
+    std::vector<gpu::Ptr<gpu::BindGroupLayout>> layouts(setCount);
     for (std::uint32_t set = 0; set < setCount; ++set) {
-        rhi::BindGroupLayoutDesc desc;
+        gpu::BindGroupLayoutDesc desc;
         for (const auto& [key, binding] : merged) {
             if (key.first == set) {
                 desc.entries.push_back({.binding = key.second,

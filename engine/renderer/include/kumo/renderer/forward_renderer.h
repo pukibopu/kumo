@@ -1,8 +1,8 @@
 #pragma once
 
 #include <kumo/asset/asset.h>
+#include <kumo/gpu/gpu.h>
 #include <kumo/renderer/ibl.h>
-#include <kumo/rhi/rhi.h>
 #include <kumo/scene/scene.h>
 #include <kumo/shaderc/compiler.h>
 
@@ -23,7 +23,7 @@ namespace kumo::renderer {
 // Bind group layouts come from shader reflection (ADR 0040).
 class ForwardRenderer {
 public:
-    using Overlay = std::function<void(rhi::RenderPassEncoder&)>;
+    using Overlay = std::function<void(gpu::RenderPassEncoder&)>;
 
     // Mirrors the MaterialFactors uniform block in pbr.frag.
     struct MaterialParams {
@@ -33,14 +33,14 @@ public:
         float emissive[3]{0.0f, 0.0f, 0.0f};
     };
 
-    bool init(rhi::Device& device, rhi::TextureFormat outputFormat);
+    bool init(gpu::Device& device, gpu::TextureFormat outputFormat);
     bool loadScene(const asset::SceneAsset& sceneAsset, const ibl::Environment& environment);
     // Swaps the IBL/skybox environment on an already-loaded scene; rejects an
     // invalid environment and leaves the current one untouched. Waits for the
     // GPU like resize() does: the old environment's textures/bind groups may
     // still be referenced by an in-flight frame.
     bool setEnvironment(const ibl::Environment& environment);
-    void resize(rhi::Extent2D size);
+    void resize(gpu::Extent2D size);
 
     // Incremental uploads on top of a loaded scene; indices stay valid until the
     // next loadScene. All return -1 / false instead of asserting on bad input.
@@ -78,31 +78,31 @@ public:
     // any error, so a broken edit never interrupts rendering.
     bool reloadPipelines();
     // Records both passes; `overlay` is invoked inside the tonemap pass (ImGui).
-    void render(rhi::CommandEncoder& encoder, const scene::Scene& scene, rhi::Texture* output,
+    void render(gpu::CommandEncoder& encoder, const scene::Scene& scene, gpu::Texture* output,
                 const Overlay& overlay = {});
 
 private:
     struct GpuMesh {
-        rhi::Ptr<rhi::Buffer> vertexBuffer;
-        rhi::Ptr<rhi::Buffer> indexBuffer;
+        gpu::Ptr<gpu::Buffer> vertexBuffer;
+        gpu::Ptr<gpu::Buffer> indexBuffer;
         std::uint32_t indexCount = 0;
         math::Aabb localAabb;
     };
 
     struct MaterialTextures {
-        rhi::Ptr<rhi::Texture> baseColor;
-        rhi::Ptr<rhi::Texture> metallicRoughness;
-        rhi::Ptr<rhi::Texture> normal;
-        rhi::Ptr<rhi::Texture> occlusion;
-        rhi::Ptr<rhi::Texture> emissive;
+        gpu::Ptr<gpu::Texture> baseColor;
+        gpu::Ptr<gpu::Texture> metallicRoughness;
+        gpu::Ptr<gpu::Texture> normal;
+        gpu::Ptr<gpu::Texture> occlusion;
+        gpu::Ptr<gpu::Texture> emissive;
     };
 
     // Per-material fragment shader override (ADR 0011); the set-1 layout and
     // factor buffer size are re-derived from this shader's own reflection.
     struct MaterialShaderRecord {
         std::string fragmentSource;
-        rhi::Ptr<rhi::RenderPipeline> pipeline;
-        rhi::Ptr<rhi::BindGroupLayout> materialLayout;
+        gpu::Ptr<gpu::RenderPipeline> pipeline;
+        gpu::Ptr<gpu::BindGroupLayout> materialLayout;
         std::uint32_t factorBufferBinding = 0;
         std::uint32_t factorBufferSize = 0;
     };
@@ -126,7 +126,7 @@ private:
     // Writes the current frameSlot_ buffer for every material marked dirty in
     // that slot; called once per render() before recording the scene pass.
     void flushDirtyMaterials();
-    rhi::Ptr<rhi::Texture> makeSolidTexture(std::uint8_t r, std::uint8_t g, std::uint8_t b,
+    gpu::Ptr<gpu::Texture> makeSolidTexture(std::uint8_t r, std::uint8_t g, std::uint8_t b,
                                             std::uint8_t a);
     bool uploadMesh(const asset::MeshData& mesh, GpuMesh& out);
     bool appendMaterial(const MaterialParams& params, const MaterialTextures& textures);
@@ -139,69 +139,69 @@ private:
     std::expected<void, std::vector<shaderc::CompileError>>
     compileMaterialShader(std::size_t materialIndex, std::string_view source);
 
-    rhi::Device* device_ = nullptr;
-    rhi::TextureFormat outputFormat_ = rhi::TextureFormat::BGRA8Unorm;
-    rhi::Extent2D size_;
+    gpu::Device* device_ = nullptr;
+    gpu::TextureFormat outputFormat_ = gpu::TextureFormat::BGRA8Unorm;
+    gpu::Extent2D size_;
 
-    rhi::Ptr<rhi::BindGroupLayout> frameLayout_;
-    rhi::Ptr<rhi::BindGroupLayout> materialLayout_;
-    rhi::Ptr<rhi::BindGroupLayout> iblLayout_;
-    rhi::Ptr<rhi::BindGroupLayout> skyboxLayout_;
-    rhi::Ptr<rhi::BindGroupLayout> tonemapLayout_;
-    rhi::Ptr<rhi::BindGroupLayout> shadowLayout_;
+    gpu::Ptr<gpu::BindGroupLayout> frameLayout_;
+    gpu::Ptr<gpu::BindGroupLayout> materialLayout_;
+    gpu::Ptr<gpu::BindGroupLayout> iblLayout_;
+    gpu::Ptr<gpu::BindGroupLayout> skyboxLayout_;
+    gpu::Ptr<gpu::BindGroupLayout> tonemapLayout_;
+    gpu::Ptr<gpu::BindGroupLayout> shadowLayout_;
     // Bind groups outlive reloads, so a reload must reproduce this signature.
     std::string layoutSignature_;
 
-    rhi::Ptr<rhi::RenderPipeline> pbrPipeline_;
-    rhi::Ptr<rhi::RenderPipeline> skyboxPipeline_;
-    rhi::Ptr<rhi::RenderPipeline> tonemapPipeline_;
-    rhi::Ptr<rhi::RenderPipeline> shadowPipeline_;
+    gpu::Ptr<gpu::RenderPipeline> pbrPipeline_;
+    gpu::Ptr<gpu::RenderPipeline> skyboxPipeline_;
+    gpu::Ptr<gpu::RenderPipeline> tonemapPipeline_;
+    gpu::Ptr<gpu::RenderPipeline> shadowPipeline_;
 
     // Shared pbr vertex stage + its reflection, reused when building a custom
     // material pipeline (ADR 0011); the shared fragment reflection is the
     // compatibility reference for sets 0/2 (ADR 0029).
-    rhi::Ptr<rhi::ShaderModule> pbrVertModule_;
+    gpu::Ptr<gpu::ShaderModule> pbrVertModule_;
     shaderc::Reflection pbrVertReflection_;
     shaderc::Reflection pbrFragReflection_;
     std::uint32_t pbrPushConstantSize_ = 0;
 
-    rhi::Ptr<rhi::Texture> hdrMsaa_;
-    rhi::Ptr<rhi::Texture> hdrResolve_;
-    rhi::Ptr<rhi::Texture> depth_;
-    rhi::Ptr<rhi::BindGroup> tonemapGroup_;
+    gpu::Ptr<gpu::Texture> hdrMsaa_;
+    gpu::Ptr<gpu::Texture> hdrResolve_;
+    gpu::Ptr<gpu::Texture> depth_;
+    gpu::Ptr<gpu::BindGroup> tonemapGroup_;
 
     // Fixed size, allocated once in init(); resize() never touches it.
-    rhi::Ptr<rhi::Texture> shadowMap_;
+    gpu::Ptr<gpu::Texture> shadowMap_;
 
     static constexpr std::uint32_t kFrameSlots = 2;
-    rhi::Ptr<rhi::Buffer> frameUniforms_[kFrameSlots];
-    rhi::Ptr<rhi::BindGroup> frameGroups_[kFrameSlots];
-    rhi::Ptr<rhi::Buffer> shadowUniforms_[kFrameSlots];
-    rhi::Ptr<rhi::BindGroup> shadowGroups_[kFrameSlots];
+    gpu::Ptr<gpu::Buffer> frameUniforms_[kFrameSlots];
+    gpu::Ptr<gpu::BindGroup> frameGroups_[kFrameSlots];
+    gpu::Ptr<gpu::Buffer> shadowUniforms_[kFrameSlots];
+    gpu::Ptr<gpu::BindGroup> shadowGroups_[kFrameSlots];
     std::uint32_t frameSlot_ = 0;
     bool shadowsEnabled_ = true;
 
-    rhi::Ptr<rhi::Sampler> materialSampler_;
-    rhi::Ptr<rhi::Sampler> iblSampler_;
-    rhi::Ptr<rhi::Sampler> tonemapSampler_;
-    rhi::Ptr<rhi::Sampler> shadowSampler_;
+    gpu::Ptr<gpu::Sampler> materialSampler_;
+    gpu::Ptr<gpu::Sampler> iblSampler_;
+    gpu::Ptr<gpu::Sampler> tonemapSampler_;
+    gpu::Ptr<gpu::Sampler> shadowSampler_;
     // Non-comparison sampler over the same shadow map, for PCSS blocker search
     // (raw depth reads; shadowSampler_ only does hardware compare).
-    rhi::Ptr<rhi::Sampler> shadowRawSampler_;
+    gpu::Ptr<gpu::Sampler> shadowRawSampler_;
 
     ibl::Environment environment_;
-    rhi::Ptr<rhi::BindGroup> iblGroup_;
-    rhi::Ptr<rhi::BindGroup> skyboxGroup_;
+    gpu::Ptr<gpu::BindGroup> iblGroup_;
+    gpu::Ptr<gpu::BindGroup> skyboxGroup_;
 
-    rhi::Ptr<rhi::Texture> defaultWhite_;
-    rhi::Ptr<rhi::Texture> defaultNormal_;
+    gpu::Ptr<gpu::Texture> defaultWhite_;
+    gpu::Ptr<gpu::Texture> defaultNormal_;
 
     std::vector<GpuMesh> meshes_;
-    std::vector<rhi::Ptr<rhi::Texture>> textures_;
+    std::vector<gpu::Ptr<gpu::Texture>> textures_;
     // factor buffers/groups are double-buffered like frameUniforms_/frameGroups_
     // so setMaterialParams never overwrites a slot the GPU may still be reading.
-    std::vector<std::array<rhi::Ptr<rhi::Buffer>, kFrameSlots>> materialFactorBuffers_;
-    std::vector<std::array<rhi::Ptr<rhi::BindGroup>, kFrameSlots>> materialGroups_;
+    std::vector<std::array<gpu::Ptr<gpu::Buffer>, kFrameSlots>> materialFactorBuffers_;
+    std::vector<std::array<gpu::Ptr<gpu::BindGroup>, kFrameSlots>> materialGroups_;
     std::vector<std::array<bool, kFrameSlots>> materialDirty_;
     std::vector<MaterialParams> materialParams_;
     // Original textures a material was created with; rebuilds (custom shader

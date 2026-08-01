@@ -1,0 +1,3 @@
+add_library(kumo_shaderabi INTERFACE)
+target_include_directories(kumo_shaderabi INTERFACE include)
+

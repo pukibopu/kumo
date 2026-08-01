@@ -165,7 +165,14 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
         .addressModeW = rhi::AddressMode::ClampToEdge,
         .compare = rhi::CompareFunction::LessEqual,
     });
-    if (!materialSampler_ || !iblSampler_ || !tonemapSampler_ || !shadowSampler_) {
+    // PCSS blocker search needs raw depth values, not a pass/fail compare.
+    shadowRawSampler_ = device.createSampler({
+        .addressModeU = rhi::AddressMode::ClampToEdge,
+        .addressModeV = rhi::AddressMode::ClampToEdge,
+        .addressModeW = rhi::AddressMode::ClampToEdge,
+    });
+    if (!materialSampler_ || !iblSampler_ || !tonemapSampler_ || !shadowSampler_ ||
+        !shadowRawSampler_) {
         return false;
     }
 
@@ -200,7 +207,8 @@ bool ForwardRenderer::init(rhi::Device& device, rhi::TextureFormat outputFormat)
             .layout = frameLayout_,
             .entries = {{.binding = 0, .buffer = frameUniforms_[slot]},
                         {.binding = 1, .texture = shadowMap_},
-                        {.binding = 2, .sampler = shadowSampler_}},
+                        {.binding = 2, .sampler = shadowSampler_},
+                        {.binding = 3, .sampler = shadowRawSampler_}},
         });
         if (!frameGroups_[slot]) {
             return false;
@@ -693,7 +701,8 @@ void ForwardRenderer::rebuildMaterialResources() {
             .layout = frameLayout_,
             .entries = {{.binding = 0, .buffer = frameUniforms_[slot]},
                         {.binding = 1, .texture = shadowMap_},
-                        {.binding = 2, .sampler = shadowSampler_}},
+                        {.binding = 2, .sampler = shadowSampler_},
+                        {.binding = 3, .sampler = shadowRawSampler_}},
         });
         if (!frameGroups_[slot]) {
             logError("shader reload: frame bind group rebuild failed (slot {})", slot);

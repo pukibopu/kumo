@@ -134,14 +134,14 @@ TEST_CASE("setMismatch: a custom fragment that adds a set 0 binding is rejected"
     const std::string variantSource =
         replaceOnce(*source, "#include \"common.glsl\"\n",
                     "#include \"common.glsl\"\n"
-                    "layout(set = 0, binding = 3) uniform texture2D extraDebugTex;\n");
+                    "layout(set = 0, binding = 4) uniform texture2D extraDebugTex;\n");
     const auto variant = compilePbrFragVariant(variantSource, "variant.frag");
     REQUIRE(variant.has_value());
 
     const auto mismatch = renderer::detail::setMismatch(variant->reflection, shared->reflection, 0);
     REQUIRE(mismatch.has_value());
     CHECK(contains(*mismatch, "set 0"));
-    CHECK(contains(*mismatch, "binding 3"));
+    CHECK(contains(*mismatch, "binding 4"));
 
     // set 2 is untouched by this edit.
     CHECK(!renderer::detail::setMismatch(variant->reflection, shared->reflection, 2).has_value());
@@ -161,7 +161,7 @@ TEST_CASE("setMismatch: a material fragment with common.glsl but not shadow.glsl
     std::string variantSource = replaceOnce(*source, "#include \"shadow.glsl\"\n", "");
     variantSource = replaceOnce(
         variantSource,
-        "float shadow = i == int(frame.shadowParams.w) ? kumoShadowPcf(vWorldPos) : 1.0;",
+        "float shadow = i == int(frame.shadowParams.w) ? kumoShadowPcf(vWorldPos, N) : 1.0;",
         "float shadow = 1.0;");
     const auto variant = compilePbrFragVariant(variantSource, "no_shadow.frag");
     REQUIRE(variant.has_value());

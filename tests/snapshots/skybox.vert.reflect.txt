@@ -1,5 +1,6 @@
 binding set=0 binding=0 type=uniform_buffer name=FrameUniforms bufferSize=1024
 binding set=0 binding=1 type=sampled_texture name=shadowMap bufferSize=0
 binding set=0 binding=2 type=sampler name=shadowSampler bufferSize=0
+binding set=0 binding=3 type=sampler name=shadowRawSampler bufferSize=0
 push_constant_size=0
 vertex_input_locations=

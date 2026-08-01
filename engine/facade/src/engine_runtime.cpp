@@ -140,7 +140,8 @@ constexpr const char* kShaderSystemPrompt =
     "Division of labor: the scene assistant owns placement, lighting and plain PBR "
     "factors; you own everything factors cannot express. To receive sun shadows in a "
     "custom shader, include \"shadow.glsl\" and multiply the shadow-casting light's "
-    "radiance by kumoShadowPcf(vWorldPos) the way pbr.frag does. "
+    "radiance by kumoShadowPcf(vWorldPos, N) (N = the shader's world-space normal) the way "
+    "pbr.frag does. "
     "Always reply in the user's language.";
 
 // Exercises the incremental upload path: meshes and materials created after

@@ -23,5 +23,6 @@ frame;
 
 layout(set = 0, binding = 1) uniform texture2D shadowMap;
 layout(set = 0, binding = 2) uniform samplerShadow shadowSampler;
+layout(set = 0, binding = 3) uniform sampler shadowRawSampler;
 
 #endif

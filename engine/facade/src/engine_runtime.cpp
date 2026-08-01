@@ -42,6 +42,10 @@ namespace {
 
 constexpr gpu::TextureFormat kSwapchainFormat = gpu::TextureFormat::BGRA8Unorm;
 
+// Vision feedback loop (M6.97): keeps the screenshot attachment cheap on the
+// wire regardless of viewport size.
+constexpr std::uint32_t kScreenshotMaxLongSide = 640;
+
 // English for tool-call stability; the closing instruction keeps replies in the
 // user's language (ADR 0028). The craft sections raise the default output from
 // tech-demo to composed scene; budgets mirror the tool-layer caps.
@@ -100,8 +104,11 @@ constexpr const char* kSceneSystemPrompt =
     "scene_instance_group scatter (count/area/seed); for several distinct entities use one "
     "scene_add_entities call (up to 128) instead of repeated single adds.\n\n"
     "Verify. After building, call scene_validate and fix warnings (floating objects, "
-    "subject out of frame, unlit scenes), then check the result with scene_list. Only then "
-    "reply.\n\n"
+    "subject out of frame, unlit scenes). Then call viewer_screenshot and study the image "
+    "like an art director: framing and composition, exposure and readability, object scale "
+    "and proportions, anything that looks wrong or missing. Fix what you find, then "
+    "screenshot once more to confirm — at most two screenshot rounds per request. Only "
+    "then reply.\n\n"
     "Budget. Default at most about 80 entities and 6 lights; the light array caps at 16. "
     "When the user asks for something bigger, prefer groups and scatter over long entity "
     "lists. Keep replies short. Always reply in the user's language.";
@@ -518,6 +525,62 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     };
     agent::registerSceneTools(self->sceneToolRegistry_, sceneTools);
     agent::registerSceneListTool(self->shaderToolRegistry_, sceneTools);
+
+    // viewer_screenshot (vision feedback loop, M6.97): one definition and one
+    // handler shared by the scene assistant's own registry (so it can look at
+    // its own work) and the MCP registry below when enabled. Captured by value
+    // into each registry, so every copy is just the (cheap) runtime pointer.
+    const agent::ToolDef screenshotToolDef{
+        .name = "viewer_screenshot",
+        .description = "Render the current scene offscreen and save a downscaled PNG; a "
+                       "downscaled copy of the image is attached to the result for you to "
+                       "inspect.",
+        .parametersSchema = R"({"type":"object","properties":{}})",
+        .destructive = false};
+    auto viewerScreenshot = [runtime = self.get()](std::string_view) -> std::string {
+        const gpu::Extent2D extent = runtime->extent_;
+        gpu::Ptr<gpu::Texture> target = runtime->device_->createTexture({
+            .size = extent,
+            .format = kSwapchainFormat,
+            .usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::CopySrc,
+        });
+        if (!target) {
+            return agent::errorJson("failed to create offscreen render target");
+        }
+        gpu::Ptr<gpu::CommandEncoder> encoder = runtime->device_->queue().createCommandEncoder();
+        runtime->renderer_.render(*encoder, runtime->world_, target.get());
+        encoder->finishAndSubmit(nullptr);
+        runtime->device_->queue().waitIdle();
+
+        std::vector<std::uint8_t> pixels(static_cast<std::size_t>(extent.width) * extent.height *
+                                         4);
+        if (!runtime->device_->queue().readTexture(
+                *target, pixels.data(), static_cast<std::uint64_t>(extent.width) * 4, extent)) {
+            return agent::errorJson("screenshot readback failed");
+        }
+        // Swapchain is BGRA; PNG wants RGBA.
+        for (std::size_t i = 0; i < pixels.size(); i += 4) {
+            std::swap(pixels[i], pixels[i + 2]);
+        }
+        const asset::DownscaledImage scaled = asset::downscaleRgba(
+            pixels.data(), extent.width, extent.height, kScreenshotMaxLongSide);
+
+        // The temp dir is writable from every shell; the SwiftUI app's cwd is
+        // whatever LaunchServices provides (often /) and must not be relied on.
+        const std::filesystem::path path =
+            std::filesystem::temp_directory_path() / "kumo_screenshot.png";
+        if (!asset::writePng(path, scaled.width, scaled.height, scaled.rgba.data())) {
+            return agent::errorJson(std::format("screenshot write failed: {}", path.string()));
+        }
+        return nlohmann::json{{"status", "ok"},
+                              {"path", path.string()},
+                              {"image_path", path.string()},
+                              {"width", scaled.width},
+                              {"height", scaled.height}}
+            .dump();
+    };
+    self->sceneToolRegistry_.add(screenshotToolDef, viewerScreenshot);
+
     agent::ShaderToolContext shaderTools;
     shaderTools.scene = &self->world_;
     shaderTools.setShader = [renderer = &self->renderer_](std::uint32_t index,
@@ -538,58 +601,14 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
 
     // The MCP registry exposes the full scene tool set (unlike the shader
     // assistant's registry above, which only gets scene_list) plus the shader
-    // tools and a screenshot tool for visual verification (ADR 0041). Tool
-    // semantics stay single-sourced: the same contexts back both this
-    // registry and the embedded assistants' registries above.
+    // tools and the same viewer_screenshot tool as the scene assistant (ADR
+    // 0041). Tool semantics stay single-sourced: the same contexts and the same
+    // screenshot handler back both this registry and the embedded assistants'
+    // registries above.
     if (desc.mcp) {
         agent::registerSceneTools(self->mcpToolRegistry_, sceneTools);
         agent::registerShaderTools(self->mcpToolRegistry_, shaderTools);
-        self->mcpToolRegistry_.add(
-            {.name = "viewer_screenshot",
-             .description = "Render the current scene offscreen and save it as a PNG; the "
-                            "image is attached to the result.",
-             .parametersSchema = R"({"type":"object","properties":{}})",
-             .destructive = false},
-            [runtime = self.get()](std::string_view) -> std::string {
-                const gpu::Extent2D extent = runtime->extent_;
-                gpu::Ptr<gpu::Texture> target = runtime->device_->createTexture({
-                    .size = extent,
-                    .format = kSwapchainFormat,
-                    .usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::CopySrc,
-                });
-                if (!target) {
-                    return agent::errorJson("failed to create offscreen render target");
-                }
-                gpu::Ptr<gpu::CommandEncoder> encoder =
-                    runtime->device_->queue().createCommandEncoder();
-                runtime->renderer_.render(*encoder, runtime->world_, target.get());
-                encoder->finishAndSubmit(nullptr);
-                runtime->device_->queue().waitIdle();
-
-                std::vector<std::uint8_t> pixels(static_cast<std::size_t>(extent.width) *
-                                                 extent.height * 4);
-                if (!runtime->device_->queue().readTexture(
-                        *target, pixels.data(), static_cast<std::uint64_t>(extent.width) * 4,
-                        extent)) {
-                    return agent::errorJson("screenshot readback failed");
-                }
-                // Swapchain is BGRA; PNG wants RGBA.
-                for (std::size_t i = 0; i < pixels.size(); i += 4) {
-                    std::swap(pixels[i], pixels[i + 2]);
-                }
-                const std::filesystem::path path =
-                    std::filesystem::current_path() / "mcp_screenshot.png";
-                if (!asset::writePng(path, extent.width, extent.height, pixels.data())) {
-                    return agent::errorJson(
-                        std::format("screenshot write failed: {}", path.string()));
-                }
-                return nlohmann::json{{"status", "ok"},
-                                      {"path", path.string()},
-                                      {"image_path", path.string()},
-                                      {"width", extent.width},
-                                      {"height", extent.height}}
-                    .dump();
-            });
+        self->mcpToolRegistry_.add(screenshotToolDef, viewerScreenshot);
     }
 
     // Undo capture (ADR 0044): fires for every tool invocation on all three

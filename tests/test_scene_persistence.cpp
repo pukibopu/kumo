@@ -372,3 +372,73 @@ TEST_CASE("parseSceneJson defaults uv_tiling to identity when the key is absent"
     CHECK(parsed->entities[0].material->uvTiling[0] == 1.0f);
     CHECK(parsed->entities[0].material->uvTiling[1] == 1.0f);
 }
+
+// --- textureSet (M6.99) ------------------------------------------------
+
+TEST_CASE("save/parse round trip preserves an entity's texture-set provenance") {
+    scene::Scene scene;
+    scene::Entity entity;
+    entity.name = "wall";
+    entity.primitive = "cube";
+    entity.primitiveSize = 2.0f;
+    entity.materialIndex = 0;
+    entity.textureSet = "bark";
+    scene.entities.insert(entity);
+
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", noMaterials);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    CHECK(parsed->entities[0].entity.textureSet == "bark");
+}
+
+TEST_CASE("parseSceneJson defaults an entity's texture-set provenance to empty when absent (pre-"
+          "M6.99 saves)") {
+    const auto parsed =
+        scene::parseSceneJson(R"({"version":0,"model":"","lights":[],"entities":[{"name":"e"}]})");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    CHECK(parsed->entities[0].entity.textureSet.empty());
+}
+
+TEST_CASE("save/parse round trip omits texture_set when empty") {
+    scene::Scene scene;
+    scene::Entity entity;
+    entity.name = "plain";
+    scene.entities.insert(entity);
+
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", noMaterials);
+    CHECK(json.find("\"texture_set\"") == std::string::npos);
+}
+
+TEST_CASE("save/parse round trip preserves a texture-set entity combined with uv_tiling") {
+    // Mirrors the bark-wall scenario: a primitive entity textured via
+    // material_set_texture with non-default tiling must reload both textured
+    // (textureSet non-empty) AND tiled (material.uvTiling preserved).
+    scene::Scene scene;
+    scene::Entity entity;
+    entity.name = "bark_wall";
+    entity.primitive = "cube";
+    entity.materialIndex = 0;
+    entity.textureSet = "bark";
+    scene.entities.insert(entity);
+
+    scene::SavedMaterial material = makeMaterial();
+    material.uvTiling[0] = 3.0f;
+    material.uvTiling[1] = 3.0f;
+    const scene::MaterialLookup materials =
+        [&](std::int32_t index) -> std::optional<scene::SavedMaterial> {
+        return index == 0 ? std::make_optional(material) : std::nullopt;
+    };
+
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", materials);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    CHECK(parsed->entities[0].entity.textureSet == "bark");
+    REQUIRE(parsed->entities[0].material.has_value());
+    CHECK(parsed->entities[0].material->uvTiling[0] == 3.0f);
+    CHECK(parsed->entities[0].material->uvTiling[1] == 3.0f);
+}

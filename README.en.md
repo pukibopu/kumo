@@ -6,7 +6,7 @@ A native Metal PBR renderer for macOS / iPad with an LLM-powered scene and shade
 
 ## Planned features
 
-- Custom WebGPU-style RHI (the architecture was proven with dual Metal + Vulkan backends; now Metal-focused)
+- Metal-only GPU facade with descriptive resource/pass APIs and direct room for Metal features
 - Cook-Torrance PBR, IBL, HDR + ACES, MSAA 4x, directional shadows
 - glTF 2.0 static scene loading
 - Single-source GLSL → SPIR-V / MSL cross-compilation with runtime hot reload

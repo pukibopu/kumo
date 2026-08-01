@@ -6,7 +6,7 @@ macOS / iPad 原生 Metal PBR 渲染器，内置 LLM 驱动的场景与 shader �
 
 ## 功能规划
 
-- 自研 WebGPU 风格 RHI（架构曾以 Metal + Vulkan 双后端验证，现专注 Metal）
+- Metal-only GPU facade：描述式资源/pass API，Metal 专属能力可直接扩展
 - Cook-Torrance PBR、IBL、HDR + ACES、MSAA 4x、平行光阴影
 - glTF 2.0 静态场景加载
 - GLSL 单源 → SPIR-V / MSL 交叉编译，支持运行时热重载

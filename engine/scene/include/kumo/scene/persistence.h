@@ -20,6 +20,9 @@ struct SavedMaterial {
     float metallic = 1.0f;
     float roughness = 1.0f;
     float emissive[3]{0.0f, 0.0f, 0.0f};
+    // Absent key on read keeps this default (backward compatible with scenes
+    // saved before M6.98).
+    float uvTiling[2]{1.0f, 1.0f};
 };
 
 struct SavedEntity {
@@ -43,6 +46,10 @@ struct SavedEnvironment {
     float sunIntensity = 60.0f;
     float sunAngularRadiusDeg = 1.5f;
     float exposure = 1.0f;
+    // Absent (nullopt) means procedural sky, using the fields above; present
+    // names an HDR file under <assetDir>/env/, and the procedural fields are
+    // then ignored (but still written, so the file stays human-editable).
+    std::optional<std::string> file;
 };
 
 struct SavedScene {

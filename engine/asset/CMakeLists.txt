@@ -2,6 +2,7 @@ add_library(kumo_asset STATIC
     src/loader.cpp
     src/primitives.cpp
     src/procedural_sky.cpp
+    src/texture_set.cpp
     src/cgltf_impl.cpp
     src/stb_impl.cpp
 )

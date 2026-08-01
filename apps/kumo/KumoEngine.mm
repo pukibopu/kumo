@@ -317,6 +317,7 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
         .configPath = configPath.UTF8String,
         .envFilePath = envFilePath.UTF8String,
         .shaderDir = shaderDir.UTF8String,
+        .assetDir = assetDirStd,
         .offline = false,
         .confirmDestructive = false,
         .demoPrimitives = false,

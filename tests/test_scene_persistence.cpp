@@ -220,6 +220,62 @@ TEST_CASE("save/parse round trip preserves the environment when present") {
     CHECK(roundTripped.sunIntensity == 12.5f);
     CHECK(roundTripped.sunAngularRadiusDeg == 2.5f);
     CHECK(roundTripped.exposure == 1.4f);
+    CHECK(!roundTripped.file.has_value()); // procedural: no file key was written
+}
+
+TEST_CASE("save/parse round trip preserves an environment file reference") {
+    scene::Scene scene;
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+
+    scene::SavedEnvironment env;
+    env.file = "sunset_2k.hdr";
+
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", noMaterials, env);
+    CHECK(json.find("\"file\": \"sunset_2k.hdr\"") != std::string::npos);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->environment.has_value());
+    REQUIRE(parsed->environment->file.has_value());
+    CHECK(*parsed->environment->file == "sunset_2k.hdr");
+}
+
+TEST_CASE("parseSceneJson defaults environment.file to absent when the key is missing") {
+    const auto parsed = scene::parseSceneJson(
+        R"({"version":0,"model":"","lights":[],"entities":[],)"
+        R"("environment":{"zenith_color":[0,0,0],"horizon_color":[0,0,0],)"
+        R"("ground_color":[0,0,0],"sun_direction":[0,-1,0],"sun_color":[1,1,1],)"
+        R"("sun_intensity":1,"sun_angular_radius_deg":1,"exposure":1}})");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->environment.has_value());
+    CHECK(!parsed->environment->file.has_value());
+}
+
+TEST_CASE("save/parse round trip preserves an entity's model provenance") {
+    scene::Scene scene;
+    scene::Entity entity;
+    entity.name = "tree_0";
+    entity.meshIndex = 2;
+    entity.materialIndex = 1;
+    entity.model = "tree";
+    entity.modelMesh = 3;
+    scene.entities.insert(entity);
+
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", noMaterials);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    CHECK(parsed->entities[0].entity.model == "tree");
+    CHECK(parsed->entities[0].entity.modelMesh == 3);
+}
+
+TEST_CASE("parseSceneJson defaults an entity's model provenance to empty/-1 when absent") {
+    const auto parsed =
+        scene::parseSceneJson(R"({"version":0,"model":"","lights":[],"entities":[{"name":"e"}]})");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    CHECK(parsed->entities[0].entity.model.empty());
+    CHECK(parsed->entities[0].entity.modelMesh == -1);
 }
 
 TEST_CASE("save/parse round trip preserves a material's custom shader source") {
@@ -280,4 +336,39 @@ TEST_CASE("save/parse round trip omits the environment key when absent") {
     const auto parsed = scene::parseSceneJson(json);
     REQUIRE(parsed.has_value());
     CHECK(!parsed->environment.has_value());
+}
+
+TEST_CASE("save/parse round trip preserves a material's uv_tiling") {
+    scene::Scene scene;
+    scene::Entity entity;
+    entity.name = "tiled";
+    entity.materialIndex = 0;
+    scene.entities.insert(entity);
+
+    scene::SavedMaterial material = makeMaterial();
+    material.uvTiling[0] = 3.0f;
+    material.uvTiling[1] = 4.5f;
+    const scene::MaterialLookup materials =
+        [&](std::int32_t index) -> std::optional<scene::SavedMaterial> {
+        return index == 0 ? std::make_optional(material) : std::nullopt;
+    };
+
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", materials);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    REQUIRE(parsed->entities[0].material.has_value());
+    CHECK(parsed->entities[0].material->uvTiling[0] == 3.0f);
+    CHECK(parsed->entities[0].material->uvTiling[1] == 4.5f);
+}
+
+TEST_CASE("parseSceneJson defaults uv_tiling to identity when the key is absent") {
+    const auto parsed = scene::parseSceneJson(
+        R"({"version":0,"model":"","lights":[],"entities":[{"name":"e","material":)"
+        R"({"base_color":[1,1,1,1],"metallic":1,"roughness":1,"emissive":[0,0,0]}}]})");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    REQUIRE(parsed->entities[0].material.has_value());
+    CHECK(parsed->entities[0].material->uvTiling[0] == 1.0f);
+    CHECK(parsed->entities[0].material->uvTiling[1] == 1.0f);
 }

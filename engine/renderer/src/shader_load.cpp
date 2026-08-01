@@ -170,6 +170,9 @@ std::optional<std::string> setMismatch(const shaderc::Reflection& custom,
             return std::format("set {} binding {} buffer size changed from {} to {}", set,
                                bindingIndex, sharedBinding->bufferSize, customBinding->bufferSize);
         }
+        if (sharedBinding->members != customBinding->members) {
+            return std::format("set {} binding {} member names changed", set, bindingIndex);
+        }
     }
     for (const auto& [bindingIndex, customBinding] : customBindings) {
         if (!sharedBindings.contains(bindingIndex)) {
@@ -178,6 +181,13 @@ std::optional<std::string> setMismatch(const shaderc::Reflection& custom,
         }
     }
     return std::nullopt;
+}
+
+std::uint32_t factorPrefixSize(const shaderc::ReflectionBinding& factors) {
+    constexpr std::uint32_t kPrefixSize = 48; // baseColor + metallicRoughness + emissive
+    constexpr std::uint32_t kFullSize = 64;   // + uvTiling
+    const bool hasUvTiling = factors.members.size() >= 4 && factors.members[3] == "uvTiling";
+    return std::min(hasUvTiling ? kFullSize : kPrefixSize, factors.bufferSize);
 }
 
 bool sourceReferencesTime(std::string_view source) {

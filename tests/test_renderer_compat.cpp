@@ -34,7 +34,7 @@ shaderc::Reflection makeSharedReflection() {
          .binding = 6,
          .type = "uniform_buffer",
          .name = "MaterialFactors",
-         .bufferSize = 48},
+         .bufferSize = 64},
     };
     return reflection;
 }
@@ -102,7 +102,7 @@ TEST_CASE("setMismatch: a changed uniform buffer size is a mismatch") {
     const shaderc::Reflection shared = makeSharedReflection();
     shaderc::Reflection custom = makeSharedReflection();
     // set 1 binding 6 is MaterialFactors; grow it past its shared declared size.
-    custom.bindings[3].bufferSize = 64;
+    custom.bindings[3].bufferSize = 80;
 
     const auto mismatch = renderer::detail::setMismatch(custom, shared, 1);
     REQUIRE(mismatch.has_value());
@@ -179,8 +179,8 @@ TEST_CASE("setMismatch: adding a MaterialFactors member stays set 0/2 compatible
     REQUIRE(shared.has_value());
 
     const std::string variantSource =
-        replaceOnce(*source, "vec4 emissive;          // xyz\n}",
-                    "vec4 emissive;          // xyz\n    vec4 extra;\n}");
+        replaceOnce(*source, "vec4 uvTiling;          // xy uv scale, zw reserved\n}",
+                    "vec4 uvTiling;          // xy uv scale, zw reserved\n    vec4 extra;\n}");
     const auto variant = compilePbrFragVariant(variantSource, "variant.frag");
     REQUIRE(variant.has_value());
 
@@ -201,8 +201,89 @@ TEST_CASE("setMismatch: adding a MaterialFactors member stays set 0/2 compatible
     }
     REQUIRE(sharedFactors != nullptr);
     REQUIRE(variantFactors != nullptr);
-    CHECK(sharedFactors->bufferSize == 48);
-    CHECK(variantFactors->bufferSize > 48);
+    CHECK(sharedFactors->bufferSize == 64);
+    CHECK(variantFactors->bufferSize > 64);
+}
+
+TEST_CASE("factorPrefixSize: uvTiling as the 4th member selects the full 64B") {
+    shaderc::ReflectionBinding factors;
+    factors.bufferSize = 64;
+    factors.members = {"baseColor", "metallicRoughness", "emissive", "uvTiling"};
+    CHECK(renderer::detail::factorPrefixSize(factors) == 64);
+}
+
+TEST_CASE("factorPrefixSize: a different 4th member selects the 48B prefix") {
+    // Same bufferSize as the uvTiling block under std140 padding, but the 4th
+    // member is the shader author's own, not uvTiling.
+    shaderc::ReflectionBinding factors;
+    factors.bufferSize = 64;
+    factors.members = {"baseColor", "metallicRoughness", "emissive", "highlightOffset"};
+    CHECK(renderer::detail::factorPrefixSize(factors) == 48);
+}
+
+TEST_CASE("factorPrefixSize: fewer than 4 members defensively selects the 48B prefix") {
+    shaderc::ReflectionBinding factors;
+    factors.bufferSize = 48;
+    factors.members = {"baseColor", "metallicRoughness", "emissive"};
+    CHECK(renderer::detail::factorPrefixSize(factors) == 48);
+}
+
+TEST_CASE("factorPrefixSize: no members at all defensively selects the 48B prefix") {
+    shaderc::ReflectionBinding factors;
+    factors.bufferSize = 64;
+    CHECK(renderer::detail::factorPrefixSize(factors) == 48);
+}
+
+TEST_CASE("factorPrefixSize: result is clamped to a smaller declared bufferSize") {
+    shaderc::ReflectionBinding factors;
+    factors.bufferSize = 32;
+    factors.members = {"baseColor", "metallicRoughness", "emissive", "uvTiling"};
+    CHECK(renderer::detail::factorPrefixSize(factors) == 32);
+}
+
+TEST_CASE("factorPrefixSize: shared pbr.frag's MaterialFactors chooses the full 64B write") {
+    const auto pbrFragPath = std::filesystem::path(KUMO_SHADER_DIR) / "pbr.frag";
+    const auto source = readTextFile(pbrFragPath);
+    REQUIRE(source.has_value());
+
+    const auto shared = compilePbrFragVariant(*source, "pbr.frag");
+    REQUIRE(shared.has_value());
+
+    const shaderc::ReflectionBinding* factors = nullptr;
+    for (const shaderc::ReflectionBinding& binding : shared->reflection.bindings) {
+        if (binding.set == 1 && binding.type == "uniform_buffer") {
+            factors = &binding;
+        }
+    }
+    REQUIRE(factors != nullptr);
+    CHECK(renderer::detail::factorPrefixSize(*factors) == 64);
+}
+
+TEST_CASE("factorPrefixSize: a pre-uvTiling custom member is not mistaken for uvTiling") {
+    const auto pbrFragPath = std::filesystem::path(KUMO_SHADER_DIR) / "pbr.frag";
+    const auto source = readTextFile(pbrFragPath);
+    REQUIRE(source.has_value());
+
+    // Mirrors a real pre-M6.98 custom shader: baseColor/metallicRoughness/
+    // emissive plus its own 4th member of the same vec4 shape, just not named
+    // uvTiling. Byte size is identical to the current block either way — the
+    // write size can only be decided by member name.
+    std::string variantSource =
+        replaceOnce(*source, "vec4 uvTiling;          // xy uv scale, zw reserved\n}",
+                    "vec4 highlightOffset;\n}");
+    variantSource = replaceOnce(variantSource, "material.uvTiling.xy", "vec2(1.0)");
+    const auto variant = compilePbrFragVariant(variantSource, "variant.frag");
+    REQUIRE(variant.has_value());
+
+    const shaderc::ReflectionBinding* factors = nullptr;
+    for (const shaderc::ReflectionBinding& binding : variant->reflection.bindings) {
+        if (binding.set == 1 && binding.type == "uniform_buffer") {
+            factors = &binding;
+        }
+    }
+    REQUIRE(factors != nullptr);
+    REQUIRE(factors->bufferSize == 64); // same size as the real uvTiling block (std140 padding)
+    CHECK(renderer::detail::factorPrefixSize(*factors) == 48);
 }
 
 TEST_CASE("sourceReferencesTime: absent, present and inside a comment") {

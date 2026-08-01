@@ -135,8 +135,9 @@ constexpr const char* kShaderSystemPrompt =
     "normalMatrix) must not change. In set 1, bindings 0-5 (textures and sampler) must "
     "stay as-is; you MAY extend the MaterialFactors uniform block (set 1 binding 6) by "
     "appending new members at the END of the block — existing members baseColor, "
-    "metallicRoughness and emissive are written by the engine, appended members read as "
-    "zero until driven. Rendering is linear-light with reversed-Z, right-handed Y-up. "
+    "metallicRoughness, emissive and uvTiling are written by the engine, members appended "
+    "after uvTiling read as zero until driven. Rendering is linear-light with reversed-Z, "
+    "right-handed Y-up. "
     "Compile errors return structured with file and line; fix the source and retry, at "
     "most 5 attempts, then stop and explain. Keep the existing lighting structure unless "
     "asked otherwise. After a shader_write that compiles, call viewer_screenshot once to "
@@ -258,6 +259,7 @@ scene::SavedMaterial toSavedMaterial(const MaterialParams& params) {
     saved.metallic = params.metallic;
     saved.roughness = params.roughness;
     std::copy(std::begin(params.emissive), std::end(params.emissive), saved.emissive);
+    std::copy(std::begin(params.uvTiling), std::end(params.uvTiling), saved.uvTiling);
     return saved;
 }
 
@@ -267,16 +269,18 @@ MaterialParams toMaterialParams(const scene::SavedMaterial& saved) {
     params.metallic = saved.metallic;
     params.roughness = saved.roughness;
     std::copy(std::begin(saved.emissive), std::end(saved.emissive), params.emissive);
+    std::copy(std::begin(saved.uvTiling), std::end(saved.uvTiling), params.uvTiling);
     return params;
 }
 
-scene::SavedEnvironment toSavedEnvironment(const asset::ProceduralSkyDesc& desc) {
+scene::SavedEnvironment toSavedEnvironment(const EnvironmentSource& source) {
     scene::SavedEnvironment saved;
     const auto copy3 = [](const math::float3& v, float(&out)[3]) {
         out[0] = v.x;
         out[1] = v.y;
         out[2] = v.z;
     };
+    const asset::ProceduralSkyDesc& desc = source.sky;
     copy3(desc.zenithColor, saved.zenithColor);
     copy3(desc.horizonColor, saved.horizonColor);
     copy3(desc.groundColor, saved.groundColor);
@@ -285,6 +289,11 @@ scene::SavedEnvironment toSavedEnvironment(const asset::ProceduralSkyDesc& desc)
     saved.sunIntensity = desc.sunIntensity;
     saved.sunAngularRadiusDeg = desc.sunAngularRadiusDeg;
     saved.exposure = desc.exposure;
+    // Procedural fields above are still written even when `file` is set (kept
+    // human-editable/inspectable); the loader ignores them in that case.
+    if (!source.file.empty()) {
+        saved.file = source.file;
+    }
     return saved;
 }
 
@@ -299,6 +308,13 @@ asset::ProceduralSkyDesc toProceduralSkyDesc(const scene::SavedEnvironment& save
     desc.sunAngularRadiusDeg = saved.sunAngularRadiusDeg;
     desc.exposure = saved.exposure;
     return desc;
+}
+
+EnvironmentSource toEnvironmentSource(const scene::SavedEnvironment& saved) {
+    if (saved.file.has_value() && !saved.file->empty()) {
+        return EnvironmentSource{.file = *saved.file};
+    }
+    return EnvironmentSource{.file = "", .sky = toProceduralSkyDesc(saved)};
 }
 
 // Tool names the undo hook must not record a checkpoint for (ADR 0044): pure
@@ -435,21 +451,18 @@ void EngineRuntime::applySceneState(const SceneState& state) {
         }
     }
 
-    // Equality-gated (ProceduralSkyDesc::operator== is defaulted) so undoing
+    // Equality-gated (EnvironmentSource::operator== is defaulted) so undoing
     // an unrelated edit never triggers a bake; nullopt means "restore the
-    // loaded HDR", which is not otherwise reachable once a procedural sky has
-    // been applied. On a bake/swap failure environmentSky_ deliberately keeps
-    // tracking what the renderer actually shows — later captures then pair the
-    // rolled-back world with the environment still on screen, never with a
-    // value that was requested but never applied.
+    // loaded startup HDR", which is not otherwise reachable once
+    // environment_set has swapped in a procedural sky or a named HDR file. On
+    // a bake/swap failure environmentSky_ deliberately keeps tracking what the
+    // renderer actually shows — later captures then pair the rolled-back
+    // world with the environment still on screen, never with a value that was
+    // requested but never applied.
     if (state.environment != environmentSky_) {
         if (state.environment.has_value()) {
-            const asset::HdrImage image = asset::proceduralSky(*state.environment);
-            const renderer::ibl::Environment environment = renderer::ibl::bake(*device_, image);
-            if (environment.valid() && renderer_.setEnvironment(environment)) {
-                environmentSky_ = state.environment;
-            } else {
-                logError("undo/redo: failed to re-bake the procedural sky environment");
+            if (!applyEnvironmentSource(*state.environment)) {
+                logError("undo/redo: failed to apply the saved environment");
             }
         } else {
             const auto hdr = asset::loadHdr(envPath_);
@@ -563,6 +576,7 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     self->device_ = &device;
     self->modelPath_ = desc.modelPath;
     self->envPath_ = desc.envPath;
+    self->assetDir_ = desc.assetDir;
     self->configPath_ = desc.configPath;
     self->envFilePath_ = desc.envFilePath;
     self->offline_ = desc.offline;
@@ -941,8 +955,18 @@ bool EngineRuntime::reloadPipelines() {
     return ok;
 }
 
-bool EngineRuntime::applyEnvironment(const asset::ProceduralSkyDesc& desc) {
-    const asset::HdrImage image = asset::proceduralSky(desc);
+bool EngineRuntime::applyEnvironmentSource(const EnvironmentSource& source) {
+    asset::HdrImage image;
+    if (!source.file.empty()) {
+        const auto hdr = asset::loadHdr(assetDir_ / "env" / source.file);
+        if (!hdr.has_value()) {
+            logError("applyEnvironment: failed to load {}: {}", source.file, hdr.error());
+            return false;
+        }
+        image = *hdr;
+    } else {
+        image = asset::proceduralSky(source.sky);
+    }
     const renderer::ibl::Environment environment = renderer::ibl::bake(*device_, image);
     if (!environment.valid()) {
         logError("applyEnvironment: IBL bake failed");
@@ -952,9 +976,24 @@ bool EngineRuntime::applyEnvironment(const asset::ProceduralSkyDesc& desc) {
         logError("applyEnvironment: renderer setEnvironment failed");
         return false;
     }
-    environmentSky_ = desc;
-    markDirty();
+    environmentSky_ = source;
     return true;
+}
+
+bool EngineRuntime::applyEnvironment(const asset::ProceduralSkyDesc& desc) {
+    const bool ok = applyEnvironmentSource(EnvironmentSource{.file = "", .sky = desc});
+    if (ok) {
+        markDirty();
+    }
+    return ok;
+}
+
+bool EngineRuntime::applyEnvironmentFile(const std::string& file) {
+    const bool ok = applyEnvironmentSource(EnvironmentSource{.file = file});
+    if (ok) {
+        markDirty();
+    }
+    return ok;
 }
 
 EngineRuntime::Notice& EngineRuntime::sceneRetryNotice() {
@@ -1034,10 +1073,10 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
     }
     world_.camera = saved.camera;
 
-    // Absent key leaves the current environment (HDR or procedural) untouched.
+    // Absent key leaves the current environment (HDR, procedural or file) untouched.
     if (saved.environment.has_value()) {
-        if (!applyEnvironment(toProceduralSkyDesc(*saved.environment))) {
-            logError("scene load: failed to re-bake the saved procedural sky; keeping the current "
+        if (!applyEnvironmentSource(toEnvironmentSource(*saved.environment))) {
+            logError("scene load: failed to apply the saved environment; keeping the current "
                      "environment");
         }
     }
@@ -1045,7 +1084,28 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
     std::size_t loaded = 0;
     for (const scene::SavedEntity& savedEntity : saved.entities) {
         scene::Entity entity = savedEntity.entity;
-        if (!entity.primitive.empty()) {
+        if (!entity.model.empty()) {
+            // loadOrGetModel caches by file, so entities that share a model
+            // re-instantiate the upload only on the first one encountered.
+            const UploadedModel* model = loadOrGetModel(entity.model);
+            if (model == nullptr) {
+                logError("scene load: failed to load model '{}' for entity '{}', skipping",
+                         entity.model, entity.name);
+                continue;
+            }
+            if (entity.modelMesh < 0 ||
+                static_cast<std::size_t>(entity.modelMesh) >= model->meshIndices.size()) {
+                logError("scene load: model mesh index {} out of range for entity '{}', skipping",
+                         entity.modelMesh, entity.name);
+                continue;
+            }
+            entity.meshIndex = model->meshIndices[static_cast<std::size_t>(entity.modelMesh)];
+            entity.materialIndex = model->meshMaterial[static_cast<std::size_t>(entity.modelMesh)];
+            if (savedEntity.material.has_value() && entity.materialIndex >= 0) {
+                renderer_.setMaterialParams(static_cast<std::uint32_t>(entity.materialIndex),
+                                            toMaterialParams(*savedEntity.material));
+            }
+        } else if (!entity.primitive.empty()) {
             std::optional<asset::MeshData> built =
                 asset::makePrimitive(entity.primitive, entity.primitiveSize);
             if (!built.has_value()) {
@@ -1101,11 +1161,133 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
     return true;
 }
 
+const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::string& name) {
+    if (const auto it = modelCache_.find(name); it != modelCache_.end()) {
+        return &it->second;
+    }
+    const std::filesystem::path path = assetDir_ / "models" / (name + ".glb");
+    auto sceneAsset = asset::loadGltf(path);
+    if (!sceneAsset.has_value()) {
+        logError("instantiateModel: failed to load {}: {}", path.string(), sceneAsset.error());
+        return nullptr;
+    }
+
+    UploadedModel uploaded;
+    uploaded.meshIndices.reserve(sceneAsset->meshes.size());
+    for (const asset::MeshData& mesh : sceneAsset->meshes) {
+        const std::int32_t index = renderer_.addMesh(mesh);
+        if (index < 0) {
+            logError("instantiateModel: mesh upload failed for {}", path.string());
+            return nullptr;
+        }
+        uploaded.meshIndices.push_back(index);
+    }
+
+    std::vector<std::int32_t> textureIndices;
+    textureIndices.reserve(sceneAsset->textures.size());
+    for (const asset::TextureData& tex : sceneAsset->textures) {
+        const std::int32_t index = renderer_.addTexture(tex);
+        if (index < 0) {
+            logError("instantiateModel: texture upload failed for {}", path.string());
+            return nullptr;
+        }
+        textureIndices.push_back(index);
+    }
+    const auto remapTexture = [&](std::int32_t local) -> std::int32_t {
+        return local >= 0 && static_cast<std::size_t>(local) < textureIndices.size()
+                   ? textureIndices[static_cast<std::size_t>(local)]
+                   : -1;
+    };
+
+    std::vector<std::int32_t> materialIndices;
+    materialIndices.reserve(sceneAsset->materials.size());
+    for (const asset::MaterialData& mat : sceneAsset->materials) {
+        MaterialParams params;
+        std::copy(std::begin(mat.baseColor), std::end(mat.baseColor), params.baseColor);
+        params.metallic = mat.metallic;
+        params.roughness = mat.roughness;
+        std::copy(std::begin(mat.emissive), std::end(mat.emissive), params.emissive);
+        const renderer::ForwardRenderer::MaterialTextureIndices textures{
+            .baseColor = remapTexture(mat.baseColorTexture),
+            .metallicRoughness = remapTexture(mat.metallicRoughnessTexture),
+            .normal = remapTexture(mat.normalTexture),
+            .occlusion = remapTexture(mat.occlusionTexture),
+            .emissive = remapTexture(mat.emissiveTexture),
+        };
+        const std::int32_t index = renderer_.addMaterial(params, textures);
+        if (index < 0) {
+            logError("instantiateModel: material upload failed for {}", path.string());
+            return nullptr;
+        }
+        materialIndices.push_back(index);
+    }
+
+    uploaded.meshMaterial.reserve(sceneAsset->meshes.size());
+    for (const asset::MeshData& mesh : sceneAsset->meshes) {
+        const std::int32_t local = mesh.materialIndex;
+        uploaded.meshMaterial.push_back(local >= 0 && static_cast<std::size_t>(local) <
+                                                          materialIndices.size()
+                                            ? materialIndices[static_cast<std::size_t>(local)]
+                                            : -1);
+    }
+    uploaded.nodes = sceneAsset->nodes;
+
+    logInfo("instantiateModel: uploaded {}: {} meshes, {} materials, {} textures, {} nodes",
+            path.filename().string(), uploaded.meshIndices.size(), materialIndices.size(),
+            textureIndices.size(), uploaded.nodes.size());
+    return &modelCache_.emplace(name, std::move(uploaded)).first->second;
+}
+
+std::expected<EngineRuntime::ModelInstance, std::string>
+EngineRuntime::instantiateModel(std::string_view name, const scene::Transform& root) {
+    // Non-uniform root scale composed onto a rotated child node cannot be
+    // represented as a TRS (it shears); reject it like scene_instance_group
+    // does rather than silently producing a wrong transform.
+    constexpr float kEps = 1e-5f;
+    if (std::abs(root.scale.x - root.scale.y) > kEps ||
+        std::abs(root.scale.x - root.scale.z) > kEps) {
+        return std::unexpected(std::string("instantiateModel: root scale must be uniform"));
+    }
+
+    const std::string modelName(name);
+    const UploadedModel* model = loadOrGetModel(modelName);
+    if (model == nullptr) {
+        return std::unexpected(
+            std::format("instantiateModel: failed to load or upload '{}'", modelName));
+    }
+
+    ModelInstance instance;
+    instance.entities.reserve(model->nodes.size());
+    const math::float4x4 rootMatrix = root.matrix();
+    for (std::size_t i = 0; i < model->nodes.size(); ++i) {
+        const asset::NodeInstance& node = model->nodes[i];
+        if (node.meshIndex < 0 ||
+            static_cast<std::size_t>(node.meshIndex) >= model->meshIndices.size()) {
+            continue;
+        }
+        const math::float4x4 worldTransform = rootMatrix * node.worldTransform;
+        const math::Trs trs = math::decomposeTrs(worldTransform);
+        scene::Entity entity;
+        entity.name =
+            std::format("{}_{}", modelName, node.name.empty() ? std::to_string(i) : node.name);
+        entity.transform = {trs.translation, trs.rotation, trs.scale};
+        entity.meshIndex = model->meshIndices[static_cast<std::size_t>(node.meshIndex)];
+        entity.materialIndex = model->meshMaterial[static_cast<std::size_t>(node.meshIndex)];
+        entity.model = modelName;
+        entity.modelMesh = node.meshIndex;
+        instance.entities.push_back(world_.entities.insert(entity));
+    }
+    markDirty();
+    return instance;
+}
+
 std::vector<EngineRuntime::EntityInfo> EngineRuntime::listEntities() const {
     std::vector<EntityInfo> out;
     world_.entities.forEach([&](scene::EntityId id, const scene::Entity& entity) {
-        out.push_back(
-            {.id = agent::formatEntityId(id), .name = entity.name, .primitive = entity.primitive});
+        out.push_back({.id = agent::formatEntityId(id),
+                       .name = entity.name,
+                       .primitive = entity.primitive,
+                       .model = entity.model});
     });
     return out;
 }
@@ -1124,6 +1306,7 @@ EngineRuntime::EntityDetail EngineRuntime::entityDetail(const std::string& id) c
     detail.id = id;
     detail.name = entity->name;
     detail.primitive = entity->primitive;
+    detail.model = entity->model;
     detail.position = entity->transform.position;
     detail.eulerDeg = math::eulerDegrees(entity->transform.rotation);
     detail.scale = entity->transform.scale;

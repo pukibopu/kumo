@@ -7,8 +7,8 @@
 #if defined(__APPLE__)
 #define KUMO_HAS_RUNAPP 1
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
-           const std::filesystem::path& envPath, bool demoPrimitives, bool offline,
-           bool confirmDestructive, bool mcp);
+           const std::filesystem::path& envPath, const std::filesystem::path& assetDir,
+           bool demoPrimitives, bool offline, bool confirmDestructive, bool mcp);
 #endif
 
 int main(int argc, char** argv) {
@@ -59,7 +59,8 @@ int main(int argc, char** argv) {
     kumo::logInfo("kumo viewer {}", KUMO_VERSION_STRING);
 
 #if defined(KUMO_HAS_RUNAPP)
-    return runApp(maxFrames, modelPath, envPath, demoPrimitives, offline, confirmDestructive, mcp);
+    return runApp(maxFrames, modelPath, envPath, KUMO_ASSET_DIR, demoPrimitives, offline,
+                  confirmDestructive, mcp);
 #else
     (void)maxFrames;
     (void)demoPrimitives;

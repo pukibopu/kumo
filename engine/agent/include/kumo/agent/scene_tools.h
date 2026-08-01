@@ -31,6 +31,7 @@ struct GroupMaterialSpec {
     float metallic = 1.0f;
     float roughness = 1.0f;
     float emissive[3]{0.0f, 0.0f, 0.0f};
+    float uvTiling[2]{1.0f, 1.0f};
 };
 
 // One validated primitive member of a scene_define_group assembly; `transform`

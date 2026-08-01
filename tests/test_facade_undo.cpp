@@ -196,17 +196,21 @@ TEST_CASE("SceneState::environment equality gates whether applySceneState would 
     SceneState b;
     CHECK(a.environment == b.environment); // both nullopt: an unrelated edit's snapshot
 
-    asset::ProceduralSkyDesc sky;
+    const EnvironmentSource sky{.file = "", .sky = asset::ProceduralSkyDesc{}};
     a.environment = sky;
     CHECK(a.environment != b.environment); // one has a procedural sky, the other the loaded HDR
 
     b.environment = sky;
-    CHECK(a.environment == b.environment); // identical desc: no re-bake needed
+    CHECK(a.environment == b.environment); // identical source: no re-bake needed
 
-    asset::ProceduralSkyDesc changed = sky;
-    changed.sunIntensity = sky.sunIntensity + 1.0f;
+    EnvironmentSource changed = sky;
+    changed.sky.sunIntensity = sky.sky.sunIntensity + 1.0f;
     b.environment = changed;
     CHECK(a.environment != b.environment); // same preset shape, different tuning: re-bake needed
+
+    const EnvironmentSource file{.file = "sunset.hdr"};
+    b.environment = file;
+    CHECK(a.environment != b.environment); // a procedural sky vs. a named HDR file
 }
 
 TEST_CASE("UndoStack: redo mirrors undo, moving state forward and back to undo") {

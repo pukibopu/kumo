@@ -4,9 +4,12 @@
 #include <kumo/scene/transform.h>
 
 #include <cstdint>
+#include <expected>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -49,6 +52,17 @@ struct GroupDef {
     std::vector<GroupEntitySpec> members;
 };
 
+// Mirrors renderer::ForwardRenderer::MaterialTextureIndices in plain fields,
+// same reasoning as GroupMaterialSpec: cached per asset texture-set name
+// (SceneToolContext::textureSets) so N entities sharing one set upload it once.
+struct TextureSetIndices {
+    std::int32_t baseColor = -1;
+    std::int32_t metallicRoughness = -1;
+    std::int32_t normal = -1;
+    std::int32_t occlusion = -1;
+    std::int32_t emissive = -1;
+};
+
 // `renderer` may be null (CPU-only tests): tools that need GPU uploads or
 // material access then report a structured error instead of touching it.
 struct SceneToolContext {
@@ -68,6 +82,25 @@ struct SceneToolContext {
     // scene_validate's frustum check needs an aspect ratio; null means it
     // assumes 16:9 and says so in its findings.
     std::function<std::pair<std::uint32_t, std::uint32_t>()> viewportSize;
+
+    // Asset library root (M6.98 PR-2): models/, textures/ and env/ live under
+    // it, the same layout tools/fetch_assets.sh populates. Empty means no
+    // asset library is configured; asset_list and material_set_texture then
+    // report the feature unsupported instead of touching the filesystem.
+    std::filesystem::path assetDir;
+    // Cached per texture-set name, shared like `groups`, so many entities
+    // referencing one set (e.g. twenty "sand" instances) upload it once.
+    // registerSceneTools default-constructs it when left null.
+    std::shared_ptr<std::unordered_map<std::string, TextureSetIndices>> textureSets;
+    // scene_add_model's effector, wired to EngineRuntime::instantiateModel;
+    // returns the new entities' formatted "index:generation" ids. Null means
+    // the tool reports the feature unsupported, mirroring applyEnvironment.
+    std::function<std::expected<std::vector<std::string>, std::string>(const scene::Transform&,
+                                                                       std::string_view)>
+        instantiateModel;
+    // environment_set's HDR-file effector; null means a `file` argument
+    // reports the feature unsupported instead of touching anything.
+    std::function<bool(const std::string&)> applyEnvironmentFile;
 };
 
 // Registers only scene_list (ADR 0028): the read-only listing tool other agents
@@ -76,12 +109,14 @@ struct SceneToolContext {
 // must outlive the registry.
 void registerSceneListTool(ToolRegistry& registry, SceneToolContext context);
 
-// Registers the thirteen scene tools (ADR 0028, M6.9): scene_list plus the
-// mutating/inspection tools (scene_add_entity, scene_add_entities,
-// scene_remove_entity, scene_set_transform, camera_set, light_set,
-// light_remove, material_set_param, scene_define_group, scene_instance_group,
-// environment_set and scene_validate). The context is copied into the
-// handlers; the scene and renderer it points to must outlive the registry.
+// Registers the sixteen scene tools (ADR 0028, M6.9; asset tools added M6.98
+// PR-2): scene_list plus the mutating/inspection tools (scene_add_entity,
+// scene_add_entities, scene_remove_entity, scene_set_transform, camera_set,
+// light_set, light_remove, material_set_param, scene_define_group,
+// scene_instance_group, environment_set and scene_validate) plus the asset
+// tools (asset_list, material_set_texture, scene_add_model). The context is
+// copied into the handlers; the scene and renderer it points to must outlive
+// the registry.
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context);
 
 } // namespace kumo::agent

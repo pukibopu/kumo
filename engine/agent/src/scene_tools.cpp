@@ -3,6 +3,7 @@
 #include <kumo/agent/entity_id.h>
 #include <kumo/asset/primitives.h>
 #include <kumo/asset/procedural_sky.h>
+#include <kumo/asset/texture_set.h>
 #include <kumo/core/assert.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
@@ -17,11 +18,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <optional>
 #include <random>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -967,6 +970,348 @@ std::string materialSetParam(const SceneToolContext& context, const json& args) 
     return okJson();
 }
 
+// Asset library tools (M6.98 PR-2): read real textures/models/HDRIs from
+// SceneToolContext::assetDir, the layout tools/fetch_assets.sh populates
+// (<assetDir>/{textures/<name>/{albedo,normal,roughness,metalness,ao}.{png,jpg},
+// models/<name>.glb, env/<name>.hdr}).
+
+// The five stems loadTextureSet probes, in the order assets/README.md
+// documents them; only the ones actually present are reported.
+constexpr std::array<std::string_view, 5> kTextureMapStems{"albedo", "normal", "roughness",
+                                                           "metalness", "ao"};
+
+bool mapFileExists(const std::filesystem::path& dir, std::string_view stem) {
+    std::error_code ec;
+    for (std::string_view ext : {".png", ".jpg"}) {
+        if (std::filesystem::exists(dir / (std::string(stem) + std::string(ext)), ec)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> presentMaps(const std::filesystem::path& dir) {
+    std::vector<std::string> maps;
+    for (std::string_view stem : kTextureMapStems) {
+        if (mapFileExists(dir, stem)) {
+            maps.emplace_back(stem);
+        }
+    }
+    return maps;
+}
+
+struct TextureSetEntry {
+    std::string name;
+    std::vector<std::string> maps;
+};
+
+// Shared by asset_list (full listing) and material_set_texture's "unknown
+// set" error (available names). A subdirectory with no recognized map files
+// is not a texture set and is skipped.
+std::vector<TextureSetEntry> collectTextureSets(const std::filesystem::path& assetDir) {
+    std::vector<TextureSetEntry> out;
+    std::error_code ec;
+    const std::filesystem::path dir = assetDir / "textures";
+    if (!std::filesystem::is_directory(dir, ec)) {
+        return out;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        std::vector<std::string> maps = presentMaps(entry.path());
+        if (!maps.empty()) {
+            out.push_back({entry.path().filename().string(), std::move(maps)});
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const TextureSetEntry& a, const TextureSetEntry& b) { return a.name < b.name; });
+    return out;
+}
+
+std::vector<std::string> collectStems(const std::filesystem::path& dir, const char* extension) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) {
+        return out;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (entry.is_regular_file() && entry.path().extension() == extension) {
+            out.push_back(entry.path().stem().string());
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::string textureSetNameList(const std::filesystem::path& assetDir) {
+    const std::vector<TextureSetEntry> sets = collectTextureSets(assetDir);
+    if (sets.empty()) {
+        return "(none found; run tools/fetch_assets.sh)";
+    }
+    std::string out;
+    for (std::size_t i = 0; i < sets.size(); ++i) {
+        if (i > 0) {
+            out += ", ";
+        }
+        out += sets[i].name;
+    }
+    return out;
+}
+
+// Read-only: lists what's under assetDir so the model can pick real assets
+// over primitives. context.assetDir empty means no asset library is
+// configured at all (mirrors environment_set's unsupported style); a
+// configured but empty/missing library reports empty arrays plus a note
+// instead, since that is a normal pre-fetch_assets.sh state, not a
+// misconfiguration.
+std::string assetList(const SceneToolContext& context) {
+    if (context.assetDir.empty()) {
+        return errorJson("asset directory not configured");
+    }
+    const std::vector<TextureSetEntry> textureSets = collectTextureSets(context.assetDir);
+    json textures = json::array();
+    for (const TextureSetEntry& entry : textureSets) {
+        textures.push_back({{"name", entry.name}, {"maps", entry.maps}});
+    }
+    const std::vector<std::string> models = collectStems(context.assetDir / "models", ".glb");
+    const std::vector<std::string> env = collectStems(context.assetDir / "env", ".hdr");
+
+    json out{{"status", "ok"}, {"textures", std::move(textures)}, {"models", models}};
+    json envFiles = json::array();
+    for (const std::string& name : env) {
+        envFiles.push_back(name + ".hdr");
+    }
+    out["env"] = std::move(envFiles);
+    if (textureSets.empty() && models.empty() && env.empty()) {
+        out["note"] =
+            "no assets found under " + context.assetDir.string() + "; run tools/fetch_assets.sh";
+    }
+    return dumpSafe(out);
+}
+
+// Applies (or, with no `tiling` argument, keeps) a texture set on an entity's
+// material. Errors: no such entity, entity has no material, bad tiling, asset
+// library not configured, unknown texture set (lists available names), or
+// renderer unavailable. Input is validated (entity, material, texture name,
+// tiling, and that the named set actually exists on disk) before the
+// renderer is required, so those failures are visible even with no GPU
+// available; only the actual upload/bind needs a renderer. Uploads are
+// cached per set name in context.textureSets so twenty entities sharing
+// "sand" upload it once.
+std::string materialSetTexture(const SceneToolContext& context, const json& args) {
+    auto lookup = findEntity(*context.scene, args);
+    if (!lookup.has_value()) {
+        return lookup.error();
+    }
+    if (lookup->entity->materialIndex < 0) {
+        return errorJson("entity has no material; call material_set_param first, or give it a "
+                         "material when creating it");
+    }
+
+    const auto textureIt = args.find("texture");
+    if (textureIt == args.end() || !textureIt->is_string() ||
+        textureIt->get<std::string>().empty()) {
+        return errorJson("texture (string) is required");
+    }
+    const std::string textureName = textureIt->get<std::string>();
+
+    // Staged like every other tool here: tiling is validated before any GPU
+    // mutation, so a bad tiling value never leaves the texture bound but the
+    // tiling stale, or vice versa.
+    bool hasTiling = false;
+    float tiling[2] = {1.0f, 1.0f};
+    if (args.contains("tiling")) {
+        hasTiling = true;
+        const json& t = args["tiling"];
+        if (t.is_number()) {
+            tiling[0] = tiling[1] = t.get<float>();
+        } else if (t.is_array() && t.size() == 2 && t[0].is_number() && t[1].is_number()) {
+            tiling[0] = t[0].get<float>();
+            tiling[1] = t[1].get<float>();
+        } else {
+            return errorJson("tiling must be a number or an array of 2 numbers");
+        }
+        for (float v : tiling) {
+            if (!std::isfinite(v) || v <= 0.0f || v > 1000.0f) {
+                return errorJson("tiling must be positive and at most 1000");
+            }
+        }
+    }
+
+    if (context.assetDir.empty()) {
+        return errorJson("asset directory not configured");
+    }
+
+    TextureSetIndices indices;
+    const auto cacheIt = context.textureSets->find(textureName);
+    if (cacheIt != context.textureSets->end()) {
+        indices = cacheIt->second;
+    } else {
+        const std::filesystem::path dir = context.assetDir / "textures" / textureName;
+        std::expected<asset::TextureSetData, std::string> textureSet = asset::loadTextureSet(dir);
+        if (!textureSet.has_value()) {
+            return errorJson(std::format("unknown texture set '{}': must be one of: {}",
+                                         textureName, textureSetNameList(context.assetDir)));
+        }
+        if (context.renderer == nullptr) {
+            return errorJson("renderer unavailable");
+        }
+        ForwardRenderer& uploadRenderer = *context.renderer;
+        if (textureSet->baseColor.has_value()) {
+            indices.baseColor = uploadRenderer.addTexture(*textureSet->baseColor);
+            if (indices.baseColor < 0) {
+                return errorJson(
+                    std::format("gpu upload failed for texture set '{}'", textureName));
+            }
+        }
+        if (textureSet->metallicRoughness.has_value()) {
+            indices.metallicRoughness = uploadRenderer.addTexture(*textureSet->metallicRoughness);
+            if (indices.metallicRoughness < 0) {
+                return errorJson(
+                    std::format("gpu upload failed for texture set '{}'", textureName));
+            }
+        }
+        if (textureSet->normal.has_value()) {
+            indices.normal = uploadRenderer.addTexture(*textureSet->normal);
+            if (indices.normal < 0) {
+                return errorJson(
+                    std::format("gpu upload failed for texture set '{}'", textureName));
+            }
+        }
+        if (textureSet->occlusion.has_value()) {
+            indices.occlusion = uploadRenderer.addTexture(*textureSet->occlusion);
+            if (indices.occlusion < 0) {
+                return errorJson(
+                    std::format("gpu upload failed for texture set '{}'", textureName));
+            }
+        }
+        (*context.textureSets)[textureName] = indices;
+    }
+
+    if (context.renderer == nullptr) {
+        return errorJson("renderer unavailable");
+    }
+    ForwardRenderer& renderer = *context.renderer;
+    const auto materialIndex = static_cast<std::uint32_t>(lookup->entity->materialIndex);
+    const ForwardRenderer::MaterialTextureIndices toBind{
+        .baseColor = indices.baseColor,
+        .metallicRoughness = indices.metallicRoughness,
+        .normal = indices.normal,
+        .occlusion = indices.occlusion,
+        .emissive = indices.emissive,
+    };
+    if (!renderer.setMaterialTextures(materialIndex, toBind)) {
+        return errorJson("failed to bind textures to material");
+    }
+    if (hasTiling) {
+        ForwardRenderer::MaterialParams params;
+        if (const ForwardRenderer::MaterialParams* current =
+                renderer.materialParams(materialIndex)) {
+            params = *current;
+        }
+        params.uvTiling[0] = tiling[0];
+        params.uvTiling[1] = tiling[1];
+        renderer.setMaterialParams(materialIndex, params);
+    }
+
+    std::size_t sharers = 0;
+    context.scene->entities.forEach([&](scene::EntityId, const scene::Entity& other) {
+        if (other.materialIndex == lookup->entity->materialIndex) {
+            ++sharers;
+        }
+    });
+    if (sharers > 1) {
+        // Same in-place-edit semantics as material_set_param: no per-entity
+        // material cloning yet, so a shared material's texture rebind is
+        // visible on every entity that shares it.
+        return json{{"status", "ok"}, {"entities_sharing_material", sharers}}.dump();
+    }
+    return okJson();
+}
+
+// Places a real glTF model from the asset library (mirrors scene_add_entity's
+// creation contract, but the mesh/material come from instantiateModel instead
+// of a procedural primitive). Non-destructive.
+std::string sceneAddModel(const SceneToolContext& context, const json& args) {
+    if (!context.instantiateModel) {
+        return errorJson("model instancing is not available");
+    }
+    const auto modelIt = args.find("model");
+    if (modelIt == args.end() || !modelIt->is_string() || modelIt->get<std::string>().empty()) {
+        return errorJson("model (string) is required");
+    }
+    const std::string model = modelIt->get<std::string>();
+
+    if (!args.contains("position")) {
+        return errorJson("position is required");
+    }
+    scene::Transform root;
+    std::string error;
+    if (!readFloat3(args, "position", root.position, error)) {
+        return errorJson(error);
+    }
+    if (args.contains("rotation_euler_deg")) {
+        math::float3 euler{0.0f, 0.0f, 0.0f};
+        if (!readFloat3(args, "rotation_euler_deg", euler, error)) {
+            return errorJson(error);
+        }
+        root.rotation = math::quatFromEulerDegrees(euler);
+    }
+    if (args.contains("scale")) {
+        const json& s = args["scale"];
+        // Mirrors parseInstanceTransform's rule: a non-uniform root scale
+        // composed onto a rotated child node would shear it, which TRS
+        // cannot represent.
+        if (!s.is_number()) {
+            return errorJson("scale must be a single uniform number for instances");
+        }
+        const float value = s.get<float>();
+        if (!std::isfinite(value) || value <= 1e-6f) {
+            return errorJson("scale must be a positive finite number");
+        }
+        root.scale = {value, value, value};
+    }
+
+    std::expected<std::vector<std::string>, std::string> ids =
+        context.instantiateModel(root, model);
+    if (!ids.has_value()) {
+        return errorJson(ids.error());
+    }
+
+    if (args.contains("name")) {
+        std::string prefix;
+        if (!readString(args, "name", prefix, error)) {
+            return errorJson(error);
+        }
+        // Renames each instantiated entity from "<model>_<node>" to
+        // "<prefix>_<node>" so the caller's chosen name shows up in scene_list
+        // instead of the raw glTF node names.
+        if (!prefix.empty()) {
+            const std::string modelPrefix = model + "_";
+            for (const std::string& idText : *ids) {
+                const std::optional<scene::EntityId> id = parseEntityId(idText);
+                if (!id.has_value()) {
+                    continue;
+                }
+                scene::Entity* entity = context.scene->entities.get(*id);
+                if (entity == nullptr) {
+                    continue;
+                }
+                entity->name = entity->name.starts_with(modelPrefix)
+                                   ? prefix + "_" + entity->name.substr(modelPrefix.size())
+                                   : prefix;
+            }
+        }
+    }
+
+    json idsJson = json::array();
+    for (const std::string& idText : *ids) {
+        idsJson.push_back(idText);
+    }
+    return json{{"status", "ok"}, {"entities", std::move(idsJson)}, {"model", model}}.dump();
+}
+
 // Starting point for environment_set's preset resolution; explicit fields in
 // the call then override individual members. Values below are tuning
 // constants, not derived from anything physical.
@@ -1029,15 +1374,42 @@ std::string environmentPresetList() {
     return out;
 }
 
+// The procedural sky fields, checked against `file` for mutual exclusion.
+constexpr std::array<const char*, 8> kProceduralSkyFields{
+    "preset",       "sun_direction", "sun_intensity", "sun_color",
+    "zenith_color", "horizon_color", "ground_color",  "exposure"};
+
 // Bakes and swaps in a new IBL environment. No preset means clear_day; explicit
 // fields override the preset's values one at a time (same partial-update
-// semantics as every other tool here).
+// semantics as every other tool here). `file` (an HDR from asset_list's env
+// list) replaces the whole procedural path instead of overriding it: the two
+// are mutually exclusive, since a baked-from-disk HDR has no preset fields to
+// override.
 std::string environmentSet(const SceneToolContext& context, const json& args) {
+    std::string error;
+    std::string file;
+    if (!readString(args, "file", file, error)) {
+        return errorJson(error);
+    }
+    if (!file.empty()) {
+        for (const char* field : kProceduralSkyFields) {
+            if (args.contains(field)) {
+                return errorJson("file and procedural sky parameters are mutually exclusive");
+            }
+        }
+        if (!context.applyEnvironmentFile) {
+            return errorJson("environment control is not available");
+        }
+        if (!context.applyEnvironmentFile(file)) {
+            return errorJson(std::format("failed to load environment file '{}'", file));
+        }
+        return json{{"status", "ok"}, {"file", file}}.dump();
+    }
+
     if (!context.applyEnvironment) {
         return errorJson("environment control is not available");
     }
     std::string presetName;
-    std::string error;
     if (!readString(args, "preset", presetName, error)) {
         return errorJson(error);
     }
@@ -1341,6 +1713,10 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
     if (context.groups == nullptr) {
         context.groups = std::make_shared<std::unordered_map<std::string, GroupDef>>();
     }
+    if (context.textureSets == nullptr) {
+        context.textureSets =
+            std::make_shared<std::unordered_map<std::string, TextureSetIndices>>();
+    }
 
     registerSceneListTool(registry, context);
 
@@ -1354,6 +1730,14 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
                          return handler(context, parseArgs(argsJson));
                      });
     };
+
+    registry.add({.name = "asset_list",
+                  .description = "List the asset library: real texture sets, glTF models and HDR "
+                                 "environments available under the configured asset directory. "
+                                 "Call once per conversation before building.",
+                  .parametersSchema = R"({"type":"object","properties":{}})",
+                  .destructive = false},
+                 [context](std::string_view) { return assetList(context); });
 
     add("scene_add_entity",
         "Add a procedural primitive entity to the scene; returns its entity_id. For multiple "
@@ -1371,6 +1755,20 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
             kEntityPropertiesSchema + R"(},"required":["primitive"]}}},"required":["entities"]})",
         false,
         [](const SceneToolContext& ctx, const json& args) { return sceneAddEntities(ctx, args); });
+
+    add("scene_add_model",
+        "Place a real glTF model from the asset library (name from asset_list) at a position; "
+        "returns its entity_ids, one per mesh node. Prefer this over primitives for organic or "
+        "detailed things (trees, props, characters) when a fitting model exists.",
+        R"({"type":"object","properties":{
+"model":{"type":"string","description":"Model name from asset_list"},
+"name":{"type":"string","description":"Optional entity name prefix; default keeps the model's own node names"},
+"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"World position [x,y,z]"},
+"rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Euler XYZ rotation in degrees"},
+"scale":{"type":"number","description":"Uniform scale factor; default 1"}},
+"required":["model","position"]})",
+        false,
+        [](const SceneToolContext& ctx, const json& args) { return sceneAddModel(ctx, args); });
 
     add("scene_remove_entity", "Remove an entity from the scene permanently.",
         R"({"type":"object","properties":{
@@ -1432,6 +1830,19 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         false,
         [](const SceneToolContext& ctx, const json& args) { return materialSetParam(ctx, args); });
 
+    add("material_set_texture",
+        "Apply a real texture set (from asset_list) to an entity's material: base color, normal, "
+        "roughness/metalness and occlusion maps, replacing flat material factors. Prefer this over "
+        "material_set_param's flat colors for ground, walls and other large or detailed surfaces.",
+        R"({"type":"object","properties":{
+"entity_id":{"type":"string"},
+"texture":{"type":"string","description":"Texture-set name from asset_list, e.g. sand or planks"},
+"tiling":{"description":"UV tiling, a single uniform number or a [u,v] pair; keeps the current value when omitted; positive, at most 1000"}},
+"required":["entity_id","texture"]})",
+        false, [](const SceneToolContext& ctx, const json& args) {
+            return materialSetTexture(ctx, args);
+        });
+
     add("scene_define_group",
         "Define a reusable named assembly of primitives (local transforms relative to the group "
         "origin). Instance it with scene_instance_group.",
@@ -1468,11 +1879,13 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         });
 
     add("environment_set",
-        "Set the sky environment: start from a preset (clear_day, sunset, overcast, night, "
-        "studio) and optionally override individual fields such as sun_direction or exposure. "
-        "Rebakes the IBL lighting from a deterministic analytic sky; align the scene's key light "
-        "with the returned sun_direction for consistent shading.",
+        "Set the sky environment: either a real HDR file (name from asset_list's env list) or a "
+        "procedural sky, starting from a preset (clear_day, sunset, overcast, night, studio) and "
+        "optionally overriding individual fields such as sun_direction or exposure. file and the "
+        "procedural fields are mutually exclusive. Rebakes the IBL lighting; for a procedural sky, "
+        "align the scene's key light with the returned sun_direction for consistent shading.",
         R"({"type":"object","properties":{
+"file":{"type":"string","description":"HDR file name from asset_list's env list; mutually exclusive with the fields below"},
 "preset":{"type":"string","enum":["clear_day","sunset","overcast","night","studio"],"description":"Default clear_day"},
 "sun_direction":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Direction the sunlight travels, must be non-zero"},
 "sun_intensity":{"type":"number","minimum":0,"maximum":10000},

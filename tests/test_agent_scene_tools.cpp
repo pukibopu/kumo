@@ -2,6 +2,7 @@
 
 #include <kumo/agent/scene_tools.h>
 #include <kumo/agent/tool_registry.h>
+#include <kumo/asset/procedural_sky.h>
 #include <kumo/math/math.h>
 #include <kumo/scene/scene.h>
 
@@ -9,7 +10,11 @@
 
 #include <cstdint>
 #include <format>
+#include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace kumo;
@@ -31,14 +36,31 @@ struct Fixture {
     }
 };
 
+json invokeOn(ToolRegistry& registry, const char* name, const std::string& args = "") {
+    const json result = json::parse(registry.invoke(name, args), nullptr, false);
+    REQUIRE(result.is_object());
+    return result;
+}
+
+// True when some finding in `findings` has the given check name.
+bool hasFinding(const json& findings, const char* check) {
+    for (const auto& finding : findings) {
+        if (finding["check"] == check) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
-TEST_CASE("scene tools register all ten with object schemas") {
+TEST_CASE("scene tools register all thirteen with object schemas") {
     Fixture f;
-    const char* expected[] = {"scene_list",          "scene_add_entity",    "scene_add_entities",
-                              "scene_remove_entity", "scene_set_transform", "camera_set",
-                              "light_set",           "material_set_param",  "scene_define_group",
-                              "scene_instance_group"};
+    const char* expected[] = {"scene_list",          "scene_add_entity",     "scene_add_entities",
+                              "scene_remove_entity", "scene_set_transform",  "camera_set",
+                              "light_set",           "light_remove",         "material_set_param",
+                              "scene_define_group",  "scene_instance_group", "environment_set",
+                              "scene_validate"};
     for (const char* name : expected) {
         const ToolDef* def = f.registry.find(name);
         REQUIRE_MESSAGE(def != nullptr, name);
@@ -49,10 +71,13 @@ TEST_CASE("scene tools register all ten with object schemas") {
         CHECK(schema["type"] == "object");
     }
     CHECK(f.registry.find("scene_remove_entity")->destructive);
+    CHECK(f.registry.find("light_remove")->destructive);
     CHECK(!f.registry.find("scene_add_entity")->destructive);
     CHECK(!f.registry.find("scene_add_entities")->destructive);
     CHECK(!f.registry.find("scene_define_group")->destructive);
     CHECK(!f.registry.find("scene_instance_group")->destructive);
+    CHECK(!f.registry.find("environment_set")->destructive);
+    CHECK(!f.registry.find("scene_validate")->destructive);
 }
 
 TEST_CASE("registerSceneListTool registers exactly scene_list") {
@@ -631,4 +656,195 @@ TEST_CASE("scene_list reports defined group names, sorted, only once any exist")
     REQUIRE(after["groups"].size() == 2);
     CHECK(after["groups"][0] == "alpha");
     CHECK(after["groups"][1] == "zeta");
+}
+
+TEST_CASE("light_remove removes a light and returns the shifted remaining list") {
+    Fixture f;
+    f.invoke("light_set", R"({"intensity":1})");
+    f.invoke("light_set", R"({"intensity":2})");
+    f.invoke("light_set", R"({"intensity":3})");
+    const json result = f.invoke("light_remove", R"({"index":1})");
+    REQUIRE(result["status"] == "ok");
+    REQUIRE(result["lights"].size() == 2);
+    CHECK(result["lights"][0]["intensity"] == doctest::Approx(1.0));
+    CHECK(result["lights"][0]["index"] == 0);
+    CHECK(result["lights"][1]["intensity"] == doctest::Approx(3.0));
+    CHECK(result["lights"][1]["index"] == 1);
+    REQUIRE(f.scene.lights().size() == 2);
+    CHECK(f.scene.lights()[1].intensity == doctest::Approx(3.0f));
+}
+
+TEST_CASE("light_remove rejects an out-of-range index, naming the valid range") {
+    Fixture f;
+    f.invoke("light_set", R"({"intensity":1})");
+    const json result = f.invoke("light_remove", R"({"index":5})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("0-0") != std::string::npos);
+    REQUIRE(f.scene.lights().size() == 1);
+}
+
+TEST_CASE("light_remove on an empty light list reports an error") {
+    Fixture f;
+    CHECK(f.invoke("light_remove", R"({"index":0})")["status"] == "error");
+}
+
+TEST_CASE("readMaterial clamps metallic and roughness to the 0-1 range") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    auto groups = std::make_shared<std::unordered_map<std::string, GroupDef>>();
+    registerSceneTools(registry, {.scene = &scene, .renderer = nullptr, .groups = groups});
+
+    const json result = invokeOn(
+        registry, "scene_define_group",
+        R"({"name":"g","entities":[{"primitive":"cube","material":{"metallic":1.5,"roughness":-0.5}}]})");
+    REQUIRE(result["status"] == "ok");
+    REQUIRE(groups->count("g") == 1);
+    const GroupEntitySpec& member = groups->at("g").members[0];
+    CHECK(member.material.metallic == doctest::Approx(1.0f));
+    CHECK(member.material.roughness == doctest::Approx(0.0f));
+}
+
+TEST_CASE("a group member without a material gets the default non-metal grey") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    auto groups = std::make_shared<std::unordered_map<std::string, GroupDef>>();
+    registerSceneTools(registry, {.scene = &scene, .renderer = nullptr, .groups = groups});
+
+    const json result = invokeOn(registry, "scene_define_group",
+                                 R"({"name":"g","entities":[{"primitive":"cube"}]})");
+    REQUIRE(result["status"] == "ok");
+    const GroupEntitySpec& member = groups->at("g").members[0];
+    CHECK(member.material.metallic == doctest::Approx(0.0f));
+    CHECK(member.material.roughness == doctest::Approx(0.6f));
+    CHECK(member.material.baseColor[0] == doctest::Approx(0.8f));
+    CHECK(member.material.baseColor[3] == doctest::Approx(1.0f));
+}
+
+TEST_CASE("environment_set reports unsupported without an applyEnvironment callback") {
+    Fixture f; // default context leaves applyEnvironment null
+    const json result = f.invoke("environment_set", R"({"preset":"sunset"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("not available") != std::string::npos);
+}
+
+TEST_CASE("environment_set rejects an unknown preset") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironment = [](const asset::ProceduralSkyDesc&) { return true; };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "environment_set", R"({"preset":"foggy"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("foggy") != std::string::npos);
+}
+
+TEST_CASE("environment_set merges explicit overrides onto the chosen preset") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    std::optional<asset::ProceduralSkyDesc> captured;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironment = [&captured](const asset::ProceduralSkyDesc& desc) {
+        captured = desc;
+        return true;
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result =
+        invokeOn(registry, "environment_set", R"({"preset":"sunset","sun_intensity":99})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["preset"] == "sunset");
+    REQUIRE(captured.has_value());
+    // The override wins...
+    CHECK(captured->sunIntensity == doctest::Approx(99.0f));
+    // ...while an untouched field keeps the sunset preset's own value, not
+    // clear_day's default (60) or some other preset's.
+    CHECK(captured->zenithColor.x == doctest::Approx(0.05f));
+    CHECK(captured->sunDirection.x == doctest::Approx(-0.8f));
+}
+
+TEST_CASE("environment_set rejects a zero sun_direction override") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.applyEnvironment = [](const asset::ProceduralSkyDesc&) { return true; };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "environment_set", R"({"sun_direction":[0,0,0]})");
+    CHECK(result["status"] == "error");
+}
+
+TEST_CASE("scene_validate flags a floating entity but not one resting on the ground") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,5,0]})");
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[10,0.5,0]})");
+
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    bool floatingFlaggedForA = false;
+    bool floatingFlaggedForB = false;
+    for (const auto& finding : result["findings"]) {
+        if (finding["check"] != "floating") {
+            continue;
+        }
+        if (finding["entity_id"] == "0:0") {
+            floatingFlaggedForA = true;
+        }
+        if (finding["entity_id"] == "1:0") {
+            floatingFlaggedForB = true;
+        }
+    }
+    CHECK(floatingFlaggedForA);
+    CHECK(!floatingFlaggedForB);
+}
+
+TEST_CASE("scene_validate flags an overlapping pair of entities") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0.2,0.5,0]})");
+
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    CHECK(hasFinding(result["findings"], "overlap"));
+}
+
+TEST_CASE("scene_validate flags the camera being inside an entity's bounding box") {
+    Fixture f;
+    // Default camera sits at (0, 0, 3); a size-4 cube there fully contains it.
+    f.invoke("scene_add_entity", R"({"primitive":"cube","size":4,"position":[0,0,3]})");
+
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    CHECK(hasFinding(result["findings"], "camera_inside"));
+}
+
+TEST_CASE("scene_validate flags a zero-light scene") {
+    Fixture f;
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    CHECK(hasFinding(result["findings"], "lighting"));
+}
+
+TEST_CASE("scene_validate flags an entity behind the camera as out of frustum, using a fixed "
+          "viewport aspect") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.viewportSize = [] { return std::make_pair(std::uint32_t(1920), std::uint32_t(1080)); };
+    registerSceneTools(registry, ctx);
+
+    invokeOn(registry, "scene_add_entity", R"({"primitive":"cube","position":[0,0,10]})");
+    const json result = invokeOn(registry, "scene_validate");
+    REQUIRE(result["status"] == "ok");
+
+    bool flagged = false;
+    for (const auto& finding : result["findings"]) {
+        if (finding["check"] == "out_of_frustum") {
+            flagged = true;
+            // A real viewport was supplied, so the message must not claim an
+            // assumed aspect ratio.
+            CHECK(finding["message"].get<std::string>().find("assumed") == std::string::npos);
+        }
+    }
+    CHECK(flagged);
 }

@@ -3,9 +3,12 @@
 #include <kumo/agent/tool_registry.h>
 #include <kumo/scene/transform.h>
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kumo::renderer {
@@ -13,6 +16,9 @@ class ForwardRenderer;
 }
 namespace kumo::scene {
 class Scene;
+}
+namespace kumo::asset {
+struct ProceduralSkyDesc;
 }
 
 namespace kumo::agent {
@@ -54,6 +60,13 @@ struct SceneToolContext {
     // and MCP registries requires the composition root to seed this before
     // registering any of them.
     std::shared_ptr<std::unordered_map<std::string, GroupDef>> groups;
+    // environment_set's effector; null means the tool reports the feature
+    // unsupported instead of touching anything (mirrors `renderer` being
+    // null for CPU-only tests).
+    std::function<bool(const asset::ProceduralSkyDesc&)> applyEnvironment;
+    // scene_validate's frustum check needs an aspect ratio; null means it
+    // assumes 16:9 and says so in its findings.
+    std::function<std::pair<std::uint32_t, std::uint32_t>()> viewportSize;
 };
 
 // Registers only scene_list (ADR 0028): the read-only listing tool other agents
@@ -62,10 +75,11 @@ struct SceneToolContext {
 // must outlive the registry.
 void registerSceneListTool(ToolRegistry& registry, SceneToolContext context);
 
-// Registers the ten scene tools (ADR 0028, M6.9): scene_list plus the nine
-// mutating tools (scene_add_entity, scene_add_entities, scene_remove_entity,
-// scene_set_transform, camera_set, light_set, material_set_param,
-// scene_define_group and scene_instance_group). The context is copied into the
+// Registers the thirteen scene tools (ADR 0028, M6.9): scene_list plus the
+// mutating/inspection tools (scene_add_entity, scene_add_entities,
+// scene_remove_entity, scene_set_transform, camera_set, light_set,
+// light_remove, material_set_param, scene_define_group, scene_instance_group,
+// environment_set and scene_validate). The context is copied into the
 // handlers; the scene and renderer it points to must outlive the registry.
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context);
 

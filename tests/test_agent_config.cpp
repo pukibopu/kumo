@@ -231,6 +231,20 @@ TEST_CASE("agents.summary_threshold_tokens overrides the default") {
     CHECK(config->summaryThresholdTokens == 2500);
 }
 
+TEST_CASE("agents.max_tool_rounds defaults to 24 and can be overridden") {
+    ConfigSandbox sandbox;
+    const auto defaulted = sandbox.load();
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->maxToolRounds == 24);
+
+    sandbox.writeConfig(R"({
+        "agents": { "max_tool_rounds": 40 }
+    })");
+    const auto overridden = sandbox.load();
+    REQUIRE(overridden.has_value());
+    CHECK(overridden->maxToolRounds == 40);
+}
+
 TEST_CASE("KUMO_PROVIDER_TYPE switches the protocol and default base url") {
     ConfigSandbox sandbox;
     setenv("KUMO_PROVIDER_TYPE", "openai", 1);

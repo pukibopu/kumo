@@ -36,6 +36,9 @@ struct AgentConfig {
     bool confirmDestructive = false;
     // agents.summary_threshold_tokens; 0 disables history compression.
     std::size_t summaryThresholdTokens = 8000;
+    // agents.max_tool_rounds; global like summary_threshold_tokens (no
+    // per-agent override), applied to both the scene and shader sessions.
+    int maxToolRounds = 24;
 };
 
 // Loads kumo.config.json then applies overrides: real environment beats .env

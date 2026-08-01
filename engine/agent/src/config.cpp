@@ -240,6 +240,9 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
                            error2)) {
                 return std::unexpected("agents." + error2);
             }
+            if (!readField(agents, "max_tool_rounds", config.maxToolRounds, error2)) {
+                return std::unexpected("agents." + error2);
+            }
             if (agents.contains("scene") && agents["scene"].is_object()) {
                 const json& scene = agents["scene"];
                 if (!readField(scene, "type", sceneTypeText, error2) ||

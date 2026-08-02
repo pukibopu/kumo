@@ -917,12 +917,17 @@ TEST_CASE("asset_list reports unset assetDir as unsupported") {
     CHECK(result["message"].get<std::string>().find("not configured") != std::string::npos);
 }
 
-TEST_CASE("asset_list scans textures, models and env, sorted deterministically") {
+TEST_CASE("asset_list scans textures, models (including categorized ones) and env, sorted "
+          "deterministically") {
     TempDir dir("kumo_scene_tools_asset_list");
     touch(dir.path / "textures" / "sand" / "albedo.png");
     touch(dir.path / "textures" / "sand" / "normal.png");
     touch(dir.path / "textures" / "empty" / "readme.txt"); // no recognized maps, excluded
     touch(dir.path / "models" / "Tree.glb");
+    // A categorized model (models/<category>/<name>.glb): the pre-F1 fallback
+    // (a flat directory_iterator over "models" for *.glb) never saw these;
+    // asset::listModelIds does.
+    touch(dir.path / "models" / "nature" / "bridge_stone.glb");
     touch(dir.path / "env" / "day.hdr");
 
     scene::Scene scene;
@@ -938,15 +943,114 @@ TEST_CASE("asset_list scans textures, models and env, sorted deterministically")
     REQUIRE(result["textures"][0]["maps"].size() == 2);
     CHECK(result["textures"][0]["maps"][0] == "albedo");
     CHECK(result["textures"][0]["maps"][1] == "normal");
-    REQUIRE(result["models"].size() == 1);
-    CHECK(result["models"][0] == "Tree");
+    REQUIRE(result["models"].size() == 2);
+    // "Tree" < "nature/bridge_stone": uppercase sorts before lowercase in the
+    // ordinary byte-wise ordering asset::listModelIds/std::sort both use.
+    CHECK(result["models"][0]["name"] == "Tree");
+    CHECK(result["models"][1]["name"] == "nature/bridge_stone");
     REQUIRE(result["env"].size() == 1);
-    CHECK(result["env"][0] == "day.hdr");
+    CHECK(result["env"][0]["name"] == "day.hdr");
     CHECK(!result.contains("note"));
 }
 
 TEST_CASE("asset_list on a configured but empty library reports empty arrays with a note") {
     TempDir dir("kumo_scene_tools_asset_list_empty");
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.assetDir = dir.path;
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "asset_list");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["textures"].empty());
+    CHECK(result["models"].empty());
+    CHECK(result["env"].empty());
+    CHECK(result.contains("note"));
+}
+
+TEST_CASE("asset_list v2 merges index.json metadata onto the disk scan (F1): a stale index entry "
+          "for an asset no longer on disk is dropped, and a disk asset absent from the index "
+          "still appears with no extra metadata") {
+    TempDir dir("kumo_scene_tools_asset_list_index");
+    touch(dir.path / "textures" / "sand" / "albedo.png");
+    touch(dir.path / "textures" / "sand" / "normal.png");
+    touch(dir.path / "textures" / "moss" / "albedo.png"); // on disk, absent from the index
+    touch(dir.path / "models" / "nature" / "bridge_stone.glb");
+    touch(dir.path / "models" / "props" / "crate.glb"); // on disk, absent from the index
+    touch(dir.path / "env" / "day.hdr");
+
+    const char* kIndexJson = R"({"version":1,"generated":"t","entries":[
+{"id":"sand","kind":"texture","name":"Sand","style":"realistic","resolution":2048},
+{"id":"nature/bridge_stone","kind":"model","category":"nature","style":"stylized",
+ "dimensions":[1.2,0.4,2.5],"triangles":240,"instancing_ok":true},
+{"id":"day","kind":"env","style":"realistic"},
+{"id":"ghost_model","kind":"model","category":"nature"}
+]})";
+    {
+        std::ofstream out(dir.path / "index.json");
+        out << kIndexJson;
+    }
+
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.assetDir = dir.path;
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "asset_list");
+    REQUIRE(result["status"] == "ok");
+    CHECK(!result.contains("note"));
+
+    // textures: "moss" (index-absent) still appears; "sand" is decorated,
+    // and F3's identity rule holds -- "name" stays the disk id, the index's
+    // human-readable name surfaces separately as "display_name".
+    REQUIRE(result["textures"].size() == 2);
+    CHECK(result["textures"][0]["name"] == "moss");
+    CHECK(!result["textures"][0].contains("display_name"));
+    CHECK(!result["textures"][0].contains("style"));
+    CHECK(result["textures"][1]["name"] == "sand");
+    CHECK(result["textures"][1]["display_name"] == "Sand");
+    CHECK(result["textures"][1]["style"] == "realistic");
+    CHECK(result["textures"][1]["resolution"] == 2048);
+    REQUIRE(result["textures"][1]["maps"].size() == 2); // disk-scanned, not index-derived
+
+    // models: "ghost_model" (index-only, no matching disk asset) never
+    // appears -- disk is the source of truth for existence.
+    REQUIRE(result["models"].size() == 2);
+    CHECK(result["models"][0]["name"] == "nature/bridge_stone");
+    CHECK(result["models"][0]["category"] == "nature");
+    CHECK(result["models"][0]["style"] == "stylized");
+    CHECK(result["models"][0]["triangles"] == 240);
+    CHECK(result["models"][0]["instancing_ok"] == true);
+    REQUIRE(result["models"][0]["dimensions"].size() == 3);
+    CHECK(result["models"][0]["dimensions"][0] == doctest::Approx(1.2));
+    CHECK(result["models"][1]["name"] == "props/crate");
+    CHECK(!result["models"][1].contains("category"));
+
+    REQUIRE(result["env"].size() == 1);
+    CHECK(result["env"][0]["name"] == "day.hdr");
+    CHECK(result["env"][0]["style"] == "realistic");
+
+    // No caption/embedding leakage into asset_list's output (that's search's
+    // job later, per the milestone spec).
+    for (const auto& kind : {"textures", "models", "env"}) {
+        for (const auto& entry : result[kind]) {
+            CHECK(!entry.contains("caption"));
+            CHECK(!entry.contains("embedding_offset"));
+            CHECK(!entry.contains("thumbnail"));
+        }
+    }
+}
+
+TEST_CASE("asset_list reports an empty-with-note summary when both disk and index.json are "
+          "empty") {
+    TempDir dir("kumo_scene_tools_asset_list_index_empty");
+    {
+        std::ofstream out(dir.path / "index.json");
+        out << R"({"version":1,"generated":"t","entries":[]})";
+    }
+
     scene::Scene scene;
     ToolRegistry registry;
     SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
@@ -1117,6 +1221,31 @@ TEST_CASE("asset_fetch passes kind/query through and reports the callback's succ
     CHECK(capturedQuery == "asphalt");
 }
 
+TEST_CASE("asset_fetch reports model kind's files count instead of a maps array") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    std::string capturedKind;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.fetchAsset = [&](std::string_view kind,
+                         std::string_view) -> std::expected<FetchedAsset, std::string> {
+        capturedKind = kind;
+        return FetchedAsset{.name = "Barrel_01",
+                            .maps = {"scene.gltf", "Barrel_01.bin", "textures/diff.jpg"},
+                            .alreadyPresent = false,
+                            .alternatives = {}};
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "asset_fetch", R"({"kind":"model","query":"barrel"})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(capturedKind == "model");
+    CHECK(result["kind"] == "model");
+    CHECK(result["name"] == "Barrel_01");
+    CHECK(result["files"] == 3);
+    CHECK(!result.contains("maps"));
+    CHECK(result["already_present"] == false);
+}
+
 TEST_CASE("asset_fetch passes the callback's error through unchanged, and omits alternatives "
           "when empty") {
     scene::Scene scene;
@@ -1189,13 +1318,41 @@ TEST_CASE("scene_add_model rejects traversal/absolute/hidden model names without
     };
     registerSceneTools(registry, ctx);
 
-    for (const char* bad : {"../x", "a/b", "/tmp/x", ".hidden"}) {
+    // "a/b" is deliberately absent here: scene_add_model allows one category
+    // component (unlike environment_set's file names below), see the
+    // acceptance test right after this one. Backslash rejection is already
+    // covered directly on isPlainAssetPath in test_core_file.cpp -- round-
+    // tripping a literal backslash through this JSON-argument interface would
+    // require careful escaping (a bare "\\" is the JSON backspace escape, not
+    // a literal backslash), which is not what this test is about.
+    for (const char* bad : {"../x", "/tmp/x", ".hidden", "a/b/c", "a/../b", "props/../crate",
+                            "props/.crate", ".props/crate"}) {
         const json result = invokeOn(registry, "scene_add_model",
                                      std::format(R"({{"model":"{}","position":[0,0,0]}})", bad));
         CHECK(result["status"] == "error");
-        CHECK(result["message"] == "asset names must be plain names from asset_list, not paths");
+        CHECK(result["message"].get<std::string>().find("category") != std::string::npos);
     }
     CHECK(!called);
+}
+
+TEST_CASE("scene_add_model accepts a one-level category prefix and passes it through unchanged") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    std::optional<std::string> capturedModel;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.instantiateModel =
+        [&](const scene::Transform&,
+            std::string_view model) -> std::expected<std::vector<std::string>, std::string> {
+        capturedModel = std::string(model);
+        return std::vector<std::string>{"0:0"};
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "scene_add_model",
+                                 R"({"model":"nature/bridge_stone","position":[0,0,0]})");
+    REQUIRE(result["status"] == "ok");
+    REQUIRE(capturedModel.has_value());
+    CHECK(*capturedModel == "nature/bridge_stone");
 }
 
 TEST_CASE("scene_add_model returns entity_ids from the callback and renames on request") {

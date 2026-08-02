@@ -54,6 +54,27 @@ std::expected<std::unordered_map<std::string, std::string>, std::string>
 mapUrls(std::string_view filesJson, AssetKind kind, std::string_view resolution,
         std::string_view format);
 
+// One multi-file glTF download: the .gltf file itself plus every file its
+// "include" map lists (relative path, as referenced by the glTF's own
+// buffer/image uris, -> download url). Downloading exactly this set into a
+// directory that preserves the relative paths reproduces a working local
+// glTF (verified against Poly Haven's real /files/<model id> response: the
+// gltf's own buffer/image uris match the include map's keys byte for byte).
+struct ModelBundle {
+    std::string gltfUrl;
+    std::unordered_map<std::string, std::string> include;
+};
+
+// `filesJson` is the raw response body of GET /files/<id> for a t=models
+// asset. Pure, no I/O. Poly Haven nests a model's glTF bundle one level
+// deeper than mapUrls' shapes: files["gltf"][resolution]["gltf"] = {url,
+// include}. Tries `resolution` first, then falls back through 1k/2k/4k/8k
+// (smallest first, since a thumbnail-grade fetch never needs more) to the
+// first one present. Error when the asset has no "gltf" key at all (some
+// Poly Haven models only ship blend/fbx/usd) or no resolution has one.
+std::expected<ModelBundle, std::string> modelBundle(std::string_view filesJson,
+                                                    std::string_view resolution = "1k");
+
 // Poly Haven's public, unauthenticated, CC0-only asset API (M6.99): no auth,
 // GET only. `transport` is injected the same way HttpLLMProvider takes one
 // (see http_provider.h), so tests replay fixtures instead of touching the
@@ -81,6 +102,21 @@ public:
     // Same contract, downloading the 2k hdr into `<envDir>/<id>.hdr`.
     std::expected<FetchedAsset, std::string> fetchEnvironment(std::string_view query,
                                                               const std::filesystem::path& envDir);
+    // Same idempotency/error contract as fetchTexture/fetchEnvironment, but the
+    // download itself is a multi-file glTF bundle (modelBundle) written first to
+    // a temp sibling directory (`<modelsDir>/.partial_<id>`) and only renamed
+    // onto `<modelsDir>/<id>/` once every file is down: the gltf renamed to
+    // "scene.gltf" (so it matches the resolver's <name>/scene.gltf rule
+    // regardless of Poly Haven's own resolution-suffixed filename) plus every
+    // include file at its relative path. A failure at any point (network or
+    // disk) removes the temp directory and leaves `<modelsDir>/<id>/` absent,
+    // so a retry never sees a permanently "already present" half-bundle.
+    // `alreadyPresent` short-circuits on `<modelsDir>/<id>/scene.gltf` existing
+    // (or, for the direct-hit fast path, `<modelsDir>/<query>/scene.gltf`);
+    // FetchedAsset::maps holds the relative paths written (["scene.gltf",
+    // "textures/...", ...]) so its size is the download's own file count.
+    std::expected<FetchedAsset, std::string> fetchModel(std::string_view query,
+                                                        const std::filesystem::path& modelsDir);
 
 private:
     // Whitelist-checks `url`, issues a GET, and enforces the 64MB body cap;

@@ -236,6 +236,45 @@ TEST_CASE("mapUrls rejects malformed JSON") {
     CHECK(!mapUrls("not json", AssetKind::Environment, "2k", "hdr").has_value());
 }
 
+// --- modelBundle -------------------------------------------------------------
+
+TEST_CASE("modelBundle reads the gltf url and every include file at the requested resolution") {
+    const std::string files = fixtureText("files_barrel_01.json");
+    const std::expected<ModelBundle, std::string> result = modelBundle(files, "1k");
+    REQUIRE(result.has_value());
+    CHECK(result->gltfUrl.find("Barrel_01_1k.gltf") != std::string::npos);
+    REQUIRE(result->include.size() == 4); // Barrel_01.bin + diff/nor_gl/arm textures
+    CHECK(result->include.at("Barrel_01.bin").find("Barrel_01.bin") != std::string::npos);
+    CHECK(result->include.contains("textures/Barrel_01_explosive_diff_1k.jpg"));
+    CHECK(result->include.contains("textures/Barrel_01_explosive_nor_gl_1k.jpg"));
+    CHECK(result->include.contains("textures/Barrel_01_explosive_arm_1k.jpg"));
+    for (const auto& [relPath, url] : result->include) {
+        (void)relPath;
+        CHECK(isWhitelistedHost(url));
+    }
+}
+
+TEST_CASE("modelBundle falls back to the next available resolution when the requested one is "
+          "absent") {
+    const std::string files = fixtureText("files_barrel_01.json"); // trimmed to 1k/2k only
+    const std::expected<ModelBundle, std::string> result = modelBundle(files, "8k");
+    REQUIRE(result.has_value());
+    CHECK(result->gltfUrl.find("Barrel_01_1k.gltf") !=
+          std::string::npos); // smallest-first fallback
+}
+
+TEST_CASE("modelBundle errors when the asset has no gltf bundle at all") {
+    constexpr const char* kNoGltf =
+        R"({"blend":{"8k":{"blend":{"url":"https://dl.polyhaven.org/x"}}}})";
+    const std::expected<ModelBundle, std::string> result = modelBundle(kNoGltf, "1k");
+    REQUIRE(!result.has_value());
+    CHECK(result.error().find("gltf") != std::string::npos);
+}
+
+TEST_CASE("modelBundle rejects malformed JSON") {
+    CHECK(!modelBundle("not json", "1k").has_value());
+}
+
 // --- isWhitelistedHost -------------------------------------------------------
 
 TEST_CASE("isWhitelistedHost accepts only the two Poly Haven hosts, https, with a path") {
@@ -395,4 +434,220 @@ TEST_CASE("PolyHavenClient::fetchEnvironment: an existing file short-circuits wi
     REQUIRE(result.has_value());
     CHECK(result->alreadyPresent);
     CHECK(transport.requested.empty());
+}
+
+// --- PolyHavenClient::fetchModel ---------------------------------------------
+
+TEST_CASE("PolyHavenClient::fetchModel downloads the gltf (renamed scene.gltf) and every include "
+          "file at its relative path") {
+    TempDir dir("kumo_asset_fetch_model_new");
+    RoutedTransport transport;
+    transport.set("https://api.polyhaven.com/assets?t=models", fixtureText("assets_models.json"));
+    const std::string files = fixtureText("files_barrel_01.json");
+    transport.set("https://api.polyhaven.com/files/Barrel_01", files);
+    const std::expected<ModelBundle, std::string> bundle = modelBundle(files, "1k");
+    REQUIRE(bundle.has_value());
+    transport.set(bundle->gltfUrl, "fake-gltf-bytes");
+    for (const auto& [relPath, url] : bundle->include) {
+        transport.set(url, "fake-bytes:" + relPath);
+    }
+
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result = client.fetchModel("barrel", dir.path);
+    REQUIRE(result.has_value());
+    CHECK(result->name == "Barrel_01");
+    CHECK(!result->alreadyPresent);
+    CHECK(result->maps.size() == 5); // scene.gltf + 4 include files
+
+    const std::filesystem::path modelDir = dir.path / "Barrel_01";
+    REQUIRE(std::filesystem::exists(modelDir / "scene.gltf"));
+    std::ifstream gltf(modelDir / "scene.gltf", std::ios::binary);
+    std::string gltfContent((std::istreambuf_iterator<char>(gltf)),
+                            std::istreambuf_iterator<char>());
+    CHECK(gltfContent == "fake-gltf-bytes");
+    REQUIRE(std::filesystem::exists(modelDir / "Barrel_01.bin"));
+    REQUIRE(std::filesystem::exists(modelDir / "textures" / "Barrel_01_explosive_diff_1k.jpg"));
+    std::ifstream tex(modelDir / "textures" / "Barrel_01_explosive_diff_1k.jpg", std::ios::binary);
+    std::string texContent((std::istreambuf_iterator<char>(tex)), std::istreambuf_iterator<char>());
+    CHECK(texContent == "fake-bytes:textures/Barrel_01_explosive_diff_1k.jpg");
+}
+
+TEST_CASE("PolyHavenClient::fetchModel: an existing scene.gltf short-circuits with zero requests "
+          "when the query is already the resolved name") {
+    TempDir dir("kumo_asset_fetch_model_direct_hit");
+    std::filesystem::create_directories(dir.path / "Barrel_01");
+    std::ofstream(dir.path / "Barrel_01" / "scene.gltf").put('x');
+
+    RoutedTransport transport; // deliberately empty: no request must succeed
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result =
+        client.fetchModel("Barrel_01", dir.path);
+    REQUIRE(result.has_value());
+    CHECK(result->name == "Barrel_01");
+    CHECK(result->alreadyPresent);
+    CHECK(transport.requested.empty());
+}
+
+TEST_CASE("PolyHavenClient::fetchModel: a fuzzy query resolving to an already-fetched id skips "
+          "the files lookup and downloads") {
+    TempDir dir("kumo_asset_fetch_model_resolved_hit");
+    std::filesystem::create_directories(dir.path / "Barrel_01");
+    std::ofstream(dir.path / "Barrel_01" / "scene.gltf").put('x');
+
+    RoutedTransport transport;
+    transport.set("https://api.polyhaven.com/assets?t=models", fixtureText("assets_models.json"));
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result = client.fetchModel("barrel", dir.path);
+    REQUIRE(result.has_value());
+    CHECK(result->name == "Barrel_01");
+    CHECK(result->alreadyPresent);
+    REQUIRE(transport.requested.size() == 1); // only the assets listing
+    CHECK(transport.requested[0] == "https://api.polyhaven.com/assets?t=models");
+}
+
+TEST_CASE("PolyHavenClient::fetchModel rejects a doctored include url pointing off Poly Haven, "
+          "before touching the offending host, and writes nothing to disk") {
+    TempDir dir("kumo_asset_fetch_model_doctored");
+    RoutedTransport transport;
+    transport.set("https://api.polyhaven.com/assets?t=models", fixtureText("assets_models.json"));
+    const std::string doctoredFiles = fixtureText("files_barrel_01_doctored_host.json");
+    transport.set("https://api.polyhaven.com/files/Barrel_01", doctoredFiles);
+    const std::expected<ModelBundle, std::string> bundle = modelBundle(doctoredFiles, "1k");
+    REQUIRE(bundle.has_value());
+    transport.set(bundle->gltfUrl, "fake-gltf-bytes");
+    // Every legitimate include url gets a fixture body, so the loop reaches
+    // the doctored one regardless of unordered_map iteration order; the
+    // doctored (non-Poly-Haven) url deliberately gets no route, so the client
+    // requesting it would fail the call via the transport itself too.
+    for (const auto& [relPath, url] : bundle->include) {
+        if (isWhitelistedHost(url)) {
+            transport.set(url, "fake-bytes:" + relPath);
+        }
+    }
+
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result = client.fetchModel("barrel", dir.path);
+    REQUIRE(!result.has_value());
+    CHECK(result.error().find("evil.example.com") != std::string::npos);
+    for (const std::string& url : transport.requested) {
+        CHECK(url.find("evil.example.com") == std::string::npos);
+    }
+    CHECK(!std::filesystem::exists(dir.path / "Barrel_01"));
+}
+
+TEST_CASE("PolyHavenClient::fetchModel: an include download failure leaves no trace at all -- "
+          "final dir absent, temp dir cleaned up -- and a retry with a working transport "
+          "succeeds (F2)") {
+    TempDir dir("kumo_asset_fetch_model_partial_failure");
+    RoutedTransport transport;
+    transport.set("https://api.polyhaven.com/assets?t=models", fixtureText("assets_models.json"));
+    const std::string files = fixtureText("files_barrel_01.json");
+    transport.set("https://api.polyhaven.com/files/Barrel_01", files);
+    const std::expected<ModelBundle, std::string> bundle = modelBundle(files, "1k");
+    REQUIRE(bundle.has_value());
+    transport.set(bundle->gltfUrl, "fake-gltf-bytes");
+    // Every include gets a route except one: whichever include the loop (over
+    // an unordered_map, so order is unspecified) reaches first among the
+    // routed ones downloads and writes fine; the unrouted one fails the
+    // in-flight download, which must unwind the whole attempt.
+    const std::string missingRelPath = bundle->include.begin()->first;
+    for (const auto& [relPath, url] : bundle->include) {
+        if (relPath != missingRelPath) {
+            transport.set(url, "fake-bytes:" + relPath);
+        }
+    }
+
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> failed = client.fetchModel("barrel", dir.path);
+    REQUIRE(!failed.has_value());
+    CHECK(!std::filesystem::exists(dir.path / "Barrel_01"));
+    CHECK(!std::filesystem::exists(dir.path / ".partial_Barrel_01")); // temp dir cleaned up too
+
+    // Retry: same client, transport now complete (the previously-missing
+    // include gets a route). Must succeed as if the first attempt never
+    // happened -- the failed attempt must not have poisoned anything.
+    const auto missingIt = bundle->include.find(missingRelPath);
+    REQUIRE(missingIt != bundle->include.end());
+    transport.set(missingIt->second, "fake-bytes:" + missingRelPath);
+
+    const std::expected<FetchedAsset, std::string> retried = client.fetchModel("barrel", dir.path);
+    REQUIRE(retried.has_value());
+    CHECK(retried->name == "Barrel_01");
+    CHECK(!retried->alreadyPresent);
+    CHECK(retried->maps.size() == 5); // scene.gltf + 4 include files
+    REQUIRE(std::filesystem::exists(dir.path / "Barrel_01" / "scene.gltf"));
+    REQUIRE(std::filesystem::exists(dir.path / "Barrel_01" / missingRelPath));
+    CHECK(!std::filesystem::exists(dir.path / ".partial_Barrel_01"));
+}
+
+TEST_CASE("PolyHavenClient::fetchModel surfaces a no-match error without requesting /files") {
+    TempDir dir("kumo_asset_fetch_model_no_match");
+    RoutedTransport transport;
+    transport.set("https://api.polyhaven.com/assets?t=models", fixtureText("assets_models.json"));
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result =
+        client.fetchModel("quixotic gizmo", dir.path);
+    REQUIRE(!result.has_value());
+    REQUIRE(transport.requested.size() == 1); // only the assets listing
+}
+
+TEST_CASE("PolyHavenClient::fetchModel short-circuits on ANY resolvable layout with zero "
+          "requests") {
+    // <id>.glb has resolver priority over the directory layouts; a fetch for
+    // that id must not download a directory copy the resolver would ignore.
+    TempDir dir("kumo_asset_fetch_model_glb_hit");
+    std::ofstream(dir.path / "Barrel_01.glb").put('x');
+
+    RoutedTransport transport; // deliberately empty: no request may happen
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result =
+        client.fetchModel("Barrel_01", dir.path);
+    REQUIRE(result.has_value());
+    CHECK(result->alreadyPresent);
+    CHECK(transport.requested.empty());
+}
+
+TEST_CASE("PolyHavenClient::fetchModel treats a self-named layout for the RESOLVED id as already "
+          "present") {
+    // Fuzzy query resolves through the assets listing to Barrel_01, whose
+    // <id>/<id>.gltf layout exists — before this check the fetcher would
+    // download a bundle and delete the valid model during the install.
+    TempDir dir("kumo_asset_fetch_model_selfnamed_hit");
+    std::filesystem::create_directories(dir.path / "Barrel_01");
+    std::ofstream(dir.path / "Barrel_01" / "Barrel_01.gltf").put('x');
+
+    RoutedTransport transport;
+    transport.set("https://api.polyhaven.com/assets?t=models", fixtureText("assets_models.json"));
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result = client.fetchModel("barrel", dir.path);
+    REQUIRE(result.has_value());
+    CHECK(result->alreadyPresent);
+    // Only the assets listing was fetched; never /files or any payload.
+    CHECK(transport.requested.size() == 1);
+    CHECK(std::filesystem::exists(dir.path / "Barrel_01" / "Barrel_01.gltf"));
+}
+
+TEST_CASE("PolyHavenClient::fetchModel refuses to replace an unrecognized destination directory") {
+    TempDir dir("kumo_asset_fetch_model_junk_dest");
+    std::filesystem::create_directories(dir.path / "Barrel_01");
+    std::ofstream(dir.path / "Barrel_01" / "notes.txt").put('x'); // no model layout inside
+
+    RoutedTransport transport;
+    transport.set("https://api.polyhaven.com/assets?t=models", fixtureText("assets_models.json"));
+    const std::string files = fixtureText("files_barrel_01.json");
+    transport.set("https://api.polyhaven.com/files/Barrel_01", files);
+    const std::expected<ModelBundle, std::string> bundle = modelBundle(files, "1k");
+    REQUIRE(bundle.has_value());
+    transport.set(bundle->gltfUrl, "fake-gltf-bytes");
+    for (const auto& [relPath, url] : bundle->include) {
+        transport.set(url, "fake-bytes:" + relPath);
+    }
+
+    PolyHavenClient client(transport.fn());
+    const std::expected<FetchedAsset, std::string> result = client.fetchModel("barrel", dir.path);
+    REQUIRE(!result.has_value());
+    CHECK(result.error().find("remove it manually") != std::string::npos);
+    // The junk survives untouched and the temp dir is cleaned up.
+    CHECK(std::filesystem::exists(dir.path / "Barrel_01" / "notes.txt"));
+    CHECK(!std::filesystem::exists(dir.path / ".partial_Barrel_01"));
 }

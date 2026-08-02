@@ -1,5 +1,6 @@
 #include "asset_fetch.h"
 
+#include <kumo/asset/model_resolver.h>
 #include <kumo/core/asset_name.h>
 
 #include <nlohmann/json.hpp>
@@ -29,6 +30,7 @@ using nlohmann::json;
 
 constexpr const char* kAssetsTexturesUrl = "https://api.polyhaven.com/assets?t=textures";
 constexpr const char* kAssetsHdrisUrl = "https://api.polyhaven.com/assets?t=hdris";
+constexpr const char* kAssetsModelsUrl = "https://api.polyhaven.com/assets?t=models";
 // Whole body buffered in memory before it is written (the transport already
 // does this); this is the safety net against a hostile or misconfigured
 // response, not a normal-case limiter (a 2k HDR is ~5-15MB).
@@ -159,6 +161,31 @@ std::vector<std::string> presentTextureMaps(const std::filesystem::path& dir) {
         }
     }
     return maps;
+}
+
+// A model bundle's "include" keys come from Poly Haven's own response, not
+// our whitelist-checked query/id; defense in depth against a doctored or
+// compromised response steering a write outside the model's own directory
+// (mirrors isPlainAssetName's traversal rejection, extended to the '/'
+// nesting these relative paths legitimately use, e.g. "textures/foo.jpg").
+bool isSafeRelativePath(std::string_view path) {
+    if (path.empty() || path.front() == '/' || path.find('\\') != std::string_view::npos) {
+        return false;
+    }
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t slash = path.find('/', start);
+        const std::string_view part = slash == std::string_view::npos
+                                          ? path.substr(start)
+                                          : path.substr(start, slash - start);
+        if (part.empty() || part == "." || part == "..") {
+            return false;
+        }
+        if (slash == std::string_view::npos) {
+            return true;
+        }
+        start = slash + 1;
+    }
 }
 
 } // namespace
@@ -310,6 +337,66 @@ mapUrls(std::string_view filesJson, AssetKind kind, std::string_view resolution,
         return out;
     }
     return std::unexpected(std::format("no hdri map at {} {}", resolution, format));
+}
+
+std::expected<ModelBundle, std::string> modelBundle(std::string_view filesJson,
+                                                    std::string_view resolution) {
+    const json parsed = json::parse(filesJson, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        return std::unexpected(std::string("poly haven files response is not valid JSON"));
+    }
+    const auto gltfIt = parsed.find("gltf");
+    if (gltfIt == parsed.end() || !gltfIt->is_object()) {
+        return std::unexpected(std::string("this asset has no gltf bundle"));
+    }
+
+    // Smallest first: a thumbnail-grade fetch never needs more than 1k, and a
+    // smaller bundle is a smaller download either way.
+    static constexpr std::array<std::string_view, 4> kFallbackOrder{"1k", "2k", "4k", "8k"};
+    auto atResolution = [&](std::string_view res) -> const json* {
+        const auto resIt = gltfIt->find(std::string(res));
+        if (resIt == gltfIt->end() || !resIt->is_object()) {
+            return nullptr;
+        }
+        const auto fmtIt = resIt->find("gltf");
+        if (fmtIt == resIt->end() || !fmtIt->is_object()) {
+            return nullptr;
+        }
+        return &*fmtIt;
+    };
+
+    const json* bundle = atResolution(resolution);
+    if (bundle == nullptr) {
+        for (std::string_view fallback : kFallbackOrder) {
+            bundle = atResolution(fallback);
+            if (bundle != nullptr) {
+                break;
+            }
+        }
+    }
+    if (bundle == nullptr) {
+        return std::unexpected(std::string("no gltf bundle available at any resolution"));
+    }
+
+    const auto urlIt = bundle->find("url");
+    if (urlIt == bundle->end() || !urlIt->is_string()) {
+        return std::unexpected(std::string("gltf bundle has no url"));
+    }
+    ModelBundle out;
+    out.gltfUrl = urlIt->get<std::string>();
+    if (const auto includeIt = bundle->find("include");
+        includeIt != bundle->end() && includeIt->is_object()) {
+        for (const auto& item : includeIt->items()) {
+            if (!item.value().is_object()) {
+                continue;
+            }
+            const auto fileUrlIt = item.value().find("url");
+            if (fileUrlIt != item.value().end() && fileUrlIt->is_string()) {
+                out.include.emplace(item.key(), fileUrlIt->get<std::string>());
+            }
+        }
+    }
+    return out;
 }
 
 PolyHavenClient::PolyHavenClient(HttpTransport transport, std::chrono::seconds timeout)
@@ -493,6 +580,139 @@ PolyHavenClient::fetchEnvironment(std::string_view query, const std::filesystem:
 
     return FetchedAsset{.name = picked->id,
                         .maps = {},
+                        .alreadyPresent = false,
+                        .alternatives = picked->alternatives};
+}
+
+std::expected<FetchedAsset, std::string>
+PolyHavenClient::fetchModel(std::string_view query, const std::filesystem::path& modelsDir) {
+    // Fast path, zero network I/O: same reasoning as fetchTexture's. The
+    // resolver checks every supported layout (<id>.glb, <id>/<id>.gltf,
+    // <id>/scene.gltf, each optionally under one category level) — a model
+    // present in ANY of them must short-circuit, not just the scene.gltf
+    // layout this function itself writes.
+    if (isPlainAssetPath(query) && !asset::resolveModelPath(modelsDir, query).empty()) {
+        return FetchedAsset{
+            .name = std::string(query), .maps = {}, .alreadyPresent = true, .alternatives = {}};
+    }
+
+    const std::expected<std::string, std::string> assetsBody = get(kAssetsModelsUrl);
+    if (!assetsBody.has_value()) {
+        return std::unexpected(assetsBody.error());
+    }
+    const std::expected<AssetMatch, std::string> picked = pickAsset(*assetsBody, query);
+    if (!picked.has_value()) {
+        return std::unexpected(picked.error());
+    }
+    if (!isPlainAssetName(picked->id)) {
+        return std::unexpected(
+            std::format("poly haven returned an unsafe asset id: {}", picked->id));
+    }
+
+    const std::filesystem::path dir = modelsDir / picked->id;
+    if (!asset::resolveModelPath(modelsDir, picked->id).empty()) {
+        return FetchedAsset{.name = picked->id,
+                            .maps = {},
+                            .alreadyPresent = true,
+                            .alternatives = picked->alternatives};
+    }
+    // No layout resolved, so an existing `dir` can only hold unrecognized
+    // content and the finalization below is guaranteed to reject it — fail
+    // now, before the manifest and whole bundle are downloaded synchronously.
+    std::error_code earlyDestEc;
+    if (std::filesystem::exists(dir, earlyDestEc)) {
+        return std::unexpected(
+            std::format("destination {} exists but holds no recognized model layout; "
+                        "remove it manually and retry",
+                        dir.string()));
+    }
+
+    const std::expected<std::string, std::string> filesBody =
+        get(std::format("https://api.polyhaven.com/files/{}", picked->id));
+    if (!filesBody.has_value()) {
+        return std::unexpected(filesBody.error());
+    }
+    const std::expected<ModelBundle, std::string> bundle = modelBundle(*filesBody, "1k");
+    if (!bundle.has_value()) {
+        return std::unexpected(bundle.error());
+    }
+
+    // Downloaded straight into a temp sibling directory and only renamed onto
+    // `dir` once the whole bundle is complete: a failure partway through
+    // (network or disk) must never leave a partial bundle at `dir` itself,
+    // since that directory's mere existence (specifically scene.gltf, per the
+    // check above) is what every later fetch of this id trusts as "already
+    // present" -- a half-written `dir` would poison it permanently.
+    const std::filesystem::path tempDir = modelsDir / (".partial_" + picked->id);
+    std::error_code staleEc;
+    std::filesystem::remove_all(tempDir, staleEc); // clear a leftover from a prior crashed attempt
+    std::error_code mkdirEc;
+    std::filesystem::create_directories(tempDir, mkdirEc);
+
+    auto fail = [&](std::string message) -> std::expected<FetchedAsset, std::string> {
+        std::error_code cleanupEc;
+        std::filesystem::remove_all(tempDir, cleanupEc);
+        return std::unexpected(std::move(message));
+    };
+
+    std::vector<std::string> downloaded;
+    downloaded.reserve(bundle->include.size() + 1);
+
+    // Renamed to "scene.gltf" regardless of Poly Haven's own resolution-suffixed
+    // filename (e.g. "Barrel_01_1k.gltf"), so the resolver's plain <name>/
+    // scene.gltf rule finds it without needing to know that filename. Written
+    // first here, but that ordering is now irrelevant to correctness: nothing
+    // is visible at `dir` until the rename below.
+    const std::expected<std::string, std::string> gltfBytes = get(bundle->gltfUrl);
+    if (!gltfBytes.has_value()) {
+        return fail(gltfBytes.error());
+    }
+    const std::filesystem::path gltfPath = tempDir / "scene.gltf";
+    {
+        std::ofstream out(gltfPath, std::ios::binary);
+        out.write(gltfBytes->data(), static_cast<std::streamsize>(gltfBytes->size()));
+        if (!out) {
+            return fail(std::format("failed to write {}", gltfPath.string()));
+        }
+    }
+    downloaded.emplace_back("scene.gltf");
+
+    for (const auto& [relPath, url] : bundle->include) {
+        if (!isSafeRelativePath(relPath)) {
+            return fail(std::format("poly haven returned an unsafe include path: {}", relPath));
+        }
+        const std::expected<std::string, std::string> bytes = get(url);
+        if (!bytes.has_value()) {
+            return fail(bytes.error());
+        }
+        const std::filesystem::path filePath = tempDir / relPath;
+        std::filesystem::create_directories(filePath.parent_path(), mkdirEc);
+        std::ofstream out(filePath, std::ios::binary);
+        out.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
+        if (!out) {
+            return fail(std::format("failed to write {}", filePath.string()));
+        }
+        downloaded.push_back(relPath);
+    }
+
+    // Reaching here means no supported layout resolved for this id, so an
+    // existing `dir` can only hold unrecognized content — never delete it on
+    // the fetcher's own authority; surface it instead.
+    std::error_code destEc;
+    if (std::filesystem::exists(dir, destEc)) {
+        return fail(std::format("destination {} exists but holds no recognized model layout; "
+                                "remove it manually and retry",
+                                dir.string()));
+    }
+    std::error_code renameEc;
+    std::filesystem::rename(tempDir, dir, renameEc);
+    if (renameEc) {
+        return fail(std::format("failed to finalize model directory {}: {}", dir.string(),
+                                renameEc.message()));
+    }
+
+    return FetchedAsset{.name = picked->id,
+                        .maps = std::move(downloaded),
                         .alreadyPresent = false,
                         .alternatives = picked->alternatives};
 }

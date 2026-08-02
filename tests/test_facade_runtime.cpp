@@ -59,6 +59,35 @@ TEST_CASE("planSessions: both endpoints enabled, each keeping its own provider")
     CHECK(plan.shaderEndpoint.baseUrl == "http://127.0.0.1:11434");
 }
 
+TEST_CASE("planSessions: OpenAI endpoints with tools coerce reasoning effort to none") {
+    AgentConfig config;
+    config.scene.type = ProviderType::OpenAi;
+    config.scene.baseUrl = "https://api.openai.com";
+    config.scene.apiKey = "sk-x";
+    config.scene.model = "gpt";
+    config.scene.reasoningEffort = "high";
+    config.shader.type = ProviderType::Anthropic;
+    config.shader.baseUrl = "https://api.anthropic.com";
+    config.shader.apiKey = "sk-y";
+    config.shader.model = "claude";
+    config.shader.reasoningEffort = "high";
+
+    const SessionPlan plan = planSessions(config, false);
+    CHECK(plan.sceneEndpoint.reasoningEffort == "none");
+    // Anthropic ignores the field; the configured value passes through.
+    CHECK(plan.shaderEndpoint.reasoningEffort == "high");
+}
+
+TEST_CASE("planSessions: an empty OpenAI reasoning effort stays empty (omitted on the wire)") {
+    AgentConfig config;
+    config.scene.type = ProviderType::OpenAi;
+    config.scene.baseUrl = "http://127.0.0.1:11434";
+    config.scene.model = "qwen2.5:14b";
+
+    const SessionPlan plan = planSessions(config, false);
+    CHECK(plan.sceneEndpoint.reasoningEffort.empty());
+}
+
 TEST_CASE("planSessions: confirmDestructive is an OR of the CLI flag and the config file") {
     AgentConfig config;
     config.confirmDestructive = false;

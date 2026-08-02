@@ -11,7 +11,7 @@ viewer 内置两个 LLM 驱动的助手：场景助手（自然语言增删实�
 - `provider.type`：`"anthropic"`（Messages API 及兼容中转端点）或 `"openai"`（Chat Completions——OpenAI 官方及 Ollama / LM Studio / llama.cpp 等本地端点的事实标准）；
 - `provider.base_url`：缺省按 type 取 `https://api.anthropic.com` 或 `http://127.0.0.1:11434`（OpenAI 云端填 `https://api.openai.com`）；
 - **per-agent 端点**（M6）：`agents.scene.*` / `agents.shader.*` 各自可覆盖 `type` / `base_url` / `api_key` / `model`，留空字段按字段继承 `provider.*`——场景/shader 助手可各配一套端点混跑（如 scene 本地 Ollama + shader 云端 GPT），也可全走同一云端；
-- 另有 `provider.max_tokens`（模板默认 16384——shader 整文件替换需要大输出预算）、`provider.request_timeout_seconds`、`provider.reasoning_effort`（OpenAI 推理模型在 chat completions 上带函数工具时须设 `"none"`；留空不发送，兼容旧模型与本地端点）；
+- 另有 `provider.max_tokens`（模板默认 16384——shader 整文件替换需要大输出预算）、`provider.request_timeout_seconds`、`provider.reasoning_effort`（留空不发送，兼容旧模型与本地端点）；`reasoning_effort` 自 MB 起为 per-agent 第 5 键（`agents.<agent>.reasoning_effort` 覆盖 provider 种子），且带工具的会话在 OpenAI 型端点上由 planSessions 统一强制为 `"none"`（该 API 拒绝函数工具与推理档位并存；无工具的导演/critic 会话保留配置值，MC 里程碑消费）；
 - API key：`provider.api_key`（或 per-agent 的 `api_key`），或环境变量 `KUMO_PROVIDER_API_KEY` / `ANTHROPIC_API_KEY`（anthropic 型端点）/ `OPENAI_API_KEY`（openai 型端点）。解析按端点各自进行、层级优先：进程环境的任一名字 > `.env` 的任一名字 > 配置文件；key 永不落日志。**openai 型且 host 为本机时 key 可空**（Ollama 不校验）；
 - 环境变量覆盖（作用于全局 provider，per-agent 覆盖在其上生效）：`KUMO_PROVIDER_TYPE` / `KUMO_PROVIDER_BASE_URL` / `KUMO_PROVIDER_MODEL`；
 - 某个助手缺 model/key 时仅该页签禁用并给出中文提示，渲染功能完全不受影响。
@@ -62,9 +62,13 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 
 **工具面按助手收窄**：场景助手持有上表十七个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + 两个 shader 工具 + `viewer_screenshot`（shader_write 编译通过后自查改完的材质）——本地小模型碰不到 shader_write，shader 模型删不了实体。
 
+**多视图审图**（MB）：`viewer_screenshot` 接受 `views`（1-4 个：`main` 成品帧 / `clay` 平光素模看形体构图 / `normal` 世界法线 / `depth` 视深灰度近白远黑，缺省 `["main"]`）、`long_side`（64-1024，缺省 640）、`detail`（`low`/`high`，控制发给模型的图像精细档）；结果带 `image_paths` 数组（`image_path` 保留兼容单图消费者），session 与 MCP 都按数组全量附图，文件名带 pid + 调用序号 + 视图名不互相覆盖。调试视图由 renderer 的三条共享布局管线绘制（custom shader 材质也被强制走调试管线，critic 检查形体不受风格化干扰），截图后恢复原状态。
+
+**参考图上传**（MB）：app 聊天输入区支持附加最多 3 张 png/jpeg（文件选择或剪贴板粘贴）+ 低/高画质档位；桥接层读文件转 base64 交 `AgentSession::submit` 的带图重载，双 codec 以 user 消息 content parts 发送（OpenAI 带 detail 档位，Anthropic image blocks）。参考图长驻会话历史（不参与工具截图的"最新一张"逐出策略），prompt 指示助手对照参考图核对氛围、配色与构图。
+
 **视觉闭环**（M6.97）：场景助手建完场景后截图自评（构图/曝光/比例），修正后最多补一张确认图，随后必须交付。工具结果带 `image_path` 时会话层自动读文件转 base64 附进消息：OpenAI 协议经紧随的 user 图片消息回灌（`detail:"low"`），Anthropic 原生 tool_result 带图；历史中最多保留一张图（新图逐出旧图），压缩估算按每图固定 512 token 计。**需要视觉模型**（如 GPT-4o 系及以上）；非视觉模型调用截图工具会得到端点报错。
 
-**艺术指导**：场景助手的 system prompt 内嵌成稿流程（主题 → 主体 → 前中后景 → 相机 → 布光 → 材质 → 素材）、默认丰富度底线（地面 + 主体 + 支撑元素 + 匹配环境 + 分层布光 + 材质区分 + 贴图化地面/结构物）、按包围盒计算取景、三点布光配方、素材优先原则（真实模型/贴图优于程序化图元与纯色材质，调用 `material_set_texture` 时按贴图实际尺寸估算 tiling）与验证闭环（建完调 `scene_validate` 修完再回复）；shader 助手内嵌材质意图词表（拉丝金属 / 磨砂玻璃近似 / 混凝土等 → 因子组合与手法）与两助手职责边界（场景助手管摆放与 PBR 因子，shader 助手管因子表达不了的效果）。
+**艺术指导**：场景助手的 system prompt 内嵌成稿流程（主题 → 主体 → 前中后景 → 相机 → 布光 → 材质 → 素材）、默认丰富度底线（地面 + 主体 + 支撑元素 + 匹配环境 + 分层布光 + 材质区分 + 贴图化地面/结构物）、按包围盒计算取景、三点布光配方、素材优先原则（真实模型/贴图优于程序化图元与纯色材质，调用 `material_set_texture` 时按贴图实际尺寸估算 tiling）与验证闭环（建完调 `scene_validate` 修完再回复，截图后按构图/焦点/层次/材质/光照/细节六点评审，形体或空间问题用 clay/normal/depth 视图诊断，有参考图则对照氛围配色构图）；shader 助手内嵌材质意图词表（拉丝金属 / 磨砂玻璃近似 / 混凝土等 → 因子组合与手法）与两助手职责边界（场景助手管摆放与 PBR 因子，shader 助手管因子表达不了的效果）。
 
 **素材库**（M6.98 PR-2）：`assetDir` 下 `textures/<name>/{albedo,normal,roughness,metalness,ao}.{png,jpg}`（albedo 必需，其余可选）、`models/<name>.glb`（或多文件 glTF 布局，见 MA）、`env/<name>.hdr` 三类真实素材，供 `asset_list` 枚举、`material_set_texture` / `scene_add_model` / `environment_set`（`file` 字段）消费；除仓库自带的 `DamagedHelmet.glb` 与 `studio_small_09_2k.hdr` 外均为本地拉取产物不入库，首次使用前跑 `./tools/fetch_assets.sh`（幂等、单项失败不中断，全部 CC0，来源见 `assets/README.md`）；`assetDir` 未配置时三个素材工具统一报不支持，与 `environment_set` 无 `applyEnvironment` 回调时的降级方式一致。
 

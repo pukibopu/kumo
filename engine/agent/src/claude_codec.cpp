@@ -43,19 +43,19 @@ json toContentBlocks(const ChatMessage& message) {
     if (message.role == Role::Tool) {
         for (const ToolResult& result : message.toolResults) {
             json block{{"type", "tool_result"}, {"tool_use_id", result.callId}};
-            // Vision feedback loop (M6.97): an image-bearing result becomes a
-            // content array (text + image); image-less results keep the plain
-            // string form so today's no-image wire shape stays unchanged.
-            if (result.imagePngBase64.empty()) {
+            // Image-less results keep the plain string form so the no-image
+            // wire shape stays unchanged.
+            if (result.images.empty()) {
                 block["content"] = result.contentJson;
             } else {
                 json content = json::array();
                 content.push_back({{"type", "text"}, {"text", result.contentJson}});
-                content.push_back({{"type", "image"},
-                                   {"source",
-                                    {{"type", "base64"},
-                                     {"media_type", "image/png"},
-                                     {"data", result.imagePngBase64}}}});
+                for (const std::string& image : result.images) {
+                    content.push_back(
+                        {{"type", "image"},
+                         {"source",
+                          {{"type", "base64"}, {"media_type", "image/png"}, {"data", image}}}});
+                }
                 block["content"] = std::move(content);
             }
             if (result.isError) {
@@ -67,6 +67,13 @@ json toContentBlocks(const ChatMessage& message) {
     }
     if (!message.text.empty()) {
         blocks.push_back({{"type", "text"}, {"text", message.text}});
+    }
+    // Reference images (MB-5); user role only carries them.
+    for (const UserImage& image : message.userImages) {
+        blocks.push_back(
+            {{"type", "image"},
+             {"source",
+              {{"type", "base64"}, {"media_type", image.mediaType}, {"data", image.base64}}}});
     }
     for (const ToolCall& call : message.toolCalls) {
         blocks.push_back({{"type", "tool_use"},

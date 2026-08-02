@@ -173,6 +173,13 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
 // provider retry notice overriding it while WaitingForModel.
 - (NSString*)agentStatusLine:(KumoAgentKind)kind;
 - (BOOL)submit:(KumoAgentKind)kind text:(NSString*)text;
+// With reference images (MB-5): png/jpeg paths are read and base64-encoded
+// here; an unreadable or unsupported file fails the whole submit with NO.
+// imageDetail is "low" or "high" (provider-side cost/fidelity hint).
+- (BOOL)submit:(KumoAgentKind)kind
+           text:(NSString*)text
+     imagePaths:(NSArray<NSString*>*)imagePaths
+    imageDetail:(NSString*)imageDetail;
 // Moves the session's pending entries out; call every poll tick for both
 // kinds regardless of which tab is visible, or the engine-side transcript
 // accumulates unbounded.

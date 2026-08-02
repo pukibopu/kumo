@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace kumo::agent {
 
@@ -31,5 +33,11 @@ ChatRequest makeSummaryRequest(std::span<const ChatMessage> messages, const std:
 
 // The single user message that replaces the compressed prefix.
 ChatMessage makeSummaryMessage(std::string summaryText);
+
+// The newest reference images (at most maxImages, order kept) plus the newest
+// non-empty detail hint in [0, cutoff): re-attached to the summary message so
+// compression never discards what later iterations must compare against.
+std::pair<std::vector<UserImage>, std::string>
+collectReferenceImages(std::span<const ChatMessage> messages, std::size_t maxImages);
 
 } // namespace kumo::agent

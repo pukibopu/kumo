@@ -103,6 +103,12 @@ public:
     // (ADR: animated materials keep an on-demand viewport redrawing every frame).
     bool hasAnimatedMaterials() const;
 
+    // Diagnostic render modes for the vision feedback loop (MB-3): every draw,
+    // including custom-shader materials, uses the debug pipeline while active.
+    enum class DebugView { None, Clay, Normal, Depth };
+    void setDebugView(DebugView view) { debugView_ = view; }
+    DebugView debugView() const { return debugView_; }
+
     // Multipliers on top of the material metallic/roughness factors.
     void setMaterialOverride(float metallic, float roughness);
     // Directional-light PCF shadow mapping (ADR 0009); disabling clears shadowParams
@@ -215,6 +221,9 @@ private:
     gpu::Ptr<gpu::RenderPipeline> skyboxPipeline_;
     gpu::Ptr<gpu::RenderPipeline> tonemapPipeline_;
     gpu::Ptr<gpu::RenderPipeline> shadowPipeline_;
+    // Indexed by DebugView minus one (clay, normal, depth).
+    gpu::Ptr<gpu::RenderPipeline> debugPipelines_[3];
+    DebugView debugView_ = DebugView::None;
 
     // Shared pbr vertex stage + its reflection, reused when building a custom
     // material pipeline (ADR 0011); the shared fragment reflection is the

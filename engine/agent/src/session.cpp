@@ -12,9 +12,15 @@
 #include <chrono>
 #include <format>
 #include <optional>
+#include <span>
 #include <utility>
 
 namespace kumo::agent {
+
+namespace {
+// Mirrors the app-side attachment cap; bounds what compression carries forward.
+constexpr std::size_t kMaxCarriedReferenceImages = 3;
+} // namespace
 
 AgentSession::AgentSession(ILLMProvider& provider, const ToolRegistry& registry,
                            MainThreadQueue& queue, ConfirmationGate* confirm, Desc desc)
@@ -43,6 +49,11 @@ AgentSession::~AgentSession() {
 }
 
 bool AgentSession::submit(std::string userText) {
+    return submit(std::move(userText), {}, {});
+}
+
+bool AgentSession::submit(std::string userText, std::vector<UserImage> images,
+                          std::string imageDetail) {
     {
         std::lock_guard lock(mutex_);
         if (busy_ || stopping_) {
@@ -51,6 +62,8 @@ bool AgentSession::submit(std::string userText) {
         busy_ = true;
         status_ = Status::WaitingForModel;
         pendingUserText_ = std::move(userText);
+        pendingImages_ = std::move(images);
+        pendingImageDetail_ = std::move(imageDetail);
         hasPending_ = true;
     }
     cv_.notify_all();
@@ -75,6 +88,8 @@ std::vector<AgentSession::TranscriptEntry> AgentSession::drainTranscript() {
 void AgentSession::workerLoop() {
     for (;;) {
         std::string userText;
+        std::vector<UserImage> images;
+        std::string imageDetail;
         {
             std::unique_lock lock(mutex_);
             cv_.wait(lock, [this] { return stopping_ || hasPending_; });
@@ -82,9 +97,11 @@ void AgentSession::workerLoop() {
                 return;
             }
             userText = std::move(pendingUserText_);
+            images = std::move(pendingImages_);
+            imageDetail = std::move(pendingImageDetail_);
             hasPending_ = false;
         }
-        runTurn(std::move(userText));
+        runTurn(std::move(userText), std::move(images), std::move(imageDetail));
         compressIfNeeded();
         {
             std::lock_guard lock(mutex_);
@@ -94,12 +111,15 @@ void AgentSession::workerLoop() {
     }
 }
 
-void AgentSession::runTurn(std::string userText) {
+void AgentSession::runTurn(std::string userText, std::vector<UserImage> images,
+                           std::string imageDetail) {
     const std::size_t turnStart = history_.size();
     pushEntry({.kind = TranscriptEntry::Kind::User, .text = userText});
     ChatMessage userMessage;
     userMessage.role = Role::User;
     userMessage.text = std::move(userText);
+    userMessage.userImages = std::move(images);
+    userMessage.userImageDetail = std::move(imageDetail);
     history_.push_back(std::move(userMessage));
 
     for (int round = 0; round < desc_.maxToolRounds; ++round) {
@@ -183,13 +203,13 @@ void AgentSession::runTurn(std::string userText) {
         // most one stays attached at a time. A fresh image evicts every earlier
         // one rather than the other way around, since the newest screenshot is
         // the one worth the model's attention.
-        const bool carriesImage = std::any_of(
-            toolMessage.toolResults.begin(), toolMessage.toolResults.end(),
-            [](const ToolResult& toolResult) { return !toolResult.imagePngBase64.empty(); });
+        const bool carriesImage =
+            std::any_of(toolMessage.toolResults.begin(), toolMessage.toolResults.end(),
+                        [](const ToolResult& toolResult) { return !toolResult.images.empty(); });
         if (carriesImage) {
             for (ChatMessage& earlier : history_) {
                 for (ToolResult& earlierResult : earlier.toolResults) {
-                    earlierResult.imagePngBase64.clear();
+                    earlierResult.images.clear();
                 }
             }
         }
@@ -218,8 +238,15 @@ void AgentSession::compressIfNeeded() {
         return;
     }
     if (result.has_value() && !result->text.empty()) {
+        // Reference images in the compressed range would vanish with their
+        // messages; re-attach the newest ones to the summary (MB review).
+        auto [referenceImages, referenceDetail] = collectReferenceImages(
+            std::span<const ChatMessage>(history_.data(), cutoff), kMaxCarriedReferenceImages);
         history_.erase(history_.begin(), history_.begin() + static_cast<std::ptrdiff_t>(cutoff));
-        history_.insert(history_.begin(), makeSummaryMessage(result->text));
+        ChatMessage summary = makeSummaryMessage(result->text);
+        summary.userImages = std::move(referenceImages);
+        summary.userImageDetail = std::move(referenceDetail);
+        history_.insert(history_.begin(), std::move(summary));
         pushEntry({.kind = TranscriptEntry::Kind::Info,
                    .text = std::format("compressed {} earlier messages into a summary", cutoff)});
     } else {
@@ -249,18 +276,31 @@ ToolResult AgentSession::executeToolCall(const ToolCall& call) {
         });
     result.contentJson = awaitJson(std::move(future));
 
-    // Vision feedback loop (ADR 0041/M6.97): a result JSON carrying image_path
-    // (viewer_screenshot and friends) gets its PNG attached in base64; any
-    // failure to read the file degrades silently to text-only, same as MCP.
+    // Vision feedback (M6.97, multi-image MB-1): image_paths (or legacy
+    // image_path) attach as base64; unreadable files degrade to text-only.
     const nlohmann::json parsed = nlohmann::json::parse(result.contentJson, nullptr, false);
     if (!parsed.is_discarded() && parsed.is_object()) {
-        const auto imagePathIt = parsed.find("image_path");
-        if (imagePathIt != parsed.end() && imagePathIt->is_string()) {
-            if (std::optional<std::string> encoded =
-                    detail::base64EncodeFile(imagePathIt->get<std::string>());
-                encoded.has_value()) {
-                result.imagePngBase64 = std::move(*encoded);
+        std::vector<std::string> paths;
+        const auto pathsIt = parsed.find("image_paths");
+        if (pathsIt != parsed.end() && pathsIt->is_array()) {
+            for (const nlohmann::json& entry : *pathsIt) {
+                if (entry.is_string()) {
+                    paths.push_back(entry.get<std::string>());
+                }
             }
+        } else if (const auto pathIt = parsed.find("image_path");
+                   pathIt != parsed.end() && pathIt->is_string()) {
+            paths.push_back(pathIt->get<std::string>());
+        }
+        for (const std::string& path : paths) {
+            if (std::optional<std::string> encoded = detail::base64EncodeFile(path);
+                encoded.has_value()) {
+                result.images.push_back(std::move(*encoded));
+            }
+        }
+        const auto detailIt = parsed.find("image_detail");
+        if (detailIt != parsed.end() && detailIt->is_string()) {
+            result.imageDetail = detailIt->get<std::string>();
         }
     }
     return result;

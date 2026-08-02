@@ -13,13 +13,15 @@
             "type": "",
             "base_url": "",
             "api_key": "",
-            "model": ""
+            "model": "",
+            "reasoning_effort": ""
         },
         "shader": {
             "type": "",
             "base_url": "",
             "api_key": "",
-            "model": ""
+            "model": "",
+            "reasoning_effort": ""
         },
         "confirm_destructive": false,
         "summary_threshold_tokens": 8000

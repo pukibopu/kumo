@@ -12,8 +12,8 @@ macOS / iPad 原生 Metal PBR 渲染器，内置 LLM 驱动的场景与 shader �
 - GLSL 单源 → SPIR-V / MSL 交叉编译，支持运行时热重载
 - 场景助手：自然语言增删实体、调整灯光 / 相机 / 材质 / 天空环境，内置构图与布光指导、场景自检与截图自评
 - Shader 助手：自然语言生成材质 shader，编译报错自动修正后热载入
-- 真实素材库：贴图 / glTF 模型 / HDRI 环境（`./tools/fetch_assets.sh` 一键拉取，CC0），助手建场景时优先取用
-- 素材自采：素材库没有合适素材时，助手按需从 Poly Haven 现取 CC0 贴图/环境
+- 真实素材库：贴图 / glTF 模型（含分类道具包）/ HDRI 环境（`./tools/fetch_assets.sh` 一键拉取，CC0），助手建场景时优先取用；`viewer --thumbnails` 生成预览图与索引
+- 素材自采：素材库没有合适素材时，助手按需从 Poly Haven 现取 CC0 贴图/环境/模型
 
 进度见 [docs/milestones.md](docs/milestones.md)。
 

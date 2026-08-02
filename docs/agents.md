@@ -35,10 +35,10 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 | 工具 | 说明 |
 |---|---|
 | `scene_list` | 全场景：实体（id / 变换 / world AABB / 材质 / 图元溯源）+ 相机 + 灯 + 已定义组名 |
-| `asset_list` | 只读列出素材库（M6.98 PR-2）：`textures/` 下每套贴图的名字与现有贴图种类、`models/*.glb` 模型名、`env/*.hdr` 环境文件；assetDir 未配置则报不支持 |
+| `asset_list` | 只读列出素材库（M6.98 PR-2；v2 见 MA）：`textures/` 下每套贴图的名字与现有贴图种类、模型名（含分类前缀）、`env/*.hdr` 环境文件；assetDir 未配置则报不支持 |
 | `scene_add_entity` | 程序化图元 sphere / cube / plane / cylinder / cone / torus / capsule，返回 entity_id；缺省材质为非金属灰（metallic 0 / roughness 0.6） |
 | `scene_add_entities` | 批量创建（单次 ≤128），先全量校验后落地，中途 GPU 失败整体回滚 |
-| `scene_add_model` | 从素材库放置真实 glTF 模型（名字来自 `asset_list`），返回每个 mesh 节点对应的 entity_id；根缩放限均匀 |
+| `scene_add_model` | 从素材库放置真实 glTF 模型（名字来自 `asset_list`，可带一层分类前缀如 `survival/barrel`），返回每个 mesh 节点对应的 entity_id；根缩放限均匀 |
 | `scene_remove_entity` | 删除实体（destructive） |
 | `scene_set_transform` | 位置 / 旋转（欧拉角度数）/ 缩放，缺省字段保持现值 |
 | `camera_set` | 位置 / look_at / fov / near |
@@ -46,7 +46,7 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 | `light_remove` | 按 index 删灯（destructive）；后续 index 前移，响应回显剩余灯全表 |
 | `material_set_param` | 实体材质因子（metallic / roughness 截取到 0-1）；共享材质就地修改并报告波及实体数 |
 | `material_set_texture` | 把素材库的一套真实贴图（名字来自 `asset_list`）绑定到实体材质，可选 UV tiling；按贴图套名缓存上传，同名贴图多个实体只传一次；共享材质同 `material_set_param` 语义 |
-| `asset_fetch` | 素材自采（M6.99）：按英文短语从 Poly Haven（CC0）现取一套贴图或一张 HDR 环境到素材库，成功后名字即可像库内素材一样喂给 `material_set_texture` / `environment_set`；无匹配时错误信息带近似候选名 |
+| `asset_fetch` | 素材自采（M6.99；模型见 MA）：按英文短语从 Poly Haven（CC0）现取一套贴图、一张 HDR 环境或一个 glTF 模型到素材库，成功后名字即可像库内素材一样喂给 `material_set_texture` / `environment_set` / `scene_add_model`；无匹配时错误信息带近似候选名 |
 | `scene_define_group` | 定义可复用组合体（≤32 成员），只存不落场景 |
 | `scene_instance_group` | 按显式变换或散布（count / area / seed，确定性）实例化组；实例×成员 ≤256，实例缩放限均匀 |
 | `environment_set` | 真实 HDR 文件（名字来自 `asset_list`）或程序化天空环境：预设 clear_day / sunset / overcast / night / studio + 逐字段覆盖，重烘焙 IBL；file 与预设/逐字段参数互斥；可撤销、随场景持久化 |
@@ -64,9 +64,11 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 
 **艺术指导**：场景助手的 system prompt 内嵌成稿流程（主题 → 主体 → 前中后景 → 相机 → 布光 → 材质 → 素材）、默认丰富度底线（地面 + 主体 + 支撑元素 + 匹配环境 + 分层布光 + 材质区分 + 贴图化地面/结构物）、按包围盒计算取景、三点布光配方、素材优先原则（真实模型/贴图优于程序化图元与纯色材质，调用 `material_set_texture` 时按贴图实际尺寸估算 tiling）与验证闭环（建完调 `scene_validate` 修完再回复）；shader 助手内嵌材质意图词表（拉丝金属 / 磨砂玻璃近似 / 混凝土等 → 因子组合与手法）与两助手职责边界（场景助手管摆放与 PBR 因子，shader 助手管因子表达不了的效果）。
 
-**素材库**（M6.98 PR-2）：`assetDir` 下 `textures/<name>/{albedo,normal,roughness,metalness,ao}.{png,jpg}`（albedo 必需，其余可选）、`models/<name>.glb`、`env/<name>.hdr` 三类真实素材，供 `asset_list` 枚举、`material_set_texture` / `scene_add_model` / `environment_set`（`file` 字段）消费；除仓库自带的 `DamagedHelmet.glb` 与 `studio_small_09_2k.hdr` 外均为本地拉取产物不入库，首次使用前跑 `./tools/fetch_assets.sh`（幂等、单项失败不中断，全部 CC0，来源见 `assets/README.md`）；`assetDir` 未配置时三个素材工具统一报不支持，与 `environment_set` 无 `applyEnvironment` 回调时的降级方式一致。
+**素材库**（M6.98 PR-2）：`assetDir` 下 `textures/<name>/{albedo,normal,roughness,metalness,ao}.{png,jpg}`（albedo 必需，其余可选）、`models/<name>.glb`（或多文件 glTF 布局，见 MA）、`env/<name>.hdr` 三类真实素材，供 `asset_list` 枚举、`material_set_texture` / `scene_add_model` / `environment_set`（`file` 字段）消费；除仓库自带的 `DamagedHelmet.glb` 与 `studio_small_09_2k.hdr` 外均为本地拉取产物不入库，首次使用前跑 `./tools/fetch_assets.sh`（幂等、单项失败不中断，全部 CC0，来源见 `assets/README.md`）；`assetDir` 未配置时三个素材工具统一报不支持，与 `environment_set` 无 `applyEnvironment` 回调时的降级方式一致。
 
 **素材自采**（M6.99）：素材库找不到合适的贴图/环境时，场景助手会调用 `asset_fetch` 现从 Poly Haven（无需鉴权、纯 CC0）按查询词找一个最匹配的素材下载进素材库，同名目录/文件已存在则直接判定已取无需联网；查无匹配时错误信息带最多 3 个近似候选名供改写查询词重试。下载在调用工具的主线程同步执行（与其余工具一致的执行模型）——一张 2k HDR（约 5-15MB）可能卡住画面数秒；异步工具是后续里程碑的事。
+
+**素材库 v2**（MA）：模型名可带一层分类前缀（`<category>/<name>`，`kumo::isPlainAssetPath`），解析顺序 `models/<name>.glb` → `models/<name>/<name>.gltf` → `models/<name>/scene.gltf` → 同三种布局套一层分类目录（`asset::resolveModelPath`），首个存在的文件生效；`asset_fetch` 的 `kind:"model"` 从 Poly Haven 下载多文件 glTF 包，整理为 `models/<id>/scene.gltf` + 相对路径贴图/`.bin`；`tools/fetch_assets.sh` 的 `fetch_pack` 拉取 Kenney 等分类风格化道具包（每分类一个 `pack.json`：`category`/`style`/`source`/`license`）。`viewer --thumbnails`（离屏、无窗口）为模型/贴图套/环境各渲染一张 256px 预览图到 `assets/.thumbnails/`，并（重）写 `assets/index.json`（含分类/风格/尺寸/三角形数等摘要）；`asset_list` 始终扫目录枚举实际存在的素材（目录才是真相源，避免索引滞后于 `asset_fetch`/手动拷贝新增的素材），`index.json` 存在时仅作元数据叠加（按 id 匹配补充分类/风格/尺寸等字段，磁盘上没有的条目不出现，索引没有的条目不带额外字段）；两者均为生成产物不入库，单个模型加载失败只记日志跳过，不中断整批。曾纳入的 Kenney Nature Kit 因上游 UniGLTF 导出缺陷（`cgltf` 全量拒绝解析）已整包移除，见 `assets/README.md`。
 
 Shader 工具（M6）：
 

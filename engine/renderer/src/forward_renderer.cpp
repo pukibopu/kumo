@@ -742,8 +742,11 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
     auto tonemapFrag = detail::loadStage(*device_, "tonemap.frag", shaderc::Stage::Fragment);
     auto shadowVert = detail::loadStage(*device_, "shadow.vert", shaderc::Stage::Vertex);
     auto shadowFrag = detail::loadStage(*device_, "shadow.frag", shaderc::Stage::Fragment);
+    auto clayFrag = detail::loadStage(*device_, "debug_clay.frag", shaderc::Stage::Fragment);
+    auto normalFrag = detail::loadStage(*device_, "debug_normal.frag", shaderc::Stage::Fragment);
+    auto depthFrag = detail::loadStage(*device_, "debug_depth.frag", shaderc::Stage::Fragment);
     if (!pbrVert || !pbrFrag || !skyboxVert || !skyboxFrag || !fullscreenVert || !tonemapFrag ||
-        !shadowVert || !shadowFrag) {
+        !shadowVert || !shadowFrag || !clayFrag || !normalFrag || !depthFrag) {
         return false;
     }
 
@@ -759,10 +762,21 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
     const detail::StageReflection shadowStages[] = {
         {&shadowVert->reflection, gpu::ShaderStage::Vertex},
         {&shadowFrag->reflection, gpu::ShaderStage::Fragment}};
+    const detail::StageReflection clayStages[] = {
+        {&pbrVert->reflection, gpu::ShaderStage::Vertex},
+        {&clayFrag->reflection, gpu::ShaderStage::Fragment}};
+    const detail::StageReflection normalStages[] = {
+        {&pbrVert->reflection, gpu::ShaderStage::Vertex},
+        {&normalFrag->reflection, gpu::ShaderStage::Fragment}};
+    const detail::StageReflection depthStages[] = {
+        {&pbrVert->reflection, gpu::ShaderStage::Vertex},
+        {&depthFrag->reflection, gpu::ShaderStage::Fragment}};
 
     const std::string signature =
         detail::layoutSignature(pbrStages) + "|" + detail::layoutSignature(skyboxStages) + "|" +
-        detail::layoutSignature(tonemapStages) + "|" + detail::layoutSignature(shadowStages);
+        detail::layoutSignature(tonemapStages) + "|" + detail::layoutSignature(shadowStages) + "|" +
+        detail::layoutSignature(clayStages) + "|" + detail::layoutSignature(normalStages) + "|" +
+        detail::layoutSignature(depthStages);
     // A hot reload (deriveLayouts == false) that changes the binding table
     // rebuilds every dependent resource below instead of rejecting the reload
     // (ADR 0043): existing bind groups reference the layouts being replaced.
@@ -825,13 +839,24 @@ bool ForwardRenderer::buildPipelines(bool deriveLayouts) {
         .cullMode = gpu::CullMode::Back,
         .sampleCount = 1,
     });
-    if (!pbr || !skybox || !tonemap || !shadow) {
+    // Built against the shared layouts, so the shared bind groups fit as-is.
+    gpu::Ptr<gpu::RenderPipeline> debug[3];
+    const gpu::Ptr<gpu::ShaderModule> debugFrags[3] = {clayFrag->module, normalFrag->module,
+                                                       depthFrag->module};
+    for (int i = 0; i < 3; ++i) {
+        debug[i] = device_->createRenderPipeline(pbrPipelineDesc(
+            pbrVert->module, debugFrags[i], {frameLayout_, materialLayout_, iblLayout_}, pushSize));
+    }
+    if (!pbr || !skybox || !tonemap || !shadow || !debug[0] || !debug[1] || !debug[2]) {
         return false;
     }
     pbrPipeline_ = std::move(pbr);
     skyboxPipeline_ = std::move(skybox);
     tonemapPipeline_ = std::move(tonemap);
     shadowPipeline_ = std::move(shadow);
+    for (int i = 0; i < 3; ++i) {
+        debugPipelines_[i] = std::move(debug[i]);
+    }
     pbrVertModule_ = pbrVert->module;
     pbrVertReflection_ = pbrVert->reflection;
     pbrFragReflection_ = pbrFrag->reflection;
@@ -1127,7 +1152,19 @@ void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene,
     data.shadowParams = shadowParams;
     const float secondsSinceInit =
         std::chrono::duration<float>(std::chrono::steady_clock::now() - initTime_).count();
-    data.timeParams = {secondsSinceInit, 0.0f, 0.0f, 0.0f};
+    // timeParams.y: the frame's max view-space depth, debug_depth.frag's span.
+    float maxViewDepth = 0.0f;
+    for (const DrawItem& drawItem : draws_) {
+        const math::Aabb world =
+            math::transformAabb(meshes_[drawItem.meshIndex].localAabb, drawItem.model);
+        for (int corner = 0; corner < 8; ++corner) {
+            const math::float4 p{(corner & 1) != 0 ? world.max.x : world.min.x,
+                                 (corner & 2) != 0 ? world.max.y : world.min.y,
+                                 (corner & 4) != 0 ? world.max.z : world.min.z, 1.0f};
+            maxViewDepth = std::max(maxViewDepth, -(data.view * p).z);
+        }
+    }
+    data.timeParams = {secondsSinceInit, maxViewDepth, 0.0f, 0.0f};
 
     device_->queue().writeBuffer(*frameUniforms_[frameSlot_], 0, &data, sizeof(data));
 }
@@ -1263,13 +1300,21 @@ void ForwardRenderer::render(gpu::CommandEncoder& encoder, const scene::Scene& s
     // Null only after a doubly-failed environment swap (logged there); skip
     // the geometry rather than dereference it — the frame clears to black.
     if (iblGroup_) {
-        scenePass.setPipeline(*pbrPipeline_);
+        // Debug views force one shared-layout pipeline for every draw; custom
+        // materials' set-1 groups have a private layout, so those draws bind
+        // the default material's group instead (the debug frags read none of it).
+        gpu::RenderPipeline* debugPipeline =
+            debugView_ != DebugView::None ? debugPipelines_[static_cast<int>(debugView_) - 1].get()
+                                          : nullptr;
+        scenePass.setPipeline(debugPipeline != nullptr ? *debugPipeline : *pbrPipeline_);
         scenePass.setBindGroup(0, *frameGroups_[frameSlot_]);
         scenePass.setBindGroup(2, *iblGroup_);
-        gpu::RenderPipeline* currentPipeline = pbrPipeline_.get();
+        gpu::RenderPipeline* currentPipeline =
+            debugPipeline != nullptr ? debugPipeline : pbrPipeline_.get();
         for (const DrawItem& drawItem : draws_) {
             gpu::RenderPipeline* pipeline =
-                usesCustomPipeline(drawItem)
+                debugPipeline != nullptr ? debugPipeline
+                : usesCustomPipeline(drawItem)
                     ? materialShaders_[drawItem.materialIndex]->pipeline.get()
                     : pbrPipeline_.get();
             if (pipeline != currentPipeline) {
@@ -1280,7 +1325,11 @@ void ForwardRenderer::render(gpu::CommandEncoder& encoder, const scene::Scene& s
                 scenePass.setBindGroup(2, *iblGroup_);
                 currentPipeline = pipeline;
             }
-            scenePass.setBindGroup(1, *materialGroups_[drawItem.materialIndex][frameSlot_]);
+            const std::size_t groupIndex =
+                debugPipeline != nullptr && materialShaders_[drawItem.materialIndex]
+                    ? defaultMaterialIndex_
+                    : drawItem.materialIndex;
+            scenePass.setBindGroup(1, *materialGroups_[groupIndex][frameSlot_]);
 
             const GpuMesh& mesh = meshes_[drawItem.meshIndex];
             PerDrawData draw;

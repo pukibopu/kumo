@@ -16,6 +16,7 @@
 #include <kumo/agent/scene_tools.h>
 #include <kumo/agent/shader_tools.h>
 #include <kumo/asset/asset.h>
+#include <kumo/asset/model_resolver.h>
 #include <kumo/asset/primitives.h>
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/asset/texture_set.h>
@@ -742,6 +743,9 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
         if (kind == "env") {
             return runtime->polyHavenClient_->fetchEnvironment(query, runtime->assetDir_ / "env");
         }
+        if (kind == "model") {
+            return runtime->polyHavenClient_->fetchModel(query, runtime->assetDir_ / "models");
+        }
         return std::unexpected(std::string("unknown asset kind: ") + std::string(kind));
     };
     agent::registerSceneTools(self->sceneToolRegistry_, sceneTools);
@@ -1368,15 +1372,22 @@ bool EngineRuntime::applyTextureSet(const std::string& name, std::uint32_t mater
 const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::string& name) {
     // Single choke point for both instantiateModel and loadScene's saved-entity
     // path (entity.model), so a hand-edited saved scene cannot escape
-    // assetDir_ either (same reasoning as applyEnvironmentSource above).
-    if (!isPlainAssetName(name)) {
+    // assetDir_ either (same reasoning as applyEnvironmentSource above). Models
+    // may carry one optional category component (MA milestone), unlike
+    // textures/env which stay single-component.
+    if (!isPlainAssetPath(name)) {
         logError("loadOrGetModel: invalid model name '{}'", name);
         return nullptr;
     }
     if (const auto it = modelCache_.find(name); it != modelCache_.end()) {
         return &it->second;
     }
-    const std::filesystem::path path = assetDir_ / "models" / (name + ".glb");
+    const std::filesystem::path path = asset::resolveModelPath(assetDir_ / "models", name);
+    if (path.empty()) {
+        logError("instantiateModel: no model layout found for '{}' under {}", name,
+                 (assetDir_ / "models").string());
+        return nullptr;
+    }
     auto sceneAsset = asset::loadGltf(path);
     if (!sceneAsset.has_value()) {
         logError("instantiateModel: failed to load {}: {}", path.string(), sceneAsset.error());

@@ -12,8 +12,8 @@ A native Metal PBR renderer for macOS / iPad with an LLM-powered scene and shade
 - Single-source GLSL → SPIR-V / MSL cross-compilation with runtime hot reload
 - Scene assistant: add/remove entities, tweak lights, camera, materials and the sky environment in natural language, with built-in composition guidance, scene validation and screenshot self-review
 - Shader assistant: generate material shaders from natural language, self-correcting on compile errors, hot-reloaded live
-- Real asset library: textures, glTF models and HDRI environments (`./tools/fetch_assets.sh` fetches a CC0 starter pack), preferred by the assistants over procedural geometry
-- Self-provisioning: the assistant fetches CC0 assets from Poly Haven on demand when the library lacks a fitting texture or environment
+- Real asset library: textures, glTF models (including categorized prop packs) and HDRI environments (`./tools/fetch_assets.sh` fetches a CC0 starter pack), preferred by the assistants over procedural geometry; `viewer --thumbnails` builds preview images and an index
+- Self-provisioning: the assistant fetches CC0 textures, environments and models from Poly Haven on demand when the library lacks a fit
 
 See [docs/milestones.md](docs/milestones.md) for progress.
 

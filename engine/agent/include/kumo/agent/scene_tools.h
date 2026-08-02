@@ -67,9 +67,12 @@ struct TextureSetIndices {
 // asset_fetch.h that owns PolyHavenClient, because SceneToolContext::fetchAsset
 // below needs it as a complete type.
 struct FetchedAsset {
-    std::string name;              // asset id, also the on-disk texture-set/env name
-    std::vector<std::string> maps; // texture-set map slots present; empty for env kind
-    bool alreadyPresent = false;   // true when the target already existed; no network I/O ran
+    std::string name; // asset id, also the on-disk texture-set/model-dir/env name
+    // texture kind: map slots present. model kind: relative paths written
+    // ("scene.gltf", "textures/...", ...), so its size is the file count.
+    // env kind: always empty.
+    std::vector<std::string> maps;
+    bool alreadyPresent = false; // true when the target already existed; no network I/O ran
     std::vector<std::string> alternatives; // up to 3 runner-up ids from the query match
 };
 
@@ -129,14 +132,15 @@ struct SceneToolContext {
 void registerSceneListTool(ToolRegistry& registry, SceneToolContext context);
 
 // Registers the seventeen scene tools (ADR 0028, M6.9; asset tools added
-// M6.98 PR-2; asset_fetch added M6.99): scene_list plus the mutating/
-// inspection tools (scene_add_entity, scene_add_entities, scene_remove_entity,
-// scene_set_transform, camera_set, light_set, light_remove,
-// material_set_param, scene_define_group, scene_instance_group,
-// environment_set and scene_validate) plus the asset tools (asset_list,
-// material_set_texture, scene_add_model, asset_fetch). The context is copied
-// into the handlers; the scene and renderer it points to must outlive the
-// registry.
+// M6.98 PR-2; asset_fetch added M6.99; asset_fetch's model kind, scene_add_model's
+// category paths and asset_list's index.json-backed v2 output added in the MA
+// milestone): scene_list plus the mutating/ inspection tools (scene_add_entity,
+// scene_add_entities, scene_remove_entity, scene_set_transform, camera_set,
+// light_set, light_remove, material_set_param, scene_define_group,
+// scene_instance_group, environment_set and scene_validate) plus the asset
+// tools (asset_list, material_set_texture, scene_add_model, asset_fetch). The
+// context is copied into the handlers; the scene and renderer it points to
+// must outlive the registry.
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context);
 
 } // namespace kumo::agent

@@ -1,6 +1,9 @@
 #include <kumo/agent/scene_tools.h>
 
+#include "asset_index.h"
+
 #include <kumo/agent/entity_id.h>
+#include <kumo/asset/model_resolver.h>
 #include <kumo/asset/primitives.h>
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/asset/texture_set.h>
@@ -1060,6 +1063,64 @@ std::string textureSetNameList(const std::filesystem::path& assetDir) {
     return out;
 }
 
+// asset_list v2 (MA milestone/F1 rework): the disk scan below is the source
+// of truth for what assets EXIST (index.json can go stale the moment
+// asset_fetch or a manual copy adds something after the last `viewer
+// --thumbnails` run); index.json, when it loads, is merged in purely as an
+// optional metadata overlay keyed by id, per kind. An index entry with no
+// matching disk id is silently dropped (it no longer exists); a disk entry
+// with no matching index id just carries no extra metadata. `maps` is
+// deliberately NOT taken from the index even for textures -- collectTextureSets
+// above is already the authoritative, freshly-scanned map list.
+std::unordered_map<std::string, const AssetIndexEntry*> indexById(const AssetIndex& index,
+                                                                  AssetIndexKind kind) {
+    std::unordered_map<std::string, const AssetIndexEntry*> out;
+    for (const AssetIndexEntry& entry : index.entries) {
+        if (entry.kind == kind) {
+            out.emplace(entry.id, &entry);
+        }
+    }
+    return out;
+}
+
+// Only non-empty/present fields are added, so the output stays compact (no
+// captions or embeddings here -- that's search's job later, per MR). `name`
+// is deliberately NOT copied here: it is the index's human-readable display
+// name, exposed as `display_name` alongside the disk-derived, tool-callable
+// `name` this function's caller already set (F3) rather than replacing it.
+void mergeIndexMetadata(json& j, const AssetIndexEntry* entry) {
+    if (entry == nullptr) {
+        return;
+    }
+    if (!entry->name.empty()) {
+        j["display_name"] = entry->name;
+    }
+    if (!entry->category.empty()) {
+        j["category"] = entry->category;
+    }
+    if (!entry->style.empty()) {
+        j["style"] = entry->style;
+    }
+    if (!entry->license.empty()) {
+        j["license"] = entry->license;
+    }
+    if (!entry->source.empty()) {
+        j["source"] = entry->source;
+    }
+    if (entry->resolution.has_value()) {
+        j["resolution"] = *entry->resolution;
+    }
+    if (entry->dimensions.has_value()) {
+        j["dimensions"] = numberArray(*entry->dimensions);
+    }
+    if (entry->triangles.has_value()) {
+        j["triangles"] = *entry->triangles;
+    }
+    if (entry->instancingOk.has_value()) {
+        j["instancing_ok"] = *entry->instancingOk;
+    }
+}
+
 // Read-only: lists what's under assetDir so the model can pick real assets
 // over primitives. context.assetDir empty means no asset library is
 // configured at all (mirrors environment_set's unsupported style); a
@@ -1070,21 +1131,50 @@ std::string assetList(const SceneToolContext& context) {
     if (context.assetDir.empty()) {
         return errorJson("asset directory not configured");
     }
+
+    const std::optional<AssetIndex> index = loadAssetIndex(context.assetDir);
+    const std::unordered_map<std::string, const AssetIndexEntry*> textureIndex =
+        index ? indexById(*index, AssetIndexKind::Texture)
+              : std::unordered_map<std::string, const AssetIndexEntry*>{};
+    const std::unordered_map<std::string, const AssetIndexEntry*> modelIndex =
+        index ? indexById(*index, AssetIndexKind::Model)
+              : std::unordered_map<std::string, const AssetIndexEntry*>{};
+    const std::unordered_map<std::string, const AssetIndexEntry*> envIndex =
+        index ? indexById(*index, AssetIndexKind::Environment)
+              : std::unordered_map<std::string, const AssetIndexEntry*>{};
+
     const std::vector<TextureSetEntry> textureSets = collectTextureSets(context.assetDir);
     json textures = json::array();
     for (const TextureSetEntry& entry : textureSets) {
-        textures.push_back({{"name", entry.name}, {"maps", entry.maps}});
+        json j{{"name", entry.name}, {"maps", entry.maps}};
+        const auto it = textureIndex.find(entry.name);
+        mergeIndexMetadata(j, it != textureIndex.end() ? it->second : nullptr);
+        textures.push_back(std::move(j));
     }
-    const std::vector<std::string> models = collectStems(context.assetDir / "models", ".glb");
-    const std::vector<std::string> env = collectStems(context.assetDir / "env", ".hdr");
 
-    json out{{"status", "ok"}, {"textures", std::move(textures)}, {"models", models}};
-    json envFiles = json::array();
-    for (const std::string& name : env) {
-        envFiles.push_back(name + ".hdr");
+    const std::vector<std::string> modelIds = asset::listModelIds(context.assetDir / "models");
+    json models = json::array();
+    for (const std::string& id : modelIds) {
+        json j{{"name", id}};
+        const auto it = modelIndex.find(id);
+        mergeIndexMetadata(j, it != modelIndex.end() ? it->second : nullptr);
+        models.push_back(std::move(j));
     }
-    out["env"] = std::move(envFiles);
-    if (textureSets.empty() && models.empty() && env.empty()) {
+
+    const std::vector<std::string> envIds = collectStems(context.assetDir / "env", ".hdr");
+    json envs = json::array();
+    for (const std::string& id : envIds) {
+        json j{{"name", id + ".hdr"}};
+        const auto it = envIndex.find(id);
+        mergeIndexMetadata(j, it != envIndex.end() ? it->second : nullptr);
+        envs.push_back(std::move(j));
+    }
+
+    json out{{"status", "ok"},
+             {"textures", std::move(textures)},
+             {"models", std::move(models)},
+             {"env", std::move(envs)}};
+    if (textureSets.empty() && modelIds.empty() && envIds.empty()) {
         out["note"] =
             "no assets found under " + context.assetDir.string() + "; run tools/fetch_assets.sh";
     }
@@ -1254,8 +1344,8 @@ std::string assetFetch(const SceneToolContext& context, const json& args) {
     if (!readString(args, "kind", kind, error)) {
         return errorJson(error);
     }
-    if (kind != "texture" && kind != "env") {
-        return errorJson("kind must be one of: texture, env");
+    if (kind != "texture" && kind != "env" && kind != "model") {
+        return errorJson("kind must be one of: texture, env, model");
     }
     const auto queryIt = args.find("query");
     if (queryIt == args.end() || !queryIt->is_string()) {
@@ -1270,11 +1360,16 @@ std::string assetFetch(const SceneToolContext& context, const json& args) {
     if (!result.has_value()) {
         return errorJson(result.error());
     }
-    json out{{"status", "ok"},
-             {"kind", kind},
-             {"name", result->name},
-             {"maps", result->maps},
-             {"already_present", result->alreadyPresent}};
+    json out{{"status", "ok"}, {"kind", kind}, {"name", result->name}};
+    // model kind's FetchedAsset::maps holds the downloaded files' relative
+    // paths (scene.gltf, textures/..., ...); the tool reports just the count,
+    // per this milestone's result shape, rather than the full path list.
+    if (kind == "model") {
+        out["files"] = result->maps.size();
+    } else {
+        out["maps"] = result->maps;
+    }
+    out["already_present"] = result->alreadyPresent;
     if (!result->alternatives.empty()) {
         out["alternatives"] = result->alternatives;
     }
@@ -1293,8 +1388,9 @@ std::string sceneAddModel(const SceneToolContext& context, const json& args) {
         return errorJson("model (string) is required");
     }
     const std::string model = modelIt->get<std::string>();
-    if (!isPlainAssetName(model)) {
-        return errorJson("asset names must be plain names from asset_list, not paths");
+    if (!isPlainAssetPath(model)) {
+        return errorJson("model names must be plain names from asset_list, optionally with one "
+                         "category prefix (e.g. props/crate), not arbitrary paths");
     }
 
     if (!args.contains("position")) {
@@ -1818,7 +1914,7 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         "returns its entity_ids, one per mesh node. Prefer this over primitives for organic or "
         "detailed things (trees, props, characters) when a fitting model exists.",
         R"({"type":"object","properties":{
-"model":{"type":"string","description":"Model name from asset_list"},
+"model":{"type":"string","description":"Model name from asset_list, optionally with one category prefix, e.g. props/crate"},
 "name":{"type":"string","description":"Optional entity name prefix; default keeps the model's own node names"},
 "position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"World position [x,y,z]"},
 "rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Euler XYZ rotation in degrees"},
@@ -1901,14 +1997,14 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         });
 
     add("asset_fetch",
-        "Download a CC0 texture set or HDR environment from Poly Haven into the asset library "
-        "when asset_list has nothing that fits; then use the returned name like any library "
-        "asset (material_set_texture / environment_set). Runs synchronously and can take several "
-        "seconds, longer for env. On a near-miss the error lists close alternative names to retry "
-        "with.",
+        "Download a CC0 texture set, HDR environment or glTF model from Poly Haven into the asset "
+        "library when asset_list has nothing that fits; then use the returned name like any "
+        "library asset (material_set_texture / environment_set / scene_add_model). Runs "
+        "synchronously and can take several seconds, longer for env and model. On a near-miss the "
+        "error lists close alternative names to retry with.",
         R"({"type":"object","properties":{
-"kind":{"type":"string","enum":["texture","env"]},
-"query":{"type":"string","minLength":1,"maxLength":64,"description":"Short English search term, e.g. asphalt, snow, night city"}},
+"kind":{"type":"string","enum":["texture","env","model"]},
+"query":{"type":"string","minLength":1,"maxLength":64,"description":"Short English search term, e.g. asphalt, snow, night city, wooden barrel"}},
 "required":["kind","query"]})",
         false, [](const SceneToolContext& ctx, const json& args) { return assetFetch(ctx, args); });
 

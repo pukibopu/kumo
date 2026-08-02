@@ -1,0 +1,27 @@
+{
+  "Barrel_01": {
+    "name": "Barrel 01",
+    "categories": [
+      "props",
+      "container"
+    ],
+    "tags": [
+      "barrel",
+      "wooden",
+      "container",
+      "storage"
+    ]
+  },
+  "Camera_01": {
+    "name": "Camera 01",
+    "categories": [
+      "props",
+      "electronics"
+    ],
+    "tags": [
+      "camera",
+      "vintage",
+      "photography"
+    ]
+  }
+}

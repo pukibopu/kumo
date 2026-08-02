@@ -9,6 +9,11 @@
 int runApp(int maxFrames, const std::filesystem::path& modelPath,
            const std::filesystem::path& envPath, const std::filesystem::path& assetDir,
            bool demoPrimitives, bool offline, bool confirmDestructive, bool mcp);
+// Headless batch mode (MA milestone): renders a thumbnail PNG per model/
+// texture-set/env under `assetDir` and (re)writes assetDir/index.json; no
+// GLFW window. `force` re-renders every thumbnail even when its PNG is newer
+// than the source asset. Returns the process exit code.
+int runThumbnails(const std::filesystem::path& assetDir, bool force);
 #endif
 
 int main(int argc, char** argv) {
@@ -17,6 +22,8 @@ int main(int argc, char** argv) {
     bool offline = false;
     bool confirmDestructive = false;
     bool mcp = false;
+    bool thumbnails = false;
+    bool force = false;
     std::filesystem::path modelPath =
         std::filesystem::path(KUMO_ASSET_DIR) / "models" / "DamagedHelmet.glb";
     std::filesystem::path envPath =
@@ -34,6 +41,10 @@ int main(int argc, char** argv) {
             confirmDestructive = true;
         } else if (arg == "--mcp") {
             mcp = true;
+        } else if (arg == "--thumbnails") {
+            thumbnails = true;
+        } else if (arg == "--force") {
+            force = true;
         } else if (arg == "--env") {
             if (i + 1 >= argc) {
                 kumo::logError("--env requires a path to an .hdr file");
@@ -45,7 +56,8 @@ int main(int argc, char** argv) {
         } else {
             kumo::logError(
                 "unknown option '{}' (usage: viewer [model.glb] [--env path.hdr] "
-                "[--frames N] [--demo-primitives] [--offline] [--confirm-destructive] [--mcp])",
+                "[--frames N] [--demo-primitives] [--offline] [--confirm-destructive] [--mcp] "
+                "[--thumbnails [--force]])",
                 arg);
             return 1;
         }
@@ -59,6 +71,9 @@ int main(int argc, char** argv) {
     kumo::logInfo("kumo viewer {}", KUMO_VERSION_STRING);
 
 #if defined(KUMO_HAS_RUNAPP)
+    if (thumbnails) {
+        return runThumbnails(KUMO_ASSET_DIR, force);
+    }
     return runApp(maxFrames, modelPath, envPath, KUMO_ASSET_DIR, demoPrimitives, offline,
                   confirmDestructive, mcp);
 #else
@@ -67,6 +82,8 @@ int main(int argc, char** argv) {
     (void)offline;
     (void)confirmDestructive;
     (void)mcp;
+    (void)thumbnails;
+    (void)force;
     kumo::logInfo("no rendering backend for this platform yet");
     return 0;
 #endif

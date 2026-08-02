@@ -19,7 +19,7 @@
 | v0.10.6 | M6.97 | 视觉闭环：场景助手截图自评（双协议图片回灌） | 完成 |
 | v0.10.8 | M6.98 | 素材管线：真贴图 + glTF 模型库 + 真 HDRI 环境 | 完成 |
 | v0.10.9 | M6.99 | 素材自采：asset_fetch 按需下载 CC0 素材（Poly Haven） | 完成 |
-| v0.11.0 | MA | 素材库 v2：GLB 双源 + 多文件 glTF + 索引/缩略图 | — |
+| v0.11.0 | MA | 素材库 v2：GLB 双源 + 多文件 glTF + 索引/缩略图 | 完成 |
 | v0.11.1 | MB | 反馈闭环 v2：多视图审图 + 参考图上传 + per-agent 模型配置 | — |
 | v0.11.2 | MD | Shader 表面函数：surface_write + 参数滑杆 + recipe 库 | — |
 | v0.11.3 | MR | 专用检索：asset_search + material_recipe_search | — |

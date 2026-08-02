@@ -21,6 +21,23 @@
 #     export/repack it as glTF-Binary (.glb) yourself, and drop it in
 #     assets/models/<name>.glb -- instantiateModel needs nothing more.
 #   - env: Poly Haven 2k HDRIs (CC0), direct single-file .hdr downloads.
+#   - model packs (MA milestone, fetch_pack): categorized stylized props from
+#     Kenney (CC0), zips of single-file .glb models, flattened into
+#     assets/models/<category>/<name>.glb with a pack.json manifest per
+#     category. URLs verified with curl before shipping (see the fetch_pack
+#     calls below); Kenney's own zip URLs embed a content hash that changes
+#     when a pack is updated, so a 404 here means the pack was re-uploaded --
+#     re-verify at https://kenney.nl/assets/<slug> and update the URL.
+#     Quaternius (also CC0, also stylized) was evaluated too but its packs are
+#     distributed as unversioned Google Drive folder links (e.g.
+#     https://drive.google.com/drive/folders/1-Kl0L_Jg8awbh0S5T-z3zxh4mVlnxTpa
+#     for "Ultimate Nature"), which cannot be fetched with a stable curl
+#     command (no direct file URL, and Drive's folder API requires
+#     interactive auth) -- download manually from quaternius.com/packs and
+#     place the .glb files under assets/models/<category>/ with a hand-written
+#     pack.json ({"category":...,"style":"stylized","source":"Quaternius
+#     (<pack name>)","license":"CC0"}) alongside them if you want them
+#     indexed by `viewer --thumbnails`.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,6 +130,61 @@ fetch_model() {
     FETCHED=$((FETCHED + 1))
 }
 
+# A categorized pack of single-file .glb models (Kenney's own "GLTF/GLB
+# format" export): downloads `url` and, for every directory anywhere in the
+# zip that directly holds at least one *.glb (Kenney's own subfolder naming
+# for this varies between packs -- "GLTF format" vs "GLB format" -- so this
+# searches recursively instead of hardcoding one), copies that directory's
+# WHOLE contents -- not just the *.glb files -- into assets/models/<category>/.
+# This matters: some packs' glb export references a sibling file by relative
+# uri that the exporter did not embed (Kenney survival-kit's glb files all
+# point at "Textures/colormap.png" sitting next to them in the same "GLB
+# format" folder); flattening just the *.glb files would silently drop that
+# dependency and break image loading. Also writes a pack.json manifest
+# asset_index/`viewer --thumbnails` read for category/style/source/license.
+# Idempotent: a category directory that already has a pack.json is skipped.
+fetch_pack() {
+    local category="$1" url="$2" style="$3" source="$4" license="$5"
+    local dest="$MODELS_DIR/$category"
+    if [ -f "$dest/pack.json" ]; then
+        log "models/$category already present, skipping"
+        SKIPPED=$((SKIPPED + 1))
+        return
+    fi
+
+    local tmp
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL "$url" -o "$tmp/pack.zip"; then
+        fail "models/$category: download failed ($url)"
+        rm -rf "$tmp"
+        return
+    fi
+    if ! unzip -q -o "$tmp/pack.zip" -d "$tmp/extracted"; then
+        fail "models/$category: unzip failed"
+        rm -rf "$tmp"
+        return
+    fi
+
+    mkdir -p "$dest"
+    while IFS= read -r glbDir; do
+        [ -n "$glbDir" ] || continue
+        cp -R "$glbDir"/. "$dest"/
+    done < <(find "$tmp/extracted" -iname "*.glb" -exec dirname {} \; | sort -u)
+    rm -rf "$tmp"
+
+    local count
+    count="$(find "$dest" -iname "*.glb" | wc -l | tr -d ' ')"
+    if [ "$count" -eq 0 ]; then
+        fail "models/$category: no .glb files found in $url"
+        rm -rf "$dest"
+        return
+    fi
+    printf '{"category":"%s","style":"%s","source":"%s","license":"%s"}\n' \
+        "$category" "$style" "$source" "$license" > "$dest/pack.json"
+    log "models/$category: $count models fetched from $source"
+    FETCHED=$((FETCHED + count))
+}
+
 fetch_env() {
     local name="$1" polyhaven_slug="$2"
     local dest="$ENV_DIR/$name.hdr"
@@ -159,6 +231,15 @@ fetch_env sunset venice_sunset
 fetch_env night  dikhololo_night
 fetch_env city_night  potsdamer_platz
 fetch_env city_night2 shanghai_bund
+
+# Model packs (MA milestone): Kenney CC0 kits, single-file .glb per model
+# (URLs verified with `curl -sI`; see the header comment above for why
+# Quaternius is manual-only). Nature Kit was evaluated and REMOVED: its glbs
+# come from a broken UniGLTF export (the real scene root is missing from
+# scenes[0].nodes, cgltf rejects every file as invalid_gltf), so shipping it
+# only floods asset_list with unusable entries. Revisit if Kenney re-exports.
+fetch_pack survival "https://kenney.nl/media/pages/assets/survival-kit/4065a8185b-1712149243/kenney_survival-kit.zip" \
+    stylized "Kenney (Survival Kit)" CC0
 
 log "done: $FETCHED fetched, $SKIPPED skipped, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

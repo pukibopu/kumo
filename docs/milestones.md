@@ -21,7 +21,7 @@
 | v0.10.9 | M6.99 | 素材自采：asset_fetch 按需下载 CC0 素材（Poly Haven） | 完成 |
 | v0.11.0 | MA | 素材库 v2：GLB 双源 + 多文件 glTF + 索引/缩略图 | 完成 |
 | v0.11.1 | MP | 摆放约束 v1：贴地/避撞放置 + 碰撞感知 scatter + 重叠验证升级 | 完成 |
-| v0.11.2 | MB | 反馈闭环 v2：多视图审图 + 参考图上传 + per-agent 模型配置 | — |
+| v0.11.2 | MB | 反馈闭环 v2：多视图审图 + 参考图上传 + per-agent 模型配置 | 完成 |
 | v0.11.3 | MD | Shader 表面函数：surface_write + 参数滑杆 + recipe 库 | — |
 | v0.11.4 | MR | 专用检索：asset_search + material_recipe_search | — |
 | v0.11.5 | MC | 导演流水线：SceneSpec + 编排 + 视觉 Critic | — |

@@ -18,9 +18,16 @@
 | v0.10.5 | M6.95 | 场景质量：程序化天空环境 + 场景验证 + 双助手艺术指导 | 完成 |
 | v0.10.6 | M6.97 | 视觉闭环：场景助手截图自评（双协议图片回灌） | 完成 |
 | v0.10.8 | M6.98 | 素材管线：真贴图 + glTF 模型库 + 真 HDRI 环境 | 完成 |
-| v0.10.9 | M6.99 | 素材自采：asset_fetch 按需下载 CC0 素材（Poly Haven） | — |
-| v0.11.0 | M7 | iPad 版 | — |
+| v0.10.9 | M6.99 | 素材自采：asset_fetch 按需下载 CC0 素材（Poly Haven） | 完成 |
+| v0.11.0 | MA | 素材库 v2：GLB 双源 + 多文件 glTF + 索引/缩略图 | — |
+| v0.11.1 | MB | 反馈闭环 v2：多视图审图 + 参考图上传 + per-agent 模型配置 | — |
+| v0.11.2 | MD | Shader 表面函数：surface_write + 参数滑杆 + recipe 库 | — |
+| v0.11.3 | MR | 专用检索：asset_search + material_recipe_search | — |
+| v0.11.4 | MC | 导演流水线：SceneSpec + 编排 + 视觉 Critic | — |
+| v0.11.5 | ME | 渲染扩容：曝光/白平衡 + spot light + 雾 + bloom | — |
 
 ¹ Vulkan 后端随 M4 移除，项目聚焦 Metal；完整双后端实现保留在 v0.4.0。
 
-² M4 之后路线以助手能力为先：阴影（M4.5）后置到产品界面之后、iPad 之前。
+² M4 之后路线以助手能力为先：阴影（M4.5）后置到产品界面之后。
+
+³ M7 iPad 与 AO/alpha/transmission/clearcoat/顶点位移、参数化构造器（原 M7.0）、MobileCLIP 图像检索一并列入 roadmap，v0.11 冲刺完成后再排期。

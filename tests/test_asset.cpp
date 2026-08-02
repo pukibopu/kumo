@@ -1,15 +1,38 @@
 #include <doctest/doctest.h>
 
 #include <kumo/asset/asset.h>
+#include <kumo/asset/model_resolver.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 using namespace kumo;
+
+namespace {
+
+// Removed on destruction; each test gets a fresh, non-colliding directory
+// (mirrors test_agent_scene_tools.cpp's TempDir, duplicated locally since it
+// is private to that translation unit).
+struct TempDir {
+    std::filesystem::path path;
+    explicit TempDir(const char* name) : path(std::filesystem::temp_directory_path() / name) {
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() { std::filesystem::remove_all(path); }
+};
+
+void touch(const std::filesystem::path& path) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream(path).put('x');
+}
+
+} // namespace
 
 TEST_CASE("loadGltf loads DamagedHelmet.glb") {
     std::filesystem::path path =
@@ -149,4 +172,104 @@ TEST_CASE("loaders report missing files with the path") {
     auto hdr = asset::loadHdr("/no/such/image.hdr");
     REQUIRE_FALSE(hdr.has_value());
     CHECK(hdr.error().find("/no/such/image.hdr") != std::string::npos);
+}
+
+// --- resolveModelPath / listModelIds (MA milestone) -------------------------
+
+TEST_CASE("resolveModelPath prefers <name>.glb over the multi-file layouts") {
+    TempDir dir("kumo_model_resolver_glb");
+    touch(dir.path / "Avocado.glb");
+    touch(dir.path / "Avocado" / "scene.gltf"); // must lose to the .glb hit
+
+    const std::filesystem::path resolved = asset::resolveModelPath(dir.path, "Avocado");
+    CHECK(resolved == dir.path / "Avocado.glb");
+}
+
+TEST_CASE("resolveModelPath falls back to <name>/<name>.gltf then <name>/scene.gltf") {
+    TempDir dir("kumo_model_resolver_selfnamed");
+    touch(dir.path / "barrel" / "barrel.gltf");
+    CHECK(asset::resolveModelPath(dir.path, "barrel") == dir.path / "barrel" / "barrel.gltf");
+
+    TempDir dir2("kumo_model_resolver_scenegltf");
+    touch(dir2.path / "barrel" / "scene.gltf");
+    CHECK(asset::resolveModelPath(dir2.path, "barrel") == dir2.path / "barrel" / "scene.gltf");
+}
+
+TEST_CASE("resolveModelPath resolves a category/name path through all three category layouts") {
+    TempDir glbDir("kumo_model_resolver_cat_glb");
+    touch(glbDir.path / "nature" / "bridge_stone.glb");
+    CHECK(asset::resolveModelPath(glbDir.path, "nature/bridge_stone") ==
+          glbDir.path / "nature" / "bridge_stone.glb");
+
+    TempDir selfDir("kumo_model_resolver_cat_selfnamed");
+    touch(selfDir.path / "nature" / "bridge_stone" / "bridge_stone.gltf");
+    CHECK(asset::resolveModelPath(selfDir.path, "nature/bridge_stone") ==
+          selfDir.path / "nature" / "bridge_stone" / "bridge_stone.gltf");
+
+    TempDir sceneDir("kumo_model_resolver_cat_scenegltf");
+    touch(sceneDir.path / "nature" / "bridge_stone" / "scene.gltf");
+    CHECK(asset::resolveModelPath(sceneDir.path, "nature/bridge_stone") ==
+          sceneDir.path / "nature" / "bridge_stone" / "scene.gltf");
+}
+
+TEST_CASE("resolveModelPath returns an empty path when nothing on disk matches") {
+    TempDir dir("kumo_model_resolver_miss");
+    CHECK(asset::resolveModelPath(dir.path, "nothing_here").empty());
+    CHECK(asset::resolveModelPath(dir.path, "props/nothing_here").empty());
+    // A non-existent modelsDir is just another kind of miss, not an error.
+    CHECK(asset::resolveModelPath(dir.path / "does_not_exist", "Avocado").empty());
+}
+
+TEST_CASE("resolveModelPath keeps the documented priority for categorized models") {
+    // Both multi-file layouts present at once: the self-named .gltf must win
+    // over scene.gltf, exactly as in the uncategorized case.
+    TempDir dir("kumo_model_resolver_cat_priority");
+    touch(dir.path / "nature" / "bridge_stone" / "bridge_stone.gltf");
+    touch(dir.path / "nature" / "bridge_stone" / "scene.gltf");
+    CHECK(asset::resolveModelPath(dir.path, "nature/bridge_stone") ==
+          dir.path / "nature" / "bridge_stone" / "bridge_stone.gltf");
+
+    // The garbage candidate a naive string append would produce must never
+    // resolve, even when a file actually sits at that path.
+    TempDir garbage("kumo_model_resolver_cat_garbage");
+    touch(garbage.path / "nature" / "bridge_stone" / "nature" / "bridge_stone.gltf");
+    CHECK(asset::resolveModelPath(garbage.path, "nature/bridge_stone").empty());
+}
+
+TEST_CASE("resolveModelPath rejects names with more than one category level") {
+    TempDir dir("kumo_model_resolver_deep");
+    touch(dir.path / "a" / "b" / "c.glb");
+    CHECK(asset::resolveModelPath(dir.path, "a/b/c").empty());
+}
+
+TEST_CASE("listModelIds reports an id existing in several layouts exactly once") {
+    TempDir dir("kumo_model_resolver_dedup");
+    touch(dir.path / "Avocado.glb");
+    touch(dir.path / "Avocado" / "scene.gltf");
+    touch(dir.path / "props" / "crate.glb");
+    touch(dir.path / "props" / "crate" / "crate.gltf");
+
+    const std::vector<std::string> ids = asset::listModelIds(dir.path);
+    const std::vector<std::string> expected{"Avocado", "props/crate"};
+    CHECK(ids == expected);
+}
+
+TEST_CASE("listModelIds enumerates flat glb, self-named multi-file and category models, sorted") {
+    TempDir dir("kumo_model_resolver_list");
+    touch(dir.path / "Avocado.glb");
+    touch(dir.path / "dikhololo_barrel" /
+          "scene.gltf");                             // uncategorized multi-file (fetchModel-style)
+    touch(dir.path / "nature" / "bridge_stone.glb"); // category flat glb (fetch_pack-style)
+    touch(dir.path / "nature" / "cactus.glb");
+    touch(dir.path / "nature" / "pack.json");           // manifest file, not a model
+    touch(dir.path / "props" / "crate" / "crate.gltf"); // category self-named multi-file
+
+    const std::vector<std::string> ids = asset::listModelIds(dir.path);
+    const std::vector<std::string> expected{"Avocado", "dikhololo_barrel", "nature/bridge_stone",
+                                            "nature/cactus", "props/crate"};
+    CHECK(ids == expected);
+}
+
+TEST_CASE("listModelIds on a missing modelsDir is empty, not an error") {
+    CHECK(asset::listModelIds("/no/such/models/dir").empty());
 }

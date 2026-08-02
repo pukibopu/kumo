@@ -36,9 +36,9 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 |---|---|
 | `scene_list` | 全场景：实体（id / 变换 / world AABB / 材质 / 图元溯源）+ 相机 + 灯 + 已定义组名 |
 | `asset_list` | 只读列出素材库（M6.98 PR-2；v2 见 MA）：`textures/` 下每套贴图的名字与现有贴图种类、模型名（含分类前缀）、`env/*.hdr` 环境文件；assetDir 未配置则报不支持 |
-| `scene_add_entity` | 程序化图元 sphere / cube / plane / cylinder / cone / torus / capsule，返回 entity_id；缺省材质为非金属灰（metallic 0 / roughness 0.6） |
+| `scene_add_entity` | 程序化图元 sphere / cube / plane / cylinder / cone / torus / capsule，返回 entity_id 与 world AABB；缺省材质为非金属灰（metallic 0 / roughness 0.6）；摆放参数见下（MP） |
 | `scene_add_entities` | 批量创建（单次 ≤128），先全量校验后落地，中途 GPU 失败整体回滚 |
-| `scene_add_model` | 从素材库放置真实 glTF 模型（名字来自 `asset_list`，可带一层分类前缀如 `survival/barrel`），返回每个 mesh 节点对应的 entity_id；根缩放限均匀 |
+| `scene_add_model` | 从素材库放置真实 glTF 模型（名字来自 `asset_list`，可带一层分类前缀如 `survival/barrel`），返回每个 mesh 节点对应的 entity_id 与聚合 world AABB；根缩放限均匀；摆放参数见下（MP） |
 | `scene_remove_entity` | 删除实体（destructive） |
 | `scene_set_transform` | 位置 / 旋转（欧拉角度数）/ 缩放，缺省字段保持现值 |
 | `camera_set` | 位置 / look_at / fov / near |
@@ -48,9 +48,11 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 | `material_set_texture` | 把素材库的一套真实贴图（名字来自 `asset_list`）绑定到实体材质，可选 UV tiling；按贴图套名缓存上传，同名贴图多个实体只传一次；共享材质同 `material_set_param` 语义 |
 | `asset_fetch` | 素材自采（M6.99；模型见 MA）：按英文短语从 Poly Haven（CC0）现取一套贴图、一张 HDR 环境或一个 glTF 模型到素材库，成功后名字即可像库内素材一样喂给 `material_set_texture` / `environment_set` / `scene_add_model`；无匹配时错误信息带近似候选名 |
 | `scene_define_group` | 定义可复用组合体（≤32 成员），只存不落场景 |
-| `scene_instance_group` | 按显式变换或散布（count / area / seed，确定性）实例化组；实例×成员 ≤256，实例缩放限均匀 |
+| `scene_instance_group` | 按显式变换或散布（count / area / seed，确定性）实例化组；实例×成员 ≤256，实例缩放限均匀；scatter 支持 `min_spacing`（实例 XZ 边距）、`avoid_existing`（避开现有实体）、`max_attempts`（采样预算，缺省 max(10×count, 64)），放不满则整体失败零落地并回报 requested / accepted / area / min_spacing（MP） |
 | `environment_set` | 真实 HDR 文件（名字来自 `asset_list`）或程序化天空环境：预设 clear_day / sunset / overcast / night / studio + 逐字段覆盖，重烘焙 IBL；file 与预设/逐字段参数互斥；可撤销、随场景持久化 |
-| `scene_validate` | 只读自检：悬浮 / AABB 穿插 / 相机在几何内 / 视锥外实体 / 灯光失衡，只报告不修改 |
+| `scene_validate` | 只读自检：悬浮 / AABB 穿插 / 相机在几何内 / 视锥外实体 / 灯光失衡，只报告不修改；overlap 发现带 `other_entity_id` / `overlap_depth` / `overlap_ratio`，支撑接触（垂直堆叠界面处 ≤2cm 的 Y 向浅穿透）info、其余穿插一律 warning（薄壁侧埋不因最小轴浅而豁免）、≤1mm 忽略，单对只报一次；同一装配体内部（同次 scene_add_model / 同一组实例）的穿插视为有意设计不报（MP） |
+
+**摆放约束**（MP）：`scene_add_entity` / `scene_add_model` 共享三个可选参数——`snap_to_ground`（缺省 false：按候选 AABB 把底面落到离地 `clearance` 高度，不假设 pivot 在底部，返回修正后 position）、`clearance`（缺省 0.01m，只作贴地间隙；碰撞/支撑容差固定 0.02m 不受其影响，防止大 clearance 把真穿插洗成支撑接触）、`avoid_overlap`（缺省 false：落地前用候选 AABB 对全场景做碰撞预检，冲突则在任何 scene/renderer 变更前整体拒绝，报 `conflicting_entity_ids` / `overlap_depth` / `requested_position` 与确定性环形搜索得到的 `suggested_position`；模型未上传过时先 CPU 解析 glTF 算包围盒，预检通过才上传，被拒不留任何 GPU 资源）。候选包围盒全部在落地前于 CPU 侧算出（图元用 `makePrimitive` 局部 AABB，模型用网格 AABB 按节点聚合），共享数学在 `engine/agent/src/placement.{h,cpp}`。「支撑接触」定义收紧为垂直堆叠界面处的浅 Y 向穿透（≤容差且一方底面贴另一方顶面），薄壁侧埋不因最小轴穿透浅而豁免。同次 `scene_add_model` 的全部节点与 `scene_instance_group` 的每个实例共享一个 assembly id（随场景保存），装配体内部穿插不计入 `scene_validate`。
 
 - entity id 为 `"index:generation"` 字符串，stale id 得到干净的 not-found；
 - 变更工具全部 staged 原子提交：任一字段校验失败则零副作用；非有限数值、零/负缩放、零向量光方向、越界辐照参数在工具层拦截；

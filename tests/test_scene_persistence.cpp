@@ -442,3 +442,29 @@ TEST_CASE("save/parse round trip preserves a texture-set entity combined with uv
     CHECK(parsed->entities[0].material->uvTiling[0] == 3.0f);
     CHECK(parsed->entities[0].material->uvTiling[1] == 3.0f);
 }
+
+// --- assemblyId (MP) ----------------------------------------------------
+
+TEST_CASE("save/parse round trip preserves assembly ids and omits zero") {
+    scene::Scene scene;
+    scene::Entity member;
+    member.name = "lamp_pole";
+    member.assemblyId = 7;
+    scene.entities.insert(member);
+    scene::Entity solo;
+    solo.name = "rock";
+    scene.entities.insert(solo);
+
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const std::string json = scene::saveSceneJson(scene, "assets/model.glb", noMaterials);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 2);
+    CHECK(parsed->entities[0].entity.assemblyId == 7);
+    CHECK(parsed->entities[1].entity.assemblyId == 0);
+    // Independent entities carry no assembly_id key at all (pre-MP saves stay
+    // byte-identical), so the key appears exactly once: on the assembly member.
+    const std::size_t first = json.find("\"assembly_id\"");
+    REQUIRE(first != std::string::npos);
+    CHECK(json.rfind("\"assembly_id\"") == first);
+}

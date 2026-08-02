@@ -8,6 +8,7 @@
 // construct one (asset_fetch's FetchedAsset itself IS public, in scene_tools.h,
 // since SceneToolContext::fetchAsset needs it as a complete type).
 #include "asset_fetch.h"
+#include "placement.h"
 
 #include <kumo/agent/config.h>
 #include <kumo/agent/entity_id.h>
@@ -122,16 +123,20 @@ constexpr const char* kSceneSystemPrompt =
     "fitting texture or environment, call asset_fetch with a short English query (asphalt, "
     "snow, night city); then use the returned name like any library asset. If it fails or "
     "you are offline, fall back to the closest library asset or the procedural sky.\n\n"
-    "Placement. Rest objects on their support: the AABB bottom sits on the ground or the "
-    "surface below, sunk 1-2 cm so nothing floats. Elevated objects need visible support — "
-    "build the structure before its attachments (a sign mounts on a building wall, a lamp "
-    "head on its pole, a roof on walls); never leave attachments hanging in air. No "
-    "unintended interpenetration. For "
+    "Placement. For objects standing on the ground pass snap_to_ground:true instead of "
+    "hand-guessing Y; the tool rests the bounds on the ground and returns the final "
+    "position and world AABB. For independent objects that must not intersect pass "
+    "avoid_overlap:true; on rejection use the returned suggested_position or rethink the "
+    "layout. Deliberate assemblies (a sign ON a wall, a lamp head on its pole) skip "
+    "avoid_overlap — contact is intended there — but build the structure before its "
+    "attachments; never leave attachments hanging in air. For "
     "repeated structures define a group once with scene_define_group and stamp it with "
-    "scene_instance_group scatter (count/area/seed); for several distinct entities use one "
-    "scene_add_entities call (up to 128) instead of repeated single adds.\n\n"
+    "scene_instance_group scatter (count/area/seed); use min_spacing plus avoid_existing "
+    "to keep instances apart and off existing objects. For several distinct entities use "
+    "one scene_add_entities call (up to 128) instead of repeated single adds.\n\n"
     "Verify, then deliver. After building, call scene_validate and fix warnings (floating "
-    "objects, subject out of frame, unlit scenes). Then call viewer_screenshot ONCE and "
+    "objects, interpenetrating objects you did not intend, subject out of frame, unlit "
+    "scenes); do not finish with unintended overlap warnings. Then call viewer_screenshot ONCE and "
     "study the image like an art director: framing, exposure, scale, anything clearly "
     "wrong or missing. If — and only if — you found a real defect, fix it and take one "
     "second screenshot to confirm. Never take a third. Do not chase perfection: when the "
@@ -707,20 +712,23 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
         std::make_shared<std::unordered_map<std::string, agent::TextureSetIndices>>();
     sceneTools.textureSets = self->textureSetCache_;
     sceneTools.instantiateModel =
-        [runtime = self.get()](
-            const scene::Transform& root,
-            std::string_view name) -> std::expected<std::vector<std::string>, std::string> {
+        [runtime = self.get()](const scene::Transform& root, std::string_view name,
+                               const agent::ModelPlacementRequest& request)
+        -> std::expected<agent::ModelPlacementResult, std::string> {
         std::expected<EngineRuntime::ModelInstance, std::string> instance =
-            runtime->instantiateModel(name, root);
+            runtime->instantiateModel(name, root, request);
         if (!instance.has_value()) {
             return std::unexpected(instance.error());
         }
-        std::vector<std::string> ids;
-        ids.reserve(instance->entities.size());
+        agent::ModelPlacementResult result;
+        result.aabb = instance->aabb;
+        result.finalPosition = instance->finalPosition;
+        result.conflict = std::move(instance->conflict);
+        result.entityIds.reserve(instance->entities.size());
         for (scene::EntityId id : instance->entities) {
-            ids.push_back(agent::formatEntityId(id));
+            result.entityIds.push_back(agent::formatEntityId(id));
         }
-        return ids;
+        return result;
     };
     sceneTools.applyEnvironmentFile = [runtime = self.get()](const std::string& file) {
         return runtime->applyEnvironmentFile(file);
@@ -1295,6 +1303,9 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
             }
         }
         world_.entities.insert(entity);
+        // New assemblies must never reuse a restored id, or scene_validate
+        // would wrongly suppress overlaps between unrelated placements.
+        world_.nextAssemblyId = std::max(world_.nextAssemblyId, entity.assemblyId + 1);
         ++loaded;
     }
     logInfo("scene loaded: {} entities, {} lights", loaded, saved.lights.size());
@@ -1370,6 +1381,18 @@ bool EngineRuntime::applyTextureSet(const std::string& name, std::uint32_t mater
 }
 
 const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::string& name) {
+    if (const auto it = modelCache_.find(name); it != modelCache_.end()) {
+        return &it->second;
+    }
+    auto loaded = loadModelAsset(name);
+    if (!loaded.has_value()) {
+        return nullptr;
+    }
+    return uploadModel(name, loaded->first, std::move(loaded->second));
+}
+
+std::optional<std::pair<std::filesystem::path, asset::SceneAsset>>
+EngineRuntime::loadModelAsset(const std::string& name) const {
     // Single choke point for both instantiateModel and loadScene's saved-entity
     // path (entity.model), so a hand-edited saved scene cannot escape
     // assetDir_ either (same reasoning as applyEnvironmentSource above). Models
@@ -1377,26 +1400,30 @@ const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::str
     // textures/env which stay single-component.
     if (!isPlainAssetPath(name)) {
         logError("loadOrGetModel: invalid model name '{}'", name);
-        return nullptr;
-    }
-    if (const auto it = modelCache_.find(name); it != modelCache_.end()) {
-        return &it->second;
+        return std::nullopt;
     }
     const std::filesystem::path path = asset::resolveModelPath(assetDir_ / "models", name);
     if (path.empty()) {
         logError("instantiateModel: no model layout found for '{}' under {}", name,
                  (assetDir_ / "models").string());
-        return nullptr;
+        return std::nullopt;
     }
     auto sceneAsset = asset::loadGltf(path);
     if (!sceneAsset.has_value()) {
         logError("instantiateModel: failed to load {}: {}", path.string(), sceneAsset.error());
-        return nullptr;
+        return std::nullopt;
     }
+    return std::make_pair(path, std::move(*sceneAsset));
+}
+
+const EngineRuntime::UploadedModel* EngineRuntime::uploadModel(const std::string& name,
+                                                               const std::filesystem::path& path,
+                                                               asset::SceneAsset&& movedAsset) {
+    const asset::SceneAsset sceneAsset = std::move(movedAsset);
 
     UploadedModel uploaded;
-    uploaded.meshIndices.reserve(sceneAsset->meshes.size());
-    for (const asset::MeshData& mesh : sceneAsset->meshes) {
+    uploaded.meshIndices.reserve(sceneAsset.meshes.size());
+    for (const asset::MeshData& mesh : sceneAsset.meshes) {
         const std::int32_t index = renderer_.addMesh(mesh);
         if (index < 0) {
             logError("instantiateModel: mesh upload failed for {}", path.string());
@@ -1406,8 +1433,8 @@ const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::str
     }
 
     std::vector<std::int32_t> textureIndices;
-    textureIndices.reserve(sceneAsset->textures.size());
-    for (const asset::TextureData& tex : sceneAsset->textures) {
+    textureIndices.reserve(sceneAsset.textures.size());
+    for (const asset::TextureData& tex : sceneAsset.textures) {
         const std::int32_t index = renderer_.addTexture(tex);
         if (index < 0) {
             logError("instantiateModel: texture upload failed for {}", path.string());
@@ -1422,8 +1449,8 @@ const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::str
     };
 
     std::vector<std::int32_t> materialIndices;
-    materialIndices.reserve(sceneAsset->materials.size());
-    for (const asset::MaterialData& mat : sceneAsset->materials) {
+    materialIndices.reserve(sceneAsset.materials.size());
+    for (const asset::MaterialData& mat : sceneAsset.materials) {
         MaterialParams params;
         std::copy(std::begin(mat.baseColor), std::end(mat.baseColor), params.baseColor);
         params.metallic = mat.metallic;
@@ -1444,15 +1471,15 @@ const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::str
         materialIndices.push_back(index);
     }
 
-    uploaded.meshMaterial.reserve(sceneAsset->meshes.size());
-    for (const asset::MeshData& mesh : sceneAsset->meshes) {
+    uploaded.meshMaterial.reserve(sceneAsset.meshes.size());
+    for (const asset::MeshData& mesh : sceneAsset.meshes) {
         const std::int32_t local = mesh.materialIndex;
         uploaded.meshMaterial.push_back(local >= 0 && static_cast<std::size_t>(local) <
                                                           materialIndices.size()
                                             ? materialIndices[static_cast<std::size_t>(local)]
                                             : -1);
     }
-    uploaded.nodes = sceneAsset->nodes;
+    uploaded.nodes = sceneAsset.nodes;
 
     logInfo("instantiateModel: uploaded {}: {} meshes, {} materials, {} textures, {} nodes",
             path.filename().string(), uploaded.meshIndices.size(), materialIndices.size(),
@@ -1461,7 +1488,8 @@ const EngineRuntime::UploadedModel* EngineRuntime::loadOrGetModel(const std::str
 }
 
 std::expected<EngineRuntime::ModelInstance, std::string>
-EngineRuntime::instantiateModel(std::string_view name, const scene::Transform& root) {
+EngineRuntime::instantiateModel(std::string_view name, const scene::Transform& root,
+                                const agent::ModelPlacementRequest& placement) {
     // Non-uniform root scale composed onto a rotated child node cannot be
     // represented as a TRS (it shears); reject it like scene_instance_group
     // does rather than silently producing a wrong transform.
@@ -1472,15 +1500,118 @@ EngineRuntime::instantiateModel(std::string_view name, const scene::Transform& r
     }
 
     const std::string modelName(name);
-    const UploadedModel* model = loadOrGetModel(modelName);
+    // Cache LOOKUP only: on a miss the glTF is parsed CPU-side first, so the
+    // avoid_overlap preflight below can reject before any renderer upload or
+    // modelCache_ mutation (a rejected placement must leave zero GPU state
+    // behind; repeated rejections must not accumulate unreclaimable uploads).
+    const UploadedModel* model = nullptr;
+    if (const auto it = modelCache_.find(modelName); it != modelCache_.end()) {
+        model = &it->second;
+    }
+    std::optional<std::pair<std::filesystem::path, asset::SceneAsset>> cpuLoaded;
     if (model == nullptr) {
-        return std::unexpected(
-            std::format("instantiateModel: failed to load or upload '{}'", modelName));
+        cpuLoaded = loadModelAsset(modelName);
+        if (!cpuLoaded.has_value()) {
+            return std::unexpected(
+                std::format("instantiateModel: failed to load or upload '{}'", modelName));
+        }
+    }
+
+    // Aggregate candidate bounds, computed BEFORE any upload or entity
+    // insertion so snapping and the collision preflight run entirely on the
+    // candidate: uploaded meshes answer via the renderer, a cache miss via the
+    // parsed asset's CPU-side mesh AABBs (identical data — the renderer stores
+    // the localAabb it was given at addMesh time).
+    scene::Transform placedRoot = root;
+    const std::span<const asset::NodeInstance> nodes =
+        model != nullptr ? std::span<const asset::NodeInstance>(model->nodes)
+                         : std::span<const asset::NodeInstance>(cpuLoaded->second.nodes);
+    const std::size_t meshCount =
+        model != nullptr ? model->meshIndices.size() : cpuLoaded->second.meshes.size();
+    std::vector<math::Aabb> nodeBoxes;
+    nodeBoxes.reserve(nodes.size());
+    {
+        const math::float4x4 candidateMatrix = placedRoot.matrix();
+        for (const asset::NodeInstance& node : nodes) {
+            if (node.meshIndex < 0 || static_cast<std::size_t>(node.meshIndex) >= meshCount) {
+                continue;
+            }
+            const math::Aabb* local = nullptr;
+            if (model != nullptr) {
+                const std::int32_t mesh =
+                    model->meshIndices[static_cast<std::size_t>(node.meshIndex)];
+                local = renderer_.meshLocalAabb(static_cast<std::uint32_t>(mesh));
+            } else {
+                local =
+                    &cpuLoaded->second.meshes[static_cast<std::size_t>(node.meshIndex)].localAabb;
+            }
+            if (local == nullptr) {
+                continue;
+            }
+            nodeBoxes.push_back(math::transformAabb(*local, candidateMatrix * node.worldTransform));
+        }
+    }
+    std::optional<math::Aabb> aggregate = agent::placement::aggregateAabb(nodeBoxes);
+
+    if (placement.snapToGround && aggregate.has_value()) {
+        const float deltaY = agent::placement::snapDeltaY(*aggregate, placement.clearance);
+        placedRoot.position.y += deltaY;
+        aggregate->min.y += deltaY;
+        aggregate->max.y += deltaY;
+    }
+
+    if (placement.avoidOverlap && aggregate.has_value()) {
+        std::vector<std::string> ids;
+        std::vector<math::Aabb> existing;
+        world_.entities.forEach([&](scene::EntityId id, const scene::Entity& entity) {
+            if (entity.meshIndex < 0) {
+                return;
+            }
+            const math::Aabb* local =
+                renderer_.meshLocalAabb(static_cast<std::uint32_t>(entity.meshIndex));
+            if (local == nullptr) {
+                return;
+            }
+            existing.push_back(math::transformAabb(*local, entity.transform.matrix()));
+            ids.push_back(agent::formatEntityId(id));
+        });
+        const std::vector<agent::placement::Conflict> conflicts = agent::placement::findConflicts(
+            *aggregate, existing, agent::placement::kSupportTolerance);
+        if (!conflicts.empty()) {
+            ModelInstance rejected;
+            rejected.aabb = *aggregate;
+            rejected.finalPosition = placedRoot.position;
+            agent::ModelPlacementConflict conflict;
+            conflict.conflictingIds.reserve(conflicts.size());
+            for (const agent::placement::Conflict& entry : conflicts) {
+                conflict.conflictingIds.push_back(ids[entry.index]);
+            }
+            conflict.depth = agent::placement::deepestConflict(conflicts).depth;
+            conflict.suggested = agent::placement::suggestPosition(
+                *aggregate, placedRoot.position, existing, agent::placement::kSupportTolerance, 8);
+            rejected.conflict = std::move(conflict);
+            return rejected;
+        }
+    }
+
+    // Preflight passed: only now does a cache miss touch the renderer.
+    if (model == nullptr) {
+        model = uploadModel(modelName, cpuLoaded->first, std::move(cpuLoaded->second));
+        if (model == nullptr) {
+            return std::unexpected(
+                std::format("instantiateModel: failed to load or upload '{}'", modelName));
+        }
     }
 
     ModelInstance instance;
+    instance.aabb = aggregate.value_or(math::Aabb{});
+    instance.finalPosition = placedRoot.position;
     instance.entities.reserve(model->nodes.size());
-    const math::float4x4 rootMatrix = root.matrix();
+    // One assembly per call (MP): scene_validate suppresses overlaps between
+    // this instance's own nodes (clothing over a body is intended) while still
+    // reporting overlaps against everything else.
+    const std::int32_t assemblyId = world_.nextAssemblyId++;
+    const math::float4x4 rootMatrix = placedRoot.matrix();
     for (std::size_t i = 0; i < model->nodes.size(); ++i) {
         const asset::NodeInstance& node = model->nodes[i];
         if (node.meshIndex < 0 ||
@@ -1497,6 +1628,7 @@ EngineRuntime::instantiateModel(std::string_view name, const scene::Transform& r
         entity.materialIndex = model->meshMaterial[static_cast<std::size_t>(node.meshIndex)];
         entity.model = modelName;
         entity.modelMesh = node.meshIndex;
+        entity.assemblyId = assemblyId;
         // textureSet provenance is per-entity but the binding is per-material:
         // a later instance sharing an already-textured material renders
         // textured immediately, so it must inherit the stamp or a save made

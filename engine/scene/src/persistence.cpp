@@ -250,6 +250,7 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
         !readFloat(obj, "primitive_size", entity.primitiveSize, error) ||
         !readString(obj, "model", entity.model, error) ||
         !readInt(obj, "model_mesh", entity.modelMesh, error) ||
+        !readInt(obj, "assembly_id", entity.assemblyId, error) ||
         !readString(obj, "texture_set", entity.textureSet, error)) {
         return std::unexpected(error);
     }
@@ -293,6 +294,9 @@ std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
         }
         if (!entity.textureSet.empty()) {
             e["texture_set"] = entity.textureSet;
+        }
+        if (entity.assemblyId > 0) {
+            e["assembly_id"] = entity.assemblyId;
         }
         if (entity.materialIndex >= 0 && materials) {
             if (const std::optional<SavedMaterial> material = materials(entity.materialIndex);

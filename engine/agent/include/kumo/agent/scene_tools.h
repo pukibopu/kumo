@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kumo/agent/tool_registry.h>
+#include <kumo/math/math.h>
 #include <kumo/scene/transform.h>
 
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -76,6 +78,29 @@ struct FetchedAsset {
     std::vector<std::string> alternatives; // up to 3 runner-up ids from the query match
 };
 
+// Optional placement controls for scene_add_model (MP milestone). Mirrors the
+// tool-layer options scene_add_entity parses for itself; defaults preserve
+// pre-MP behavior exactly.
+struct ModelPlacementRequest {
+    bool snapToGround = false;
+    float clearance = 0.01f;
+    bool avoidOverlap = false;
+};
+
+// avoid_overlap rejection details: populated INSTEAD of creating entities.
+struct ModelPlacementConflict {
+    std::vector<std::string> conflictingIds;
+    math::float3 depth{0.0f, 0.0f, 0.0f}; // deepest conflict, per axis
+    std::optional<math::float3> suggested;
+};
+
+struct ModelPlacementResult {
+    std::vector<std::string> entityIds;           // empty when `conflict` is set
+    math::Aabb aabb{};                            // aggregate candidate/world bounds
+    math::float3 finalPosition{0.0f, 0.0f, 0.0f}; // root position after snapping
+    std::optional<ModelPlacementConflict> conflict;
+};
+
 // `renderer` may be null (CPU-only tests): tools that need GPU uploads or
 // material access then report a structured error instead of touching it.
 struct SceneToolContext {
@@ -106,10 +131,12 @@ struct SceneToolContext {
     // registerSceneTools default-constructs it when left null.
     std::shared_ptr<std::unordered_map<std::string, TextureSetIndices>> textureSets;
     // scene_add_model's effector, wired to EngineRuntime::instantiateModel;
-    // returns the new entities' formatted "index:generation" ids. Null means
-    // the tool reports the feature unsupported, mirroring applyEnvironment.
-    std::function<std::expected<std::vector<std::string>, std::string>(const scene::Transform&,
-                                                                       std::string_view)>
+    // returns the new entities' formatted "index:generation" ids plus the
+    // aggregate world AABB (MP), or a structured placement conflict with no
+    // entities created. Null means the tool reports the feature unsupported,
+    // mirroring applyEnvironment.
+    std::function<std::expected<ModelPlacementResult, std::string>(
+        const scene::Transform&, std::string_view, const ModelPlacementRequest&)>
         instantiateModel;
     // environment_set's HDR-file effector; null means a `file` argument
     // reports the feature unsupported instead of touching anything.

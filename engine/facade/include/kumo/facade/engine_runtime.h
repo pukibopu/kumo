@@ -5,6 +5,7 @@
 #include <kumo/agent/scene_tools.h> // agent::TextureSetIndices (textureSetCache_)
 #include <kumo/agent/session.h>
 #include <kumo/agent/tool_registry.h>
+#include <kumo/asset/asset.h>
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/core/main_thread_queue.h>
 #include <kumo/facade/frame_dirty.h>
@@ -24,6 +25,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kumo::gpu {
@@ -163,17 +165,26 @@ public:
     // the file. Undo-safe like addMesh/addMaterial: the renderer never
     // reclaims uploads, so entities referencing them survive undo/redo.
     struct ModelInstance {
-        std::vector<scene::EntityId> entities;
+        std::vector<scene::EntityId> entities;        // empty when `conflict` is set
+        math::Aabb aabb{};                            // aggregate world bounds after snapping
+        math::float3 finalPosition{0.0f, 0.0f, 0.0f}; // root position after snapping
+        // avoid_overlap rejection (MP): set INSTEAD of creating entities; the
+        // scene and renderer are untouched when present.
+        std::optional<agent::ModelPlacementConflict> conflict;
     };
     // Resolves `<assetDir>/models/<name>.glb`; loads and uploads it on first
     // use, later calls reuse the cached upload (one upload regardless of
     // instance count). `root` places the whole model; only a uniform scale is
     // supported (root.scale.x/y/z must be equal) because a non-uniform root
     // scale composed with a rotated child node would shear it, which
-    // decomposeTrs cannot represent as a TRS. Error string on failure (bad
-    // name, glTF load failure, non-uniform root scale, GPU upload failure).
-    std::expected<ModelInstance, std::string> instantiateModel(std::string_view name,
-                                                               const scene::Transform& root);
+    // decomposeTrs cannot represent as a TRS. `placement` (MP): the aggregate
+    // candidate bounds are computed BEFORE any insertion, snapping translates
+    // the root in Y, avoid_overlap rejects via ModelInstance::conflict. Error
+    // string on failure (bad name, glTF load failure, non-uniform root scale,
+    // GPU upload failure).
+    std::expected<ModelInstance, std::string>
+    instantiateModel(std::string_view name, const scene::Transform& root,
+                     const agent::ModelPlacementRequest& placement = {});
 
     bool undoAvailable() const;
     bool redoAvailable() const;
@@ -269,6 +280,16 @@ private:
     // Loads and uploads `name`'s glb on first call; returns the cached record
     // afterward. Null on any failure (already logged).
     const UploadedModel* loadOrGetModel(const std::string& name);
+    // CPU half of loadOrGetModel: resolves and parses the glTF without
+    // touching the renderer or modelCache_, so instantiateModel can run its
+    // placement preflight before any GPU mutation (MP: a rejected placement
+    // must leave zero renderer state behind). Nullopt on failure (logged).
+    std::optional<std::pair<std::filesystem::path, asset::SceneAsset>>
+    loadModelAsset(const std::string& name) const;
+    // Upload half: uploads a parsed asset and caches the record under `name`.
+    // Null on an upload failure (logged).
+    const UploadedModel* uploadModel(const std::string& name, const std::filesystem::path& path,
+                                     asset::SceneAsset&& sceneAsset);
     // Loads (or reuses from textureSetCache_) `name`'s texture set and binds
     // it to `materialIndex` (M6.99, EngineRuntime::loadScene's texture-set
     // provenance rebuild). False on any failure (bad name, missing set on

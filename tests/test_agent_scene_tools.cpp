@@ -1292,9 +1292,9 @@ TEST_CASE("scene_add_model rejects a non-uniform scale") {
     ToolRegistry registry;
     SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
     ctx.instantiateModel =
-        [](const scene::Transform&,
-           std::string_view) -> std::expected<std::vector<std::string>, std::string> {
-        return std::vector<std::string>{"0:0"};
+        [](const scene::Transform&, std::string_view,
+           const ModelPlacementRequest&) -> std::expected<ModelPlacementResult, std::string> {
+        return ModelPlacementResult{.entityIds = {"0:0"}};
     };
     registerSceneTools(registry, ctx);
 
@@ -1311,10 +1311,11 @@ TEST_CASE("scene_add_model rejects traversal/absolute/hidden model names without
     bool called = false;
     SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
     ctx.instantiateModel =
-        [&called](const scene::Transform&,
-                  std::string_view) -> std::expected<std::vector<std::string>, std::string> {
+        [&called](
+            const scene::Transform&, std::string_view,
+            const ModelPlacementRequest&) -> std::expected<ModelPlacementResult, std::string> {
         called = true;
-        return std::vector<std::string>{"0:0"};
+        return ModelPlacementResult{.entityIds = {"0:0"}};
     };
     registerSceneTools(registry, ctx);
 
@@ -1341,10 +1342,10 @@ TEST_CASE("scene_add_model accepts a one-level category prefix and passes it thr
     std::optional<std::string> capturedModel;
     SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
     ctx.instantiateModel =
-        [&](const scene::Transform&,
-            std::string_view model) -> std::expected<std::vector<std::string>, std::string> {
+        [&](const scene::Transform&, std::string_view model,
+            const ModelPlacementRequest&) -> std::expected<ModelPlacementResult, std::string> {
         capturedModel = std::string(model);
-        return std::vector<std::string>{"0:0"};
+        return ModelPlacementResult{.entityIds = {"0:0"}};
     };
     registerSceneTools(registry, ctx);
 
@@ -1366,11 +1367,11 @@ TEST_CASE("scene_add_model returns entity_ids from the callback and renames on r
     std::optional<std::string> capturedModel;
     SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
     ctx.instantiateModel =
-        [&](const scene::Transform& root,
-            std::string_view model) -> std::expected<std::vector<std::string>, std::string> {
+        [&](const scene::Transform& root, std::string_view model,
+            const ModelPlacementRequest&) -> std::expected<ModelPlacementResult, std::string> {
         capturedRoot = root;
         capturedModel = std::string(model);
-        return std::vector<std::string>{formatEntityId(nodeId)};
+        return ModelPlacementResult{.entityIds = {formatEntityId(nodeId)}};
     };
     registerSceneTools(registry, ctx);
 
@@ -1393,6 +1394,287 @@ TEST_CASE("scene_add_model returns entity_ids from the callback and renames on r
     const scene::Entity* renamed = scene.entities.get(nodeId);
     REQUIRE(renamed != nullptr);
     CHECK(renamed->name == "fruit_mesh0");
+}
+
+// --- placement constraints (MP) ------------------------------------------
+
+TEST_CASE("scene_add_entity snap_to_ground rests a centered-pivot primitive on the ground") {
+    Fixture f;
+    // A unit cube requested at y=5 must land with its bottom at the default
+    // 0.01 clearance, i.e. center y = 0.51; x/z are the intended location.
+    const json result = f.invoke(
+        "scene_add_entity", R"({"primitive":"cube","position":[2,5,3],"snap_to_ground":true})");
+    REQUIRE(result["status"] == "ok");
+    REQUIRE(result.contains("position"));
+    CHECK(result["position"][0].get<float>() == doctest::Approx(2.0f));
+    CHECK(result["position"][1].get<float>() == doctest::Approx(0.51f));
+    CHECK(result["position"][2].get<float>() == doctest::Approx(3.0f));
+    REQUIRE(result.contains("aabb_world"));
+    CHECK(result["aabb_world"]["min"][1].get<float>() == doctest::Approx(0.01f));
+    CHECK(result["aabb_world"]["max"][1].get<float>() == doctest::Approx(1.01f));
+
+    const scene::Entity* entity = f.scene.entities.get({0, 0});
+    REQUIRE(entity != nullptr);
+    CHECK(entity->transform.position.y == doctest::Approx(0.51f));
+}
+
+TEST_CASE("scene_add_entity without placement options keeps its previous behavior") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+    // Overlapping placement still succeeds without avoid_overlap, no snapping
+    // happens without snap_to_ground, and the new aabb_world field is additive.
+    const json result =
+        f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0.2,5,0]})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(!result.contains("position"));
+    CHECK(result.contains("aabb_world"));
+    const scene::Entity* entity = f.scene.entities.get({1, 0});
+    REQUIRE(entity != nullptr);
+    CHECK(entity->transform.position.y == doctest::Approx(5.0f));
+    CHECK(f.scene.entities.size() == 2);
+}
+
+TEST_CASE("scene_add_entity validates the placement option types") {
+    Fixture f;
+    CHECK(f.invoke("scene_add_entity",
+                   R"({"primitive":"cube","snap_to_ground":"yes"})")["status"] == "error");
+    CHECK(f.invoke("scene_add_entity", R"({"primitive":"cube","clearance":-0.5})")["status"] ==
+          "error");
+    CHECK(f.invoke("scene_add_entity", R"({"primitive":"cube","avoid_overlap":1})")["status"] ==
+          "error");
+    CHECK(f.scene.entities.empty());
+}
+
+TEST_CASE("scene_add_entity avoid_overlap rejects before mutation and names the conflict") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+
+    const json rejected = f.invoke(
+        "scene_add_entity", R"({"primitive":"cube","position":[0.2,0.5,0],"avoid_overlap":true})");
+    CHECK(rejected["status"] == "error");
+    REQUIRE(rejected.contains("conflicting_entity_ids"));
+    REQUIRE(rejected["conflicting_entity_ids"].size() == 1);
+    CHECK(rejected["conflicting_entity_ids"][0] == "0:0");
+    REQUIRE(rejected.contains("overlap_depth"));
+    CHECK(rejected["overlap_depth"][0].get<float>() == doctest::Approx(0.8f));
+    CHECK(rejected["overlap_depth"][1].get<float>() == doctest::Approx(1.0f));
+    CHECK(rejected["requested_position"][0].get<float>() == doctest::Approx(0.2f));
+    // The rejection left the scene untouched.
+    CHECK(f.scene.entities.size() == 1);
+}
+
+TEST_CASE("scene_add_entity avoid_overlap suggests a deterministic free position that works") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+
+    const char* call = R"({"primitive":"cube","position":[0.2,0.5,0],"avoid_overlap":true})";
+    const json first = f.invoke("scene_add_entity", call);
+    const json second = f.invoke("scene_add_entity", call);
+    REQUIRE(first["status"] == "error");
+    REQUIRE(first.contains("suggested_position"));
+    REQUIRE(second.contains("suggested_position"));
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK(first["suggested_position"][axis].get<float>() ==
+              second["suggested_position"][axis].get<float>());
+    }
+    // Y is carried over from the request, and the suggestion actually fits.
+    CHECK(first["suggested_position"][1].get<float>() == doctest::Approx(0.5f));
+    const json placed =
+        f.invoke("scene_add_entity",
+                 std::format(R"({{"primitive":"cube","position":[{},{},{}],"avoid_overlap":true}})",
+                             first["suggested_position"][0].get<float>(),
+                             first["suggested_position"][1].get<float>(),
+                             first["suggested_position"][2].get<float>()));
+    CHECK(placed["status"] == "ok");
+}
+
+TEST_CASE("scene_add_model forwards placement options and returns the callback's bounds") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    std::optional<ModelPlacementRequest> captured;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.instantiateModel = [&](const scene::Transform&, std::string_view,
+                               const ModelPlacementRequest& request)
+        -> std::expected<ModelPlacementResult, std::string> {
+        captured = request;
+        // A snapped multi-node model: the facade returns the union AABB and the
+        // corrected root position.
+        return ModelPlacementResult{.entityIds = {"0:0", "1:0"},
+                                    .aabb = {{-1.0f, 0.02f, -1.0f}, {1.0f, 2.02f, 1.0f}},
+                                    .finalPosition = {4.0f, 0.32f, -2.0f}};
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result =
+        invokeOn(registry, "scene_add_model",
+                 R"({"model":"barn","position":[4,0,-2],"snap_to_ground":true,"clearance":0.02})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["entities"].size() == 2);
+    REQUIRE(result.contains("aabb_world"));
+    CHECK(result["aabb_world"]["min"][1].get<float>() == doctest::Approx(0.02f));
+    CHECK(result["aabb_world"]["max"][1].get<float>() == doctest::Approx(2.02f));
+    REQUIRE(result.contains("position"));
+    CHECK(result["position"][1].get<float>() == doctest::Approx(0.32f));
+
+    REQUIRE(captured.has_value());
+    CHECK(captured->snapToGround);
+    CHECK(captured->clearance == doctest::Approx(0.02f));
+    CHECK(!captured->avoidOverlap);
+}
+
+TEST_CASE("scene_add_model surfaces a placement conflict as the structured rejection") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.instantiateModel =
+        [](const scene::Transform&, std::string_view,
+           const ModelPlacementRequest&) -> std::expected<ModelPlacementResult, std::string> {
+        ModelPlacementResult rejected;
+        rejected.conflict = ModelPlacementConflict{.conflictingIds = {"3:0"},
+                                                   .depth = {0.4f, 1.0f, 0.6f},
+                                                   .suggested = math::float3{6.0f, 0.5f, 0.0f}};
+        return rejected;
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "scene_add_model",
+                                 R"({"model":"barn","position":[5,0.5,0],"avoid_overlap":true})");
+    CHECK(result["status"] == "error");
+    REQUIRE(result.contains("conflicting_entity_ids"));
+    CHECK(result["conflicting_entity_ids"][0] == "3:0");
+    CHECK(result["overlap_depth"][0].get<float>() == doctest::Approx(0.4f));
+    CHECK(result["requested_position"][0].get<float>() == doctest::Approx(5.0f));
+    CHECK(result["suggested_position"][0].get<float>() == doctest::Approx(6.0f));
+    CHECK(scene.entities.empty());
+}
+
+TEST_CASE("scene_instance_group scatter respects min_spacing between instances") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"g","entities":[{"primitive":"cube"}]})");
+    const json result =
+        f.invoke("scene_instance_group",
+                 R"({"name":"g","scatter":{"count":8,"area":[30,30],"seed":5,"min_spacing":1.0}})");
+    REQUIRE(result["status"] == "ok");
+
+    std::vector<math::float3> positions;
+    f.scene.entities.forEach([&](scene::EntityId, const scene::Entity& e) {
+        positions.push_back(e.transform.position);
+    });
+    REQUIRE(positions.size() == 8);
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        for (std::size_t j = i + 1; j < positions.size(); ++j) {
+            // Unit cubes: XZ edge-to-edge separation must reach min_spacing on
+            // at least one axis.
+            const float gapX = std::abs(positions[i].x - positions[j].x) - 1.0f;
+            const float gapZ = std::abs(positions[i].z - positions[j].z) - 1.0f;
+            CHECK(std::max(gapX, gapZ) >= 1.0f - 1e-4f);
+        }
+    }
+}
+
+TEST_CASE("scene_instance_group scatter avoid_existing keeps instances off scene entities") {
+    Fixture f;
+    // A 6x1x6 obstacle centered at the origin.
+    f.invoke("scene_add_entity",
+             R"({"primitive":"cube","size":6,"position":[0,0.5,0],"scale":[1,0.1667,1]})");
+    f.invoke("scene_define_group", R"({"name":"g","entities":[{"primitive":"cube"}]})");
+    const json result = f.invoke(
+        "scene_instance_group",
+        R"({"name":"g","scatter":{"count":10,"area":[20,20],"position":[0,0.5,0],"seed":11,"avoid_existing":true}})");
+    REQUIRE(result["status"] == "ok");
+
+    const scene::Entity* obstacle = f.scene.entities.get({0, 0});
+    REQUIRE(obstacle != nullptr);
+    f.scene.entities.forEach([&](scene::EntityId id, const scene::Entity& e) {
+        if (id.index == 0) {
+            return;
+        }
+        // Scattered unit cubes may touch the obstacle within the 2 cm support
+        // margin but never meaningfully interpenetrate its XZ footprint.
+        const float gapX = std::abs(e.transform.position.x) - 0.5f - 3.0f;
+        const float gapZ = std::abs(e.transform.position.z) - 0.5f - 3.0f;
+        CHECK(std::max(gapX, gapZ) >= -0.02f - 1e-4f);
+    });
+}
+
+TEST_CASE("scene_instance_group scatter with placement options is deterministic per seed") {
+    auto samplePositions = [] {
+        Fixture fx;
+        fx.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+        fx.invoke("scene_define_group", R"({"name":"g","entities":[{"primitive":"cube"}]})");
+        const json result = fx.invoke(
+            "scene_instance_group",
+            R"({"name":"g","scatter":{"count":6,"area":[15,15],"position":[0,0.5,0],"seed":42,"min_spacing":0.5,"avoid_existing":true}})");
+        REQUIRE(result["status"] == "ok");
+        std::vector<math::float3> positions;
+        fx.scene.entities.forEach([&](scene::EntityId, const scene::Entity& e) {
+            positions.push_back(e.transform.position);
+        });
+        return positions;
+    };
+    const std::vector<math::float3> a = samplePositions();
+    const std::vector<math::float3> b = samplePositions();
+    REQUIRE(a.size() == b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        CHECK(a[i].x == b[i].x);
+        CHECK(a[i].z == b[i].z);
+    }
+}
+
+TEST_CASE("scene_instance_group scatter fails atomically with a useful error when impossible") {
+    Fixture f;
+    f.invoke("scene_define_group", R"({"name":"g","entities":[{"primitive":"cube"}]})");
+    const json result =
+        f.invoke("scene_instance_group",
+                 R"({"name":"g","scatter":{"count":10,"area":[1,1],"seed":1,"min_spacing":5}})");
+    CHECK(result["status"] == "error");
+    CHECK(result["requested"] == 10);
+    CHECK(result["accepted"].get<int>() < 10);
+    CHECK(result["area"][0].get<float>() == doctest::Approx(1.0f));
+    CHECK(result["min_spacing"].get<float>() == doctest::Approx(5.0f));
+    CHECK(result["message"].get<std::string>().find("attempts") != std::string::npos);
+    CHECK(f.scene.entities.empty());
+}
+
+TEST_CASE("scene_validate keeps shallow support contact below warning severity") {
+    Fixture f;
+    // A crate resting on a cube, sunk 1 cm: intended support contact.
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,1.49,0]})");
+
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    for (const auto& finding : result["findings"]) {
+        if (finding["check"] == "overlap") {
+            CHECK(finding["severity"] != "warning");
+        }
+    }
+}
+
+TEST_CASE("scene_validate reports deep overlap once with both ids, depth and ratio") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0.2,0.5,0]})");
+
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    int overlapFindings = 0;
+    for (const auto& finding : result["findings"]) {
+        if (finding["check"] != "overlap") {
+            continue;
+        }
+        ++overlapFindings;
+        CHECK(finding["severity"] == "warning");
+        CHECK(finding["entity_id"] == "0:0");
+        CHECK(finding["other_entity_id"] == "1:0");
+        REQUIRE(finding.contains("overlap_depth"));
+        CHECK(finding["overlap_depth"][0].get<float>() == doctest::Approx(0.8f));
+        CHECK(finding["overlap_depth"][1].get<float>() == doctest::Approx(1.0f));
+        REQUIRE(finding.contains("overlap_ratio"));
+        CHECK(finding["overlap_ratio"].get<float>() == doctest::Approx(0.8f));
+    }
+    // A-vs-B only, never the mirrored B-vs-A duplicate.
+    CHECK(overlapFindings == 1);
 }
 
 // --- environment_set file support ----------------------------------------
@@ -1456,4 +1738,61 @@ TEST_CASE("environment_set reports unsupported for file without an applyEnvironm
     const json result = f.invoke("environment_set", R"({"file":"day.hdr"})");
     CHECK(result["status"] == "error");
     CHECK(result["message"].get<std::string>().find("not available") != std::string::npos);
+}
+
+TEST_CASE("scene_validate flags thin geometry buried in another entity as a warning") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+    // A 1 cm wall crossing the cube: its X depth is tiny, but this is not
+    // support contact and must not slip under the margin.
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0],"scale":[0.01,2,2]})");
+
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    bool warned = false;
+    for (const auto& finding : result["findings"]) {
+        if (finding["check"] == "overlap" && finding["severity"] == "warning") {
+            warned = true;
+        }
+    }
+    CHECK(warned);
+}
+
+TEST_CASE("scene_validate skips overlaps inside one assembly but reports across assemblies") {
+    Fixture f;
+    // Two members occupying the same spot: intended interpenetration inside
+    // the assembly, like a lamp head meeting its pole.
+    f.invoke(
+        "scene_define_group",
+        R"({"name":"lamp","entities":[{"name":"a","primitive":"cube"},{"name":"b","primitive":"cube"}]})");
+    f.invoke("scene_instance_group", R"({"name":"lamp","transforms":[{"position":[0,0.5,0]}]})");
+
+    const json alone = f.invoke("scene_validate", "");
+    REQUIRE(alone["status"] == "ok");
+    CHECK(!hasFinding(alone["findings"], "overlap"));
+
+    // A second instance stamped into the first: overlaps BETWEEN the two
+    // assemblies are real and must still be reported.
+    f.invoke("scene_instance_group", R"({"name":"lamp","transforms":[{"position":[0.3,0.5,0]}]})");
+    const json crossed = f.invoke("scene_validate", "");
+    REQUIRE(crossed["status"] == "ok");
+    bool crossWarning = false;
+    for (const auto& finding : crossed["findings"]) {
+        if (finding["check"] == "overlap" && finding["severity"] == "warning") {
+            crossWarning = true;
+        }
+    }
+    CHECK(crossWarning);
+}
+
+TEST_CASE("scene_add_entity avoid_overlap ignores clearance as a collision tolerance") {
+    Fixture f;
+    f.invoke("scene_add_entity", R"({"primitive":"cube","position":[0,0.5,0]})");
+    // A huge clearance must not reclassify full interpenetration as support.
+    const json rejected =
+        f.invoke("scene_add_entity",
+                 R"({"primitive":"cube","position":[0,0.5,0],"avoid_overlap":true,"clearance":1})");
+    CHECK(rejected["status"] == "error");
+    REQUIRE(rejected.contains("conflicting_entity_ids"));
+    CHECK(f.scene.entities.size() == 1);
 }

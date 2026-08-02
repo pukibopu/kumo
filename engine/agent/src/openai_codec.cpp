@@ -62,18 +62,16 @@ std::string encodeChatCompletionsRequest(const ChatRequest& request) {
                                     {"tool_call_id", result.callId},
                                     {"content", result.contentJson}});
             }
-            // Vision feedback loop (M6.97): the tool-role message has no image
-            // slot on this wire, so an image-bearing result gets resent as one
-            // follow-up user message. detail:"low" trades detail for token cost
-            // deliberately; the image is already downscaled at the source.
+            // The tool-role message has no image slot on this wire, so
+            // image-bearing results are resent as one follow-up user message.
             json imageParts = json::array();
             for (const ToolResult& result : message.toolResults) {
-                if (!result.imagePngBase64.empty()) {
+                const std::string detail = result.imageDetail.empty() ? "low" : result.imageDetail;
+                for (const std::string& image : result.images) {
                     imageParts.push_back(
                         {{"type", "image_url"},
                          {"image_url",
-                          {{"url", "data:image/png;base64," + result.imagePngBase64},
-                           {"detail", "low"}}}});
+                          {{"url", "data:image/png;base64," + image}, {"detail", detail}}}});
                 }
             }
             if (!imageParts.empty()) {
@@ -88,6 +86,20 @@ std::string encodeChatCompletionsRequest(const ChatRequest& request) {
             continue;
         }
         json entry{{"role", roleName(message.role)}, {"content", message.text}};
+        // Reference images (MB-5): the plain-string content becomes parts.
+        if (message.role == Role::User && !message.userImages.empty()) {
+            const std::string detail =
+                message.userImageDetail.empty() ? "low" : message.userImageDetail;
+            json content = json::array();
+            content.push_back({{"type", "text"}, {"text", message.text}});
+            for (const UserImage& image : message.userImages) {
+                content.push_back({{"type", "image_url"},
+                                   {"image_url",
+                                    {{"url", "data:" + image.mediaType + ";base64," + image.base64},
+                                     {"detail", detail}}}});
+            }
+            entry["content"] = std::move(content);
+        }
         if (!message.toolCalls.empty()) {
             json calls = json::array();
             for (const ToolCall& call : message.toolCalls) {

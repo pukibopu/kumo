@@ -55,7 +55,8 @@ struct TestRequest {
 
         ChatMessage toolResult;
         toolResult.role = Role::Tool;
-        toolResult.toolResults.push_back({"c1", R"({"status":"ok","entity_id":"0:0"})", false, ""});
+        toolResult.toolResults.push_back(
+            {"c1", R"({"status":"ok","entity_id":"0:0"})", false, {}, {}});
         messages.push_back(toolResult);
 
         ChatMessage followUp;
@@ -97,7 +98,7 @@ TEST_CASE("claude codec turns an image-bearing tool result into a text+image con
                                       .contentJson = R"({"status":"ok","width":640,"height":360})",
                                       .isError = false,
                                       // base64("PNGDATA"), independent of the encoder under test.
-                                      .imagePngBase64 = "UE5HREFUQQ=="});
+                                      .images = {"UE5HREFUQQ=="}});
 
     ChatRequest request;
     request.model = "test-model";
@@ -108,6 +109,46 @@ TEST_CASE("claude codec turns an image-bearing tool result into a text+image con
 
     const json encoded = json::parse(encodeMessagesRequest(request));
     CHECK(encoded == readFixture("request_image.json"));
+}
+
+TEST_CASE("claude codec encodes multiple images inside one tool_result block") {
+    ChatMessage toolResult;
+    toolResult.role = Role::Tool;
+    toolResult.toolResults.push_back({.callId = "c1",
+                                      .contentJson = R"({"status":"ok"})",
+                                      .isError = false,
+                                      .images = {"QQ==", "Qg=="}});
+
+    ChatRequest request;
+    request.model = "test-model";
+    request.messages = {toolResult};
+
+    const json encoded = json::parse(encodeMessagesRequest(request));
+    const json& content = encoded["messages"][0]["content"][0]["content"];
+    REQUIRE(content.size() == 3);
+    CHECK(content[0]["type"] == "text");
+    CHECK(content[1]["source"]["data"] == "QQ==");
+    CHECK(content[2]["source"]["data"] == "Qg==");
+}
+
+TEST_CASE("claude codec encodes user reference images as image blocks") {
+    ChatMessage user;
+    user.role = Role::User;
+    user.text = "match this mood";
+    user.userImages = {{.base64 = "QQ==", .mediaType = "image/jpeg"},
+                       {.base64 = "Qg==", .mediaType = "image/png"}};
+
+    ChatRequest request;
+    request.model = "test-model";
+    request.messages = {user};
+
+    const json encoded = json::parse(encodeMessagesRequest(request));
+    const json& content = encoded["messages"][0]["content"];
+    REQUIRE(content.size() == 3);
+    CHECK(content[0]["text"] == "match this mood");
+    CHECK(content[1]["source"]["media_type"] == "image/jpeg");
+    CHECK(content[1]["source"]["data"] == "QQ==");
+    CHECK(content[2]["source"]["media_type"] == "image/png");
 }
 
 TEST_CASE("claude codec decodes a plain text reply") {

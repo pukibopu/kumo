@@ -49,7 +49,7 @@ ChatMessage assistantToolUse(std::string id, std::string name, std::string args)
 ChatMessage toolResult(std::string callId, std::string contentJson) {
     ChatMessage message;
     message.role = Role::Tool;
-    message.toolResults.push_back({std::move(callId), std::move(contentJson), false, ""});
+    message.toolResults.push_back({std::move(callId), std::move(contentJson), false, {}, {}});
     return message;
 }
 
@@ -126,11 +126,13 @@ TEST_CASE("approxTokens adds a flat per-image cost, not the base64 length") {
     ChatMessage withImage = toolResult("1", R"({"status":"ok"})");
     // A generous base64 stand-in: if the cost tracked its length, this alone
     // would blow past any reasonable compression threshold.
-    withImage.toolResults[0].imagePngBase64 = std::string(10000, 'A');
+    withImage.toolResults[0].images.push_back(std::string(10000, 'A'));
 
     const std::size_t textOnly = approxTokens(toolResult("1", R"({"status":"ok"})"));
-    // 512 mirrors summary.cpp's kImageTokenEstimate.
+    // 512 mirrors summary.cpp's kImageTokenEstimate, accumulated per image.
     CHECK(approxTokens(withImage) == textOnly + 512);
+    withImage.toolResults[0].images.push_back(std::string(10000, 'B'));
+    CHECK(approxTokens(withImage) == textOnly + 1024);
 }
 
 TEST_CASE("shouldCompress compares the approx token count against the threshold") {
@@ -298,4 +300,33 @@ TEST_CASE("AgentSession keeps full history when the compression request fails") 
     REQUIRE(pumpUntilIdle(queue, session));
     REQUIRE(provider.requestMessageCounts.size() >= 3);
     CHECK(provider.requestMessageCounts[2] == 3);
+}
+
+TEST_CASE("collectReferenceImages keeps the newest images and detail across compression") {
+    ChatMessage older;
+    older.role = Role::User;
+    older.userImages = {{.base64 = "OLD1"}, {.base64 = "OLD2"}};
+    older.userImageDetail = "low";
+    ChatMessage assistant;
+    assistant.role = Role::Assistant;
+    assistant.text = "ok";
+    ChatMessage newer;
+    newer.role = Role::User;
+    newer.userImages = {{.base64 = "NEW1"}, {.base64 = "NEW2"}};
+    newer.userImageDetail = "high";
+    const std::vector<ChatMessage> messages{older, assistant, newer};
+
+    const auto [images, detail] = collectReferenceImages(std::span<const ChatMessage>(messages), 3);
+    REQUIRE(images.size() == 3);
+    // Newest message wins whole; the older one fills the remaining slot.
+    CHECK(images[0].base64 == "OLD2");
+    CHECK(images[1].base64 == "NEW1");
+    CHECK(images[2].base64 == "NEW2");
+    CHECK(detail == "high");
+
+    const auto [none, noDetail] =
+        collectReferenceImages(std::span<const ChatMessage>(messages.data(), 2), 0);
+    CHECK(none.empty());
+    CHECK(images[0].base64 == "OLD2");
+    (void)noDetail;
 }

@@ -74,13 +74,15 @@ public:
 
     // False when a turn is already running; the message is not queued.
     bool submit(std::string userText);
+    // With reference images (MB-5); `imageDetail` empty = provider default.
+    bool submit(std::string userText, std::vector<UserImage> images, std::string imageDetail);
     bool busy() const;
     Status status() const;
     std::vector<TranscriptEntry> drainTranscript();
 
 private:
     void workerLoop();
-    void runTurn(std::string userText);
+    void runTurn(std::string userText, std::vector<UserImage> images, std::string imageDetail);
     void compressIfNeeded();
     ToolResult executeToolCall(const ToolCall& call);
     std::string awaitJson(std::future<std::string> future);
@@ -99,6 +101,8 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::string pendingUserText_;
+    std::vector<UserImage> pendingImages_;
+    std::string pendingImageDetail_;
     bool hasPending_ = false;
     bool busy_ = false;
     bool stopping_ = false;

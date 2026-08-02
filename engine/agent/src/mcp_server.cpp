@@ -118,10 +118,20 @@ std::expected<json, RpcError> buildToolsCallResult(const ToolRegistry& registry,
     content.push_back({{"type", "text"}, {"text", resultJson}});
 
     if (!resultParsed.is_discarded() && resultParsed.is_object()) {
-        const auto imagePathIt = resultParsed.find("image_path");
-        if (imagePathIt != resultParsed.end() && imagePathIt->is_string()) {
-            if (const std::optional<std::string> encoded =
-                    detail::base64EncodeFile(imagePathIt->get<std::string>());
+        std::vector<std::string> paths;
+        const auto pathsIt = resultParsed.find("image_paths");
+        if (pathsIt != resultParsed.end() && pathsIt->is_array()) {
+            for (const json& entry : *pathsIt) {
+                if (entry.is_string()) {
+                    paths.push_back(entry.get<std::string>());
+                }
+            }
+        } else if (const auto pathIt = resultParsed.find("image_path");
+                   pathIt != resultParsed.end() && pathIt->is_string()) {
+            paths.push_back(pathIt->get<std::string>());
+        }
+        for (const std::string& path : paths) {
+            if (const std::optional<std::string> encoded = detail::base64EncodeFile(path);
                 encoded.has_value()) {
                 content.push_back(
                     {{"type", "image"}, {"data", *encoded}, {"mimeType", "image/png"}});

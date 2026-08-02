@@ -24,9 +24,16 @@ struct ToolResult {
     std::string callId;
     std::string contentJson;
     bool isError = false;
-    // Empty when the result carries no attachment; filled by the session when the
-    // tool's result JSON carries an image_path.
-    std::string imagePngBase64;
+    // Base64 PNGs; filled by the session from the result's image_paths/image_path (MB-1).
+    std::vector<std::string> images;
+    // Provider image-detail hint from the result's image_detail; empty = codec default.
+    std::string imageDetail;
+};
+
+// One user-attached reference image (MB-5).
+struct UserImage {
+    std::string base64;
+    std::string mediaType = "image/png";
 };
 
 // Provider-neutral message: deliberately the intersection of the Anthropic and
@@ -37,6 +44,9 @@ struct ChatMessage {
     std::string text;
     std::vector<ToolCall> toolCalls;
     std::vector<ToolResult> toolResults;
+    // Role::User only: reference images plus their provider detail hint (MB-5).
+    std::vector<UserImage> userImages;
+    std::string userImageDetail;
     StopReason stopReason = StopReason::Other;
 };
 

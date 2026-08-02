@@ -17,12 +17,10 @@ std::size_t approxTokens(const ChatMessage& message) {
     for (const ToolCall& call : message.toolCalls) {
         bytes += call.argumentsJson.size();
     }
-    std::size_t imageTokens = 0;
+    std::size_t imageTokens = kImageTokenEstimate * message.userImages.size();
     for (const ToolResult& result : message.toolResults) {
         bytes += result.contentJson.size();
-        if (!result.imagePngBase64.empty()) {
-            imageTokens += kImageTokenEstimate;
-        }
+        imageTokens += kImageTokenEstimate * result.images.size();
     }
     const std::size_t textTokens = bytes == 0 ? 0 : std::max<std::size_t>(1, bytes / 4);
     return textTokens + imageTokens;
@@ -122,6 +120,29 @@ ChatRequest makeSummaryRequest(std::span<const ChatMessage> messages, const std:
                    "summary only.";
     request.messages = {std::move(prompt)};
     return request;
+}
+
+std::pair<std::vector<UserImage>, std::string>
+collectReferenceImages(std::span<const ChatMessage> messages, std::size_t maxImages) {
+    std::vector<UserImage> images;
+    std::string detail;
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (it->role != Role::User || it->userImages.empty()) {
+            continue;
+        }
+        if (detail.empty()) {
+            detail = it->userImageDetail;
+        }
+        // Newest-first scan, but each message's own images keep their order.
+        for (auto image = it->userImages.rbegin();
+             image != it->userImages.rend() && images.size() < maxImages; ++image) {
+            images.insert(images.begin(), *image);
+        }
+        if (images.size() >= maxImages) {
+            break;
+        }
+    }
+    return {std::move(images), std::move(detail)};
 }
 
 ChatMessage makeSummaryMessage(std::string summaryText) {

@@ -443,7 +443,8 @@ TEST_CASE("AgentSession attaches a tool result's image and retains only the newe
         REQUIRE(messages[2].role == Role::Tool);
         REQUIRE(messages[2].toolResults.size() == 1);
         // base64("IMG1DATA"), computed independently of the encoder under test.
-        CHECK(messages[2].toolResults[0].imagePngBase64 == "SU1HMURBVEE=");
+        REQUIRE(messages[2].toolResults[0].images.size() == 1);
+        CHECK(messages[2].toolResults[0].images[0] == "SU1HMURBVEE=");
     }
 
     REQUIRE(session.submit("second"));
@@ -455,7 +456,8 @@ TEST_CASE("AgentSession attaches a tool result's image and retains only the newe
         const std::vector<ChatMessage>& messages = provider.requests()[2].messages;
         REQUIRE(messages.size() == 5);
         REQUIRE(messages[2].role == Role::Tool);
-        CHECK(messages[2].toolResults[0].imagePngBase64 == "SU1HMURBVEE=");
+        REQUIRE(messages[2].toolResults[0].images.size() == 1);
+        CHECK(messages[2].toolResults[0].images[0] == "SU1HMURBVEE=");
     }
     {
         // After the second screenshot lands, retention evicts the first image so
@@ -463,10 +465,11 @@ TEST_CASE("AgentSession attaches a tool result's image and retains only the newe
         const std::vector<ChatMessage>& messages = provider.requests()[3].messages;
         REQUIRE(messages.size() == 7);
         REQUIRE(messages[2].role == Role::Tool);
-        CHECK(messages[2].toolResults[0].imagePngBase64.empty());
+        CHECK(messages[2].toolResults[0].images.empty());
         REQUIRE(messages[6].role == Role::Tool);
         // base64("IMG2DATA")
-        CHECK(messages[6].toolResults[0].imagePngBase64 == "SU1HMkRBVEE=");
+        REQUIRE(messages[6].toolResults[0].images.size() == 1);
+        CHECK(messages[6].toolResults[0].images[0] == "SU1HMkRBVEE=");
     }
 
     std::filesystem::remove_all(dir);

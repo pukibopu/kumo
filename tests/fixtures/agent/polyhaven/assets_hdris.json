@@ -1,0 +1,124 @@
+{
+  "blue_lagoon_night": {
+    "categories": [
+      "outdoor",
+      "urban",
+      "night",
+      "partly cloudy",
+      "high contrast",
+      "artificial light"
+    ],
+    "name": "Blue Lagoon Night",
+    "tags": [
+      "lamp",
+      "stars",
+      "ocean",
+      "city",
+      "promenade",
+      "backplates"
+    ]
+  },
+  "dikhololo_night": {
+    "categories": [
+      "outdoor",
+      "nature",
+      "night",
+      "clear",
+      "low contrast",
+      "natural light"
+    ],
+    "name": "Dikhololo Night",
+    "tags": [
+      "bush",
+      "grass",
+      "road",
+      "safari",
+      "tree",
+      "veld",
+      "milky way",
+      "stars",
+      "astronomy"
+    ]
+  },
+  "kloofendal_48d_partly_cloudy": {
+    "categories": [
+      "outdoor",
+      "skies",
+      "nature",
+      "midday",
+      "partly cloudy",
+      "high contrast",
+      "natural light",
+      "collection: verdant_trail"
+    ],
+    "name": "Kloofendal 48d Partly Cloudy",
+    "tags": [
+      "sun",
+      "grass",
+      "rock",
+      "view"
+    ]
+  },
+  "modern_buildings_night": {
+    "categories": [
+      "outdoor",
+      "urban",
+      "night",
+      "partly cloudy",
+      "high contrast",
+      "artificial light"
+    ],
+    "name": "Modern Buildings Night",
+    "tags": [
+      "building",
+      "europe",
+      "river",
+      "architecture",
+      "lamp"
+    ]
+  },
+  "qwantani_night": {
+    "categories": [
+      "outdoor",
+      "natural light",
+      "nature",
+      "skies",
+      "clear",
+      "low contrast",
+      "night"
+    ],
+    "name": "Qwantani Night",
+    "tags": [
+      "mountain",
+      "view",
+      "dam",
+      "lake",
+      "hilltop",
+      "grass",
+      "stars",
+      "milky way",
+      "light pollution",
+      "astronomy"
+    ]
+  },
+  "rooftop_night": {
+    "categories": [
+      "outdoor",
+      "skies",
+      "urban",
+      "sunrise-sunset",
+      "partly cloudy",
+      "high contrast",
+      "artificial light",
+      "night"
+    ],
+    "name": "Rooftop Night",
+    "tags": [
+      "parking",
+      "moon",
+      "twilight",
+      "roof",
+      "concrete"
+    ]
+  }
+}

@@ -2,6 +2,7 @@
 
 #include <kumo/agent/confirmation_gate.h>
 #include <kumo/agent/mcp_server.h>
+#include <kumo/agent/scene_tools.h> // agent::TextureSetIndices (textureSetCache_)
 #include <kumo/agent/session.h>
 #include <kumo/agent/tool_registry.h>
 #include <kumo/asset/procedural_sky.h>
@@ -28,6 +29,13 @@
 namespace kumo::gpu {
 class Device;
 }
+namespace kumo::agent {
+// Poly Haven client (M6.99); not a public kumo_agent header (asset_fetch.h
+// lives in engine/agent/src, private like base64.h), so EngineRuntime only
+// forward-declares it and holds it by pointer, keeping the private type out
+// of this public facade header.
+class PolyHavenClient;
+} // namespace kumo::agent
 
 namespace kumo::facade {
 
@@ -83,14 +91,16 @@ public:
         std::string id;
         std::string name;
         std::string primitive;
-        std::string model; // non-empty when the entity came from instantiateModel
+        std::string model;      // non-empty when the entity came from instantiateModel
+        std::string textureSet; // non-empty when material_set_texture bound one (M6.99)
     };
     struct EntityDetail {
         bool found = false;
         std::string id;
         std::string name;
         std::string primitive;
-        std::string model; // non-empty when the entity came from instantiateModel
+        std::string model;      // non-empty when the entity came from instantiateModel
+        std::string textureSet; // non-empty when material_set_texture bound one (M6.99)
         math::float3 position{0.0f, 0.0f, 0.0f};
         math::float3 eulerDeg{0.0f, 0.0f, 0.0f};
         math::float3 scale{1.0f, 1.0f, 1.0f};
@@ -259,6 +269,13 @@ private:
     // Loads and uploads `name`'s glb on first call; returns the cached record
     // afterward. Null on any failure (already logged).
     const UploadedModel* loadOrGetModel(const std::string& name);
+    // Loads (or reuses from textureSetCache_) `name`'s texture set and binds
+    // it to `materialIndex` (M6.99, EngineRuntime::loadScene's texture-set
+    // provenance rebuild). False on any failure (bad name, missing set on
+    // disk, GPU upload/bind failure), already logged; the caller keeps the
+    // entity loading with whatever textures it already has rather than
+    // aborting the whole scene load.
+    bool applyTextureSet(const std::string& name, std::uint32_t materialIndex);
 
     // Members below are declared in the order app.cpp's locals used to be: that
     // order is the destruction contract (reverse of declaration). Sessions/mcp
@@ -287,6 +304,11 @@ private:
     std::optional<EnvironmentSource> environmentSky_;
     // Keyed by model file name (instantiateModel's `name`); see UploadedModel.
     std::unordered_map<std::string, UploadedModel> modelCache_;
+    // Keyed by texture-set name; shared with the scene-tool registries'
+    // SceneToolContext::textureSets (M6.98 PR-2/M6.99) so a set uploaded via
+    // material_set_texture or asset_fetch and one rebuilt by loadScene's
+    // texture-set provenance step never upload the same set twice.
+    std::shared_ptr<std::unordered_map<std::string, agent::TextureSetIndices>> textureSetCache_;
 
     // Orbit camera arbitration (ADR 0039): orbitMoved_ tracks whether input
     // moved the camera this frame; pump() applies orbit_ onto world_.camera
@@ -319,6 +341,13 @@ private:
     std::unique_ptr<agent::ILLMProvider> shaderProvider_;
     std::optional<agent::AgentSession> sceneSession_;
     std::optional<agent::AgentSession> shaderSession_;
+
+    // Poly Haven client backing asset_fetch (M6.99); owns the real transport,
+    // constructed once in create(). Forward-declared type (see the
+    // kumo::agent::PolyHavenClient declaration above), so ~EngineRuntime()
+    // (already out-of-line) is what makes unique_ptr<incomplete-in-this-header>
+    // valid here.
+    std::unique_ptr<agent::PolyHavenClient> polyHavenClient_;
 
     std::optional<agent::McpServer> mcpServer_;
     std::atomic<bool> mcpEof_{false};

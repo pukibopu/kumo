@@ -131,3 +131,21 @@ TEST_CASE("materialTextureDiffs: extra materials past the shorter vector are lef
 TEST_CASE("materialTextureDiffs: both empty reports no diffs") {
     CHECK(materialTextureDiffs({}, {}).empty());
 }
+
+// sharedTextureSet backs instantiateModel's provenance inheritance: a new
+// entity joining an already-textured shared material must carry the stamp so
+// a save made after the stamped sibling's removal still reloads it textured.
+TEST_CASE("sharedTextureSet: inherits the stamp from any sharer") {
+    kumo::scene::Scene scene;
+    kumo::scene::Entity stamped;
+    stamped.materialIndex = 5;
+    stamped.textureSet = "bark";
+    scene.entities.insert(stamped);
+    kumo::scene::Entity plain;
+    plain.materialIndex = 5;
+    scene.entities.insert(plain);
+
+    CHECK(kumo::facade::detail::sharedTextureSet(scene, 5) == "bark");
+    CHECK(kumo::facade::detail::sharedTextureSet(scene, 6).empty());
+    CHECK(kumo::facade::detail::sharedTextureSet(scene, -1).empty());
+}

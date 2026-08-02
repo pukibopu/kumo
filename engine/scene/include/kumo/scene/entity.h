@@ -25,6 +25,15 @@ struct Entity {
     // after the model is re-uploaded. Empty `model` means not model-sourced.
     std::string model;
     std::int32_t modelMesh = -1;
+
+    // Save/load provenance for material_set_texture (M6.99): non-empty names a
+    // texture set under <assetDir>/textures/ bound to this entity's material;
+    // empty means the material carries no texture set (still just flat
+    // factors, or came in pre-textured from a glTF/model source, which does
+    // not go through this field). Set on every entity sharing the material
+    // (material_set_texture already scans for sharers), so reload rebinds all
+    // of them, not just the one the tool call named.
+    std::string textureSet;
 };
 
 } // namespace kumo::scene

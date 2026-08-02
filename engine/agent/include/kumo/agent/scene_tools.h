@@ -63,6 +63,16 @@ struct TextureSetIndices {
     std::int32_t emissive = -1;
 };
 
+// asset_fetch's result (M6.99). Defined here rather than in the private
+// asset_fetch.h that owns PolyHavenClient, because SceneToolContext::fetchAsset
+// below needs it as a complete type.
+struct FetchedAsset {
+    std::string name;              // asset id, also the on-disk texture-set/env name
+    std::vector<std::string> maps; // texture-set map slots present; empty for env kind
+    bool alreadyPresent = false;   // true when the target already existed; no network I/O ran
+    std::vector<std::string> alternatives; // up to 3 runner-up ids from the query match
+};
+
 // `renderer` may be null (CPU-only tests): tools that need GPU uploads or
 // material access then report a structured error instead of touching it.
 struct SceneToolContext {
@@ -101,6 +111,15 @@ struct SceneToolContext {
     // environment_set's HDR-file effector; null means a `file` argument
     // reports the feature unsupported instead of touching anything.
     std::function<bool(const std::string&)> applyEnvironmentFile;
+    // asset_fetch's effector (M6.99): downloads a CC0 asset from Poly Haven
+    // into the asset library on demand (kind is "texture" or "env"). Null
+    // means the tool reports the feature unsupported, mirroring
+    // instantiateModel/applyEnvironment above. Runs synchronously on
+    // whichever thread invokes it (the tool execution model, ADR 0005) — a 2k
+    // HDR download can take several seconds; see docs/agents.md.
+    std::function<std::expected<FetchedAsset, std::string>(std::string_view kind,
+                                                           std::string_view query)>
+        fetchAsset;
 };
 
 // Registers only scene_list (ADR 0028): the read-only listing tool other agents
@@ -109,14 +128,15 @@ struct SceneToolContext {
 // must outlive the registry.
 void registerSceneListTool(ToolRegistry& registry, SceneToolContext context);
 
-// Registers the sixteen scene tools (ADR 0028, M6.9; asset tools added M6.98
-// PR-2): scene_list plus the mutating/inspection tools (scene_add_entity,
-// scene_add_entities, scene_remove_entity, scene_set_transform, camera_set,
-// light_set, light_remove, material_set_param, scene_define_group,
-// scene_instance_group, environment_set and scene_validate) plus the asset
-// tools (asset_list, material_set_texture, scene_add_model). The context is
-// copied into the handlers; the scene and renderer it points to must outlive
-// the registry.
+// Registers the seventeen scene tools (ADR 0028, M6.9; asset tools added
+// M6.98 PR-2; asset_fetch added M6.99): scene_list plus the mutating/
+// inspection tools (scene_add_entity, scene_add_entities, scene_remove_entity,
+// scene_set_transform, camera_set, light_set, light_remove,
+// material_set_param, scene_define_group, scene_instance_group,
+// environment_set and scene_validate) plus the asset tools (asset_list,
+// material_set_texture, scene_add_model, asset_fetch). The context is copied
+// into the handlers; the scene and renderer it points to must outlive the
+// registry.
 void registerSceneTools(ToolRegistry& registry, SceneToolContext context);
 
 } // namespace kumo::agent

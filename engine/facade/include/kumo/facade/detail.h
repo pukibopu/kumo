@@ -2,8 +2,10 @@
 
 #include <kumo/agent/config.h>
 #include <kumo/renderer/forward_renderer.h>
+#include <kumo/scene/scene.h>
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace kumo::facade::detail {
@@ -36,5 +38,12 @@ SessionPlan planSessions(const agent::AgentConfig& config, bool confirmDestructi
 std::vector<std::size_t> materialTextureDiffs(
     const std::vector<renderer::ForwardRenderer::MaterialTextureIndices>& current,
     const std::vector<renderer::ForwardRenderer::MaterialTextureIndices>& snapshot);
+
+// The texture-set stamp carried by any entity already sharing `materialIndex`;
+// empty when none does. A new entity joining a shared material must inherit
+// the stamp: the GPU binding is per-material, so it renders textured either
+// way, but without the stamp a save made after the stamped sibling's removal
+// would reload it untextured.
+std::string sharedTextureSet(const scene::Scene& scene, std::int32_t materialIndex);
 
 } // namespace kumo::facade::detail

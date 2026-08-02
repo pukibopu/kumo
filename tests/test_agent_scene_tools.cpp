@@ -90,13 +90,14 @@ std::vector<std::uint8_t> flatPixels(std::uint32_t width, std::uint32_t height,
 
 } // namespace
 
-TEST_CASE("scene tools register all sixteen with object schemas") {
+TEST_CASE("scene tools register all seventeen with object schemas") {
     Fixture f;
-    const char* expected[] = {
-        "scene_list",         "asset_list",           "scene_add_entity",    "scene_add_entities",
-        "scene_add_model",    "scene_remove_entity",  "scene_set_transform", "camera_set",
-        "light_set",          "light_remove",         "material_set_param",  "material_set_texture",
-        "scene_define_group", "scene_instance_group", "environment_set",     "scene_validate"};
+    const char* expected[] = {"scene_list",          "asset_list",         "scene_add_entity",
+                              "scene_add_entities",  "scene_add_model",    "scene_remove_entity",
+                              "scene_set_transform", "camera_set",         "light_set",
+                              "light_remove",        "material_set_param", "material_set_texture",
+                              "asset_fetch",         "scene_define_group", "scene_instance_group",
+                              "environment_set",     "scene_validate"};
     for (const char* name : expected) {
         const ToolDef* def = f.registry.find(name);
         REQUIRE_MESSAGE(def != nullptr, name);
@@ -117,6 +118,7 @@ TEST_CASE("scene tools register all sixteen with object schemas") {
     CHECK(!f.registry.find("scene_validate")->destructive);
     CHECK(!f.registry.find("asset_list")->destructive);
     CHECK(!f.registry.find("material_set_texture")->destructive);
+    CHECK(!f.registry.find("asset_fetch")->destructive);
 }
 
 TEST_CASE("registerSceneListTool registers exactly scene_list") {
@@ -1042,6 +1044,109 @@ TEST_CASE("material_set_texture rejects an invalid tiling value") {
         f.invoke("material_set_texture", R"({"entity_id":"0:0","texture":"sand","tiling":-1})");
     CHECK(result["status"] == "error");
     CHECK(result["message"].get<std::string>().find("tiling") != std::string::npos);
+}
+
+// --- asset_fetch -----------------------------------------------------------
+
+TEST_CASE("asset_fetch reports unsupported without a fetchAsset callback") {
+    Fixture f; // default context leaves fetchAsset null
+    const json result = f.invoke("asset_fetch", R"({"kind":"texture","query":"asphalt"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("not available") != std::string::npos);
+}
+
+TEST_CASE("asset_fetch validates kind and query before ever calling the callback") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    bool called = false;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.fetchAsset = [&called](std::string_view,
+                               std::string_view) -> std::expected<FetchedAsset, std::string> {
+        called = true;
+        return FetchedAsset{};
+    };
+    registerSceneTools(registry, ctx);
+
+    json result = invokeOn(registry, "asset_fetch", R"({"kind":"bogus","query":"asphalt"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("kind") != std::string::npos);
+
+    result = invokeOn(registry, "asset_fetch", R"({"kind":"texture"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("query") != std::string::npos);
+
+    result = invokeOn(registry, "asset_fetch", R"({"kind":"texture","query":""})");
+    CHECK(result["status"] == "error");
+
+    result = invokeOn(registry, "asset_fetch",
+                      std::format(R"({{"kind":"texture","query":"{}"}})", std::string(65, 'a')));
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("64") != std::string::npos);
+
+    CHECK(!called);
+}
+
+TEST_CASE("asset_fetch passes kind/query through and reports the callback's success shape") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    std::string capturedKind;
+    std::string capturedQuery;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.fetchAsset = [&](std::string_view kind,
+                         std::string_view query) -> std::expected<FetchedAsset, std::string> {
+        capturedKind = kind;
+        capturedQuery = query;
+        return FetchedAsset{.name = "asphalt_02",
+                            .maps = {"albedo", "normal"},
+                            .alreadyPresent = false,
+                            .alternatives = {"asphalt_01", "aerial_asphalt_01"}};
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result =
+        invokeOn(registry, "asset_fetch", R"({"kind":"texture","query":"asphalt"})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["kind"] == "texture");
+    CHECK(result["name"] == "asphalt_02");
+    CHECK(result["already_present"] == false);
+    REQUIRE(result["maps"].size() == 2);
+    CHECK(result["maps"][0] == "albedo");
+    REQUIRE(result["alternatives"].size() == 2);
+    CHECK(result["alternatives"][0] == "asphalt_01");
+    CHECK(capturedKind == "texture");
+    CHECK(capturedQuery == "asphalt");
+}
+
+TEST_CASE("asset_fetch passes the callback's error through unchanged, and omits alternatives "
+          "when empty") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.fetchAsset = [](std::string_view,
+                        std::string_view) -> std::expected<FetchedAsset, std::string> {
+        return std::unexpected(std::string("no asset matches 'zzz'"));
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "asset_fetch", R"({"kind":"env","query":"zzz"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"] == "no asset matches 'zzz'");
+}
+
+TEST_CASE("asset_fetch omits the alternatives key when the callback returns none") {
+    scene::Scene scene;
+    ToolRegistry registry;
+    SceneToolContext ctx{.scene = &scene, .renderer = nullptr};
+    ctx.fetchAsset = [](std::string_view,
+                        std::string_view) -> std::expected<FetchedAsset, std::string> {
+        return FetchedAsset{.name = "sand", .maps = {"albedo"}, .alreadyPresent = true};
+    };
+    registerSceneTools(registry, ctx);
+
+    const json result = invokeOn(registry, "asset_fetch", R"({"kind":"texture","query":"sand"})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["already_present"] == true);
+    CHECK(!result.contains("alternatives"));
 }
 
 // --- scene_add_model -----------------------------------------------------

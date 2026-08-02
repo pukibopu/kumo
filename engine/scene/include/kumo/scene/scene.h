@@ -6,6 +6,7 @@
 #include <kumo/scene/slot_map.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -17,6 +18,12 @@ public:
 
     SlotMap<Entity> entities;
     Camera camera;
+
+    // Next Entity::assemblyId to hand out (MP); monotonic within a session.
+    // Plain member so it travels with Scene copies: undo snapshots restore it
+    // together with the entities, and scene load bumps it past the loaded
+    // maximum so new assemblies never collide with restored ones.
+    std::int32_t nextAssemblyId = 1;
 
     // Returns false when the fixed light budget (ADR 0026) is exhausted; the cap
     // mirrors the GPU-side fixed array, so lights_ stays private to enforce it.

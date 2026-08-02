@@ -26,6 +26,14 @@ struct Entity {
     std::string model;
     std::int32_t modelMesh = -1;
 
+    // Placement provenance (MP): entities created together as one assembly — a
+    // multi-node model instance or one scene_instance_group stamp — share a
+    // positive id from Scene::nextAssemblyId. 0 means independently placed.
+    // scene_validate suppresses overlap findings within one assembly (a lamp
+    // head intersecting its pole is intended); overlaps between assemblies
+    // still report.
+    std::int32_t assemblyId = 0;
+
     // Save/load provenance for material_set_texture (M6.99): non-empty names a
     // texture set under <assetDir>/textures/ bound to this entity's material;
     // empty means the material carries no texture set (still just flat

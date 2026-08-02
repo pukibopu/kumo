@@ -1,6 +1,7 @@
 #include <kumo/agent/scene_tools.h>
 
 #include "asset_index.h"
+#include "placement.h"
 
 #include <kumo/agent/entity_id.h>
 #include <kumo/asset/model_resolver.h>
@@ -25,7 +26,6 @@
 #include <filesystem>
 #include <format>
 #include <optional>
-#include <random>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -144,6 +144,19 @@ bool readNumber(const json& args, const char* key, float& out, std::string& erro
         return false;
     }
     out = value;
+    return true;
+}
+
+bool readBool(const json& args, const char* key, bool& out, std::string& error) {
+    const auto it = args.find(key);
+    if (it == args.end()) {
+        return true;
+    }
+    if (!it->is_boolean()) {
+        error = std::format("{} must be a boolean", key);
+        return false;
+    }
+    out = it->get<bool>();
     return true;
 }
 
@@ -378,6 +391,60 @@ std::expected<EntityInput, std::string> parseEntityInput(const json& args) {
     return input;
 }
 
+// Defined next to scene_validate below; declared here because placement
+// preflight (snap/avoid_overlap) needs every existing entity's world AABB
+// before it mutates anything.
+struct AabbEntity {
+    std::string id;
+    math::Aabb box;
+    std::int32_t assemblyId = 0; // shared positive id = same model/group instance
+};
+std::vector<AabbEntity> collectAabbs(const SceneToolContext& context);
+
+json aabbJson(const math::Aabb& box) {
+    return {{"min", numberArray(box.min)}, {"max", numberArray(box.max)}};
+}
+
+// Optional placement controls shared by scene_add_entity and scene_add_model
+// (MP milestone). Defaults keep pre-MP calls byte-identical in behavior.
+struct PlacementArgs {
+    bool snapToGround = false;
+    float clearance = 0.01f;
+    bool avoidOverlap = false;
+};
+
+std::expected<PlacementArgs, std::string> parsePlacementArgs(const json& args) {
+    PlacementArgs out;
+    std::string error;
+    if (!readBool(args, "snap_to_ground", out.snapToGround, error) ||
+        !readNumber(args, "clearance", out.clearance, error) ||
+        !readBool(args, "avoid_overlap", out.avoidOverlap, error)) {
+        return std::unexpected(error);
+    }
+    if (args.contains("clearance") && out.clearance < 0.0f) {
+        return std::unexpected(std::string("clearance must be non-negative"));
+    }
+    return out;
+}
+
+// The structured avoid_overlap rejection both placement tools return: every
+// conflicting id, the deepest conflict's per-axis penetration, the caller's
+// requested position and (when the ring search finds one) a deterministic
+// alternative.
+json placementConflictJson(json conflictingIds, const math::float3& depth,
+                           const math::float3& requested,
+                           const std::optional<math::float3>& suggested) {
+    json out{{"status", "error"},
+             {"message", "placement rejected: the candidate bounds overlap existing entities"},
+             {"conflicting_entity_ids", std::move(conflictingIds)},
+             {"overlap_depth", numberArray(depth)},
+             {"requested_position", numberArray(requested)}};
+    if (suggested.has_value()) {
+        out["suggested_position"] = numberArray(*suggested);
+    }
+    return out;
+}
+
 // Builds the mesh, uploads mesh+material (when a renderer is attached) and
 // inserts the entity. The error string is a plain message, matching
 // parseEntityInput, for the same batch-prefixing reason.
@@ -403,12 +470,63 @@ std::string sceneAddEntity(const SceneToolContext& context, const json& args) {
     if (!input.has_value()) {
         return errorJson(input.error());
     }
+    const std::expected<PlacementArgs, std::string> options = parsePlacementArgs(args);
+    if (!options.has_value()) {
+        return errorJson(options.error());
+    }
+
+    // Candidate world bounds from the primitive's CPU-side local AABB —
+    // available before any scene or renderer mutation, so snapping and the
+    // collision preflight run entirely on the candidate.
+    const math::Aabb local =
+        asset::makePrimitive(input->entity.primitive, input->entity.primitiveSize)->localAabb;
+    math::Aabb candidate = math::transformAabb(local, input->entity.transform.matrix());
+    const bool snapped = options->snapToGround;
+    if (snapped) {
+        const float deltaY = placement::snapDeltaY(candidate, options->clearance);
+        input->entity.transform.position.y += deltaY;
+        candidate.min.y += deltaY;
+        candidate.max.y += deltaY;
+    }
+
+    if (options->avoidOverlap) {
+        const std::vector<AabbEntity> existing = collectAabbs(context);
+        std::vector<math::Aabb> boxes;
+        boxes.reserve(existing.size());
+        for (const AabbEntity& entry : existing) {
+            boxes.push_back(entry.box);
+        }
+        const std::vector<placement::Conflict> conflicts =
+            placement::findConflicts(candidate, boxes, placement::kSupportTolerance);
+        if (!conflicts.empty()) {
+            json ids = json::array();
+            for (const placement::Conflict& conflict : conflicts) {
+                ids.push_back(existing[conflict.index].id);
+            }
+            const std::optional<math::float3> suggested =
+                placement::suggestPosition(candidate, input->entity.transform.position, boxes,
+                                           placement::kSupportTolerance, 8);
+            return placementConflictJson(std::move(ids),
+                                         placement::deepestConflict(conflicts).depth,
+                                         input->entity.transform.position, suggested)
+                .dump();
+        }
+    }
+
     std::expected<scene::EntityId, std::string> id =
         buildAndInsertEntity(context, std::move(*input));
     if (!id.has_value()) {
         return errorJson(id.error());
     }
-    return json{{"status", "ok"}, {"entity_id", formatEntityId(*id)}}.dump();
+    json result{
+        {"status", "ok"}, {"entity_id", formatEntityId(*id)}, {"aabb_world", aabbJson(candidate)}};
+    if (snapped) {
+        const scene::Entity* inserted = context.scene->entities.get(*id);
+        if (inserted != nullptr) {
+            result["position"] = numberArray(inserted->transform.position);
+        }
+    }
+    return result.dump();
 }
 
 // Non-destructive: creation only, so it needs none of scene_remove_entity's
@@ -615,7 +733,9 @@ std::expected<scene::Transform, std::string> parseInstanceTransform(const json& 
 // x/z/yaw/scale order per instance so identical seed+args always reproduce the
 // same sequence (yaw and scale draws are skipped entirely when their jitter is
 // zero, keeping the no-jitter case reproducible without a degenerate [0,0] range).
-std::expected<std::vector<scene::Transform>, std::string> parseScatter(const json& scatter) {
+// Parse-and-validate only; sampling happens in placement::sampleScatter so the
+// rejection logic stays a pure, directly-testable function.
+std::expected<placement::ScatterParams, std::string> parseScatter(const json& scatter) {
     if (!scatter.is_object()) {
         return std::unexpected(std::string("scatter must be an object"));
     }
@@ -623,69 +743,61 @@ std::expected<std::vector<scene::Transform>, std::string> parseScatter(const jso
     if (!scatter.contains("count")) {
         return std::unexpected(std::string("count is required"));
     }
-    std::int64_t count = 0;
-    if (!readInt(scatter, "count", count, error)) {
+    placement::ScatterParams params;
+    if (!readInt(scatter, "count", params.count, error)) {
         return std::unexpected(error);
     }
-    if (count < 1 || count > 64) {
+    if (params.count < 1 || params.count > 64) {
         return std::unexpected(std::string("count must be between 1 and 64"));
     }
 
     if (!scatter.contains("area")) {
         return std::unexpected(std::string("area ([width,depth]) is required"));
     }
-    float area[2] = {0.0f, 0.0f};
-    if (!readNumbers(scatter, "area", area, 2, error)) {
+    if (!readNumbers(scatter, "area", params.area, 2, error)) {
         return std::unexpected(error);
     }
-    if (area[0] < 0.0f || area[1] < 0.0f) {
+    if (params.area[0] < 0.0f || params.area[1] < 0.0f) {
         return std::unexpected(std::string("area components must be non-negative"));
     }
 
-    math::float3 center{0.0f, 0.0f, 0.0f};
-    if (!readFloat3(scatter, "position", center, error)) {
+    if (!readFloat3(scatter, "position", params.center, error)) {
+        return std::unexpected(error);
+    }
+    if (!readInt(scatter, "seed", params.seed, error)) {
         return std::unexpected(error);
     }
 
-    std::int64_t seed = 0;
-    if (!readInt(scatter, "seed", seed, error)) {
+    if (!readNumber(scatter, "scale_jitter", params.scaleJitter, error)) {
         return std::unexpected(error);
     }
-
-    float scaleJitter = 0.0f;
-    if (!readNumber(scatter, "scale_jitter", scaleJitter, error)) {
-        return std::unexpected(error);
-    }
-    if (scaleJitter < 0.0f || scaleJitter > 0.5f) {
+    if (params.scaleJitter < 0.0f || params.scaleJitter > 0.5f) {
         return std::unexpected(std::string("scale_jitter must be between 0 and 0.5"));
     }
 
-    float rotationJitterDeg = 0.0f;
-    if (!readNumber(scatter, "rotation_jitter_deg", rotationJitterDeg, error)) {
+    if (!readNumber(scatter, "rotation_jitter_deg", params.rotationJitterDeg, error)) {
         return std::unexpected(error);
     }
-    if (rotationJitterDeg < 0.0f || rotationJitterDeg > 180.0f) {
+    if (params.rotationJitterDeg < 0.0f || params.rotationJitterDeg > 180.0f) {
         return std::unexpected(std::string("rotation_jitter_deg must be between 0 and 180"));
     }
 
-    std::mt19937 rng(static_cast<std::uint32_t>(static_cast<std::uint64_t>(seed)));
-    std::uniform_real_distribution<float> xDist(-area[0] * 0.5f, area[0] * 0.5f);
-    std::uniform_real_distribution<float> zDist(-area[1] * 0.5f, area[1] * 0.5f);
-    std::uniform_real_distribution<float> yawDist(-rotationJitterDeg, rotationJitterDeg);
-    std::uniform_real_distribution<float> scaleDist(1.0f - scaleJitter, 1.0f + scaleJitter);
-
-    std::vector<scene::Transform> instances;
-    instances.reserve(static_cast<std::size_t>(count));
-    for (std::int64_t i = 0; i < count; ++i) {
-        scene::Transform t;
-        t.position = {center.x + xDist(rng), center.y, center.z + zDist(rng)};
-        const float yaw = rotationJitterDeg > 0.0f ? yawDist(rng) : 0.0f;
-        t.rotation = math::quatFromEulerDegrees({0.0f, yaw, 0.0f});
-        const float factor = scaleJitter > 0.0f ? scaleDist(rng) : 1.0f;
-        t.scale = {factor, factor, factor};
-        instances.push_back(t);
+    if (!readNumber(scatter, "min_spacing", params.minSpacing, error)) {
+        return std::unexpected(error);
     }
-    return instances;
+    if (params.minSpacing < 0.0f) {
+        return std::unexpected(std::string("min_spacing must be non-negative"));
+    }
+    if (!readBool(scatter, "avoid_existing", params.avoidExisting, error)) {
+        return std::unexpected(error);
+    }
+    if (!readInt(scatter, "max_attempts", params.maxAttempts, error)) {
+        return std::unexpected(error);
+    }
+    if (scatter.contains("max_attempts") && (params.maxAttempts < 1 || params.maxAttempts > 4096)) {
+        return std::unexpected(std::string("max_attempts must be between 1 and 4096"));
+    }
+    return params;
 }
 
 // Stamps `group` at every instance transform; batch-atomic like
@@ -726,12 +838,51 @@ std::string sceneInstanceGroup(const SceneToolContext& context, const json& args
             instances.push_back(*t);
         }
     } else {
-        std::expected<std::vector<scene::Transform>, std::string> scattered =
-            parseScatter(args["scatter"]);
-        if (!scattered.has_value()) {
-            return errorJson(std::format("scatter.{}", scattered.error()));
+        std::expected<placement::ScatterParams, std::string> params = parseScatter(args["scatter"]);
+        if (!params.has_value()) {
+            return errorJson(std::format("scatter.{}", params.error()));
         }
-        instances = std::move(*scattered);
+
+        // The aggregate footprint of one group instance at identity, from the
+        // members' CPU-side primitive bounds (define-time validation already
+        // proved every member's primitive resolves).
+        std::vector<math::Aabb> memberBoxes;
+        memberBoxes.reserve(group.members.size());
+        for (const GroupEntitySpec& member : group.members) {
+            memberBoxes.push_back(
+                math::transformAabb(asset::makePrimitive(member.primitive, member.size)->localAabb,
+                                    member.transform.matrix()));
+        }
+        const math::Aabb groupLocal = *placement::aggregateAabb(memberBoxes);
+
+        std::vector<math::Aabb> existingBoxes;
+        if (params->avoidExisting) {
+            const std::vector<AabbEntity> existing = collectAabbs(context);
+            existingBoxes.reserve(existing.size());
+            for (const AabbEntity& entry : existing) {
+                existingBoxes.push_back(entry.box);
+            }
+        }
+
+        // Shallow support contact with the ground (or any surface the scatter
+        // sits on) must not reject candidates; 2cm mirrors scene_validate.
+        std::expected<std::vector<scene::Transform>, placement::ScatterFailure> sampled =
+            placement::sampleScatter(*params, groupLocal, existingBoxes,
+                                     placement::kSupportTolerance);
+        if (!sampled.has_value()) {
+            return json{
+                {"status", "error"},
+                {"message", std::format("scatter could not place {} instances within {} attempts "
+                                        "({} accepted); grow the area, lower min_spacing or count",
+                                        sampled.error().requested, sampled.error().attempts,
+                                        sampled.error().accepted)},
+                {"requested", sampled.error().requested},
+                {"accepted", sampled.error().accepted},
+                {"area", json::array({params->area[0], params->area[1]})},
+                {"min_spacing", params->minSpacing}}
+                .dump();
+        }
+        instances = std::move(*sampled);
     }
 
     const std::size_t total = instances.size() * group.members.size();
@@ -743,12 +894,19 @@ std::string sceneInstanceGroup(const SceneToolContext& context, const json& args
     std::vector<EntityInput> parsed;
     parsed.reserve(total);
     for (std::size_t i = 0; i < instances.size(); ++i) {
+        // One assembly per stamped instance (MP): members of one instance
+        // overlap by design (a lamp head meets its pole), so scene_validate
+        // skips those pairs while different instances still check against
+        // each other. The counter only ever advances, so ids burned by a
+        // failed call are simply skipped.
+        const std::int32_t assemblyId = context.scene->nextAssemblyId++;
         for (const GroupEntitySpec& member : group.members) {
             EntityInput input;
             input.entity.name = std::format("{}_{}_{}", *name, i, member.name);
             input.entity.primitive = member.primitive;
             input.entity.primitiveSize = member.size;
             input.entity.transform = composeGroupMember(instances[i], member.transform);
+            input.entity.assemblyId = assemblyId;
             input.material = toMaterialParams(member.material);
             parsed.push_back(std::move(input));
         }
@@ -1423,11 +1581,29 @@ std::string sceneAddModel(const SceneToolContext& context, const json& args) {
         root.scale = {value, value, value};
     }
 
-    std::expected<std::vector<std::string>, std::string> ids =
-        context.instantiateModel(root, model);
-    if (!ids.has_value()) {
-        return errorJson(ids.error());
+    const std::expected<PlacementArgs, std::string> options = parsePlacementArgs(args);
+    if (!options.has_value()) {
+        return errorJson(options.error());
     }
+    const ModelPlacementRequest request{.snapToGround = options->snapToGround,
+                                        .clearance = options->clearance,
+                                        .avoidOverlap = options->avoidOverlap};
+
+    std::expected<ModelPlacementResult, std::string> placed =
+        context.instantiateModel(root, model, request);
+    if (!placed.has_value()) {
+        return errorJson(placed.error());
+    }
+    if (placed->conflict.has_value()) {
+        json ids = json::array();
+        for (const std::string& id : placed->conflict->conflictingIds) {
+            ids.push_back(id);
+        }
+        return placementConflictJson(std::move(ids), placed->conflict->depth, root.position,
+                                     placed->conflict->suggested)
+            .dump();
+    }
+    const std::vector<std::string>* ids = &placed->entityIds;
 
     if (args.contains("name")) {
         std::string prefix;
@@ -1459,7 +1635,14 @@ std::string sceneAddModel(const SceneToolContext& context, const json& args) {
     for (const std::string& idText : *ids) {
         idsJson.push_back(idText);
     }
-    return json{{"status", "ok"}, {"entities", std::move(idsJson)}, {"model", model}}.dump();
+    json result{{"status", "ok"},
+                {"entities", std::move(idsJson)},
+                {"model", model},
+                {"aabb_world", aabbJson(placed->aabb)}};
+    if (request.snapToGround) {
+        result["position"] = numberArray(placed->finalPosition);
+    }
+    return result.dump();
 }
 
 // Starting point for environment_set's preset resolution; explicit fields in
@@ -1605,13 +1788,9 @@ std::string environmentSet(const SceneToolContext& context, const json& args) {
         .dump();
 }
 
-// scene_validate's per-entity world AABB, reusing exactly how scene_list
-// computes aabb_world; empty when there is no renderer to ask.
-struct AabbEntity {
-    std::string id;
-    math::Aabb box;
-};
-
+// Per-entity world AABBs, reusing exactly how scene_list computes aabb_world;
+// empty when there is no renderer to ask (struct declared above with the
+// placement helpers).
 std::vector<AabbEntity> collectAabbs(const SceneToolContext& context) {
     std::vector<AabbEntity> out;
     context.scene->entities.forEach([&](scene::EntityId id, const scene::Entity& entity) {
@@ -1634,7 +1813,8 @@ std::vector<AabbEntity> collectAabbs(const SceneToolContext& context) {
         if (!local.has_value()) {
             return;
         }
-        out.push_back({formatEntityId(id), math::transformAabb(*local, entity.transform.matrix())});
+        out.push_back({formatEntityId(id), math::transformAabb(*local, entity.transform.matrix()),
+                       entity.assemblyId});
     });
     return out;
 }
@@ -1644,6 +1824,12 @@ struct Finding {
     const char* severity;
     std::string entityId; // empty when the finding names no single entity
     std::string message;
+    // Overlap findings only (MP): the second party plus measured penetration.
+    // Explicit default member initializers keep the many aggregate-init sites
+    // for the other checks free of missing-field warnings.
+    std::string otherEntityId = {};
+    std::optional<math::float3> overlapDepth = {};
+    std::optional<float> overlapRatio = {};
 };
 
 json findingJson(const Finding& finding) {
@@ -1651,6 +1837,15 @@ json findingJson(const Finding& finding) {
         {"check", finding.check}, {"severity", finding.severity}, {"message", finding.message}};
     if (!finding.entityId.empty()) {
         out["entity_id"] = finding.entityId;
+    }
+    if (!finding.otherEntityId.empty()) {
+        out["other_entity_id"] = finding.otherEntityId;
+    }
+    if (finding.overlapDepth.has_value()) {
+        out["overlap_depth"] = numberArray(*finding.overlapDepth);
+    }
+    if (finding.overlapRatio.has_value()) {
+        out["overlap_ratio"] = *finding.overlapRatio;
     }
     return out;
 }
@@ -1685,26 +1880,55 @@ void checkFloating(const std::vector<AabbEntity>& aabbs, std::vector<Finding>& f
     }
 }
 
+// One finding per unordered pair (i<j, never both A-vs-B and B-vs-A): minimal
+// per-axis penetration beyond 2cm is real interpenetration (warning); between
+// 1mm and 2cm it is support contact worth at most a note (info); below that,
+// noise.
 void checkOverlap(const std::vector<AabbEntity>& aabbs, std::vector<Finding>& findings) {
-    constexpr float kEps = 1e-3f;
     if (aabbs.size() > 500) {
         findings.push_back({"overlap", "info", "",
                             std::format("overlap check skipped: {} entities exceeds the 500 limit",
                                         aabbs.size())});
         return;
     }
+    const auto volume = [](const math::Aabb& box) {
+        return (box.max.x - box.min.x) * (box.max.y - box.min.y) * (box.max.z - box.min.z);
+    };
     for (std::size_t i = 0; i < aabbs.size(); ++i) {
         for (std::size_t j = i + 1; j < aabbs.size(); ++j) {
+            // Entities placed together as one assembly (a model's own nodes, a
+            // group instance's members) overlap by construction; only overlaps
+            // between separate placements are actionable.
+            if (aabbs[i].assemblyId > 0 && aabbs[i].assemblyId == aabbs[j].assemblyId) {
+                continue;
+            }
             const math::Aabb& a = aabbs[i].box;
             const math::Aabb& b = aabbs[j].box;
-            const float overlapX = std::min(a.max.x, b.max.x) - std::max(a.min.x, b.min.x);
-            const float overlapY = std::min(a.max.y, b.max.y) - std::max(a.min.y, b.min.y);
-            const float overlapZ = std::min(a.max.z, b.max.z) - std::max(a.min.z, b.min.z);
-            if (overlapX > kEps && overlapY > kEps && overlapZ > kEps) {
-                findings.push_back(
-                    {"overlap", "info", aabbs[i].id,
-                     std::format("entity {} overlaps entity {}", aabbs[i].id, aabbs[j].id)});
+            const std::optional<math::float3> depth = placement::overlapDepth(a, b);
+            if (!depth.has_value()) {
+                continue;
             }
+            const float minAxis = std::min({depth->x, depth->y, depth->z});
+            if (minAxis <= placement::kNoiseEps) {
+                continue;
+            }
+            // Support contact stays info; anything else — including thin
+            // geometry buried sideways, whose smallest axis depth is tiny —
+            // is a real interpenetration.
+            const bool deep =
+                !placement::supportContact(a, b, *depth, placement::kSupportTolerance);
+            const float ratio = std::clamp((depth->x * depth->y * depth->z) /
+                                               std::max(std::min(volume(a), volume(b)), 1e-9f),
+                                           0.0f, 1.0f);
+            Finding finding{
+                "overlap", deep ? "warning" : "info", aabbs[i].id,
+                deep ? std::format("entity {} interpenetrates entity {}", aabbs[i].id, aabbs[j].id)
+                     : std::format("entity {} rests in shallow contact with entity {}", aabbs[i].id,
+                                   aabbs[j].id)};
+            finding.otherEntityId = aabbs[j].id;
+            finding.overlapDepth = *depth;
+            finding.overlapRatio = ratio;
+            findings.push_back(std::move(finding));
         }
     }
 }
@@ -1847,6 +2071,14 @@ constexpr const char* kEntityPropertiesSchema =
 "roughness":{"type":"number","description":"Clamped to the 0-1 range"},
 "emissive":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}})";
 
+// Placement options (MP) shared by scene_add_entity and scene_add_model only —
+// deliberately NOT part of kEntityPropertiesSchema: scene_add_entities'
+// per-item placement would need a batch-atomic preflight, a later milestone.
+constexpr const char* kPlacementPropertiesSchema =
+    R"("snap_to_ground":{"type":"boolean","description":"Rest the object on the ground: translate Y so its bounds sit clearance above y=0. Default false"},
+"clearance":{"type":"number","minimum":0,"description":"Meters above ground for snap_to_ground. Default 0.01. Collision tolerance is fixed at 0.02 and not affected by this"},
+"avoid_overlap":{"type":"boolean","description":"Reject the call with conflicting_entity_ids and a suggested_position when the bounds would interpenetrate an existing entity; nothing is created. Default false"})";
+
 } // namespace
 
 void registerSceneListTool(ToolRegistry& registry, SceneToolContext context) {
@@ -1893,10 +2125,10 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
                  [context](std::string_view) { return assetList(context); });
 
     add("scene_add_entity",
-        "Add a procedural primitive entity to the scene; returns its entity_id. For multiple "
-        "entities prefer scene_add_entities.",
-        std::string(R"({"type":"object","properties":{)") + kEntityPropertiesSchema +
-            R"(},"required":["primitive"]})",
+        "Add a procedural primitive entity to the scene; returns its entity_id and world-space "
+        "AABB. For multiple entities prefer scene_add_entities.",
+        std::string(R"({"type":"object","properties":{)") + kEntityPropertiesSchema + ",\n" +
+            kPlacementPropertiesSchema + R"(},"required":["primitive"]})",
         false,
         [](const SceneToolContext& ctx, const json& args) { return sceneAddEntity(ctx, args); });
 
@@ -1911,14 +2143,17 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
 
     add("scene_add_model",
         "Place a real glTF model from the asset library (name from asset_list) at a position; "
-        "returns its entity_ids, one per mesh node. Prefer this over primitives for organic or "
-        "detailed things (trees, props, characters) when a fitting model exists.",
-        R"({"type":"object","properties":{
+        "returns its entity_ids, one per mesh node, and the aggregate world-space AABB. Prefer "
+        "this over primitives for organic or detailed things (trees, props, characters) when a "
+        "fitting model exists.",
+        std::string(R"({"type":"object","properties":{
 "model":{"type":"string","description":"Model name from asset_list, optionally with one category prefix, e.g. props/crate"},
 "name":{"type":"string","description":"Optional entity name prefix; default keeps the model's own node names"},
 "position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"World position [x,y,z]"},
 "rotation_euler_deg":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Euler XYZ rotation in degrees"},
-"scale":{"type":"number","description":"Uniform scale factor; default 1"}},
+"scale":{"type":"number","description":"Uniform scale factor; default 1"},
+)") + kPlacementPropertiesSchema +
+            R"(},
 "required":["model","position"]})",
         false,
         [](const SceneToolContext& ctx, const json& args) { return sceneAddModel(ctx, args); });
@@ -2036,7 +2271,10 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
 "position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"description":"Scatter rectangle center, default origin"},
 "seed":{"type":"integer","description":"Default 0; identical seed and args reproduce identical output"},
 "scale_jitter":{"type":"number","minimum":0,"maximum":0.5,"description":"Per-instance uniform scale factor 1+/-jitter"},
-"rotation_jitter_deg":{"type":"number","minimum":0,"maximum":180,"description":"Per-instance yaw jitter"}},
+"rotation_jitter_deg":{"type":"number","minimum":0,"maximum":180,"description":"Per-instance yaw jitter"},
+"min_spacing":{"type":"number","minimum":0,"description":"Minimum XZ edge-to-edge distance between instances in meters; default 0 allows contact"},
+"avoid_existing":{"type":"boolean","description":"Also reject samples that would interpenetrate existing scene entities; default false"},
+"max_attempts":{"type":"integer","minimum":1,"maximum":4096,"description":"Sampling budget; default max of 10*count and 64. The call fails atomically, placing nothing, when count cannot fit"}},
 "required":["count","area"]}},
 "required":["name"]})",
         false, [](const SceneToolContext& ctx, const json& args) {

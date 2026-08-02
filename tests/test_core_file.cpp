@@ -82,6 +82,25 @@ TEST_CASE("isPlainAssetName accepts ordinary names, rejects traversal and hidden
     CHECK_FALSE(kumo::isPlainAssetName("models/../../etc/passwd"));
 }
 
+TEST_CASE("isPlainAssetPath accepts one category component, rejects deeper nesting and traversal") {
+    CHECK(kumo::isPlainAssetPath("sand"));        // single component: still fine
+    CHECK(kumo::isPlainAssetPath("props/crate")); // exactly one '/'
+    CHECK(kumo::isPlainAssetPath("Nature_Kit/bridge-stone"));
+
+    CHECK_FALSE(kumo::isPlainAssetPath("props/crate/lid")); // two '/': over maxComponents
+    CHECK_FALSE(kumo::isPlainAssetPath(""));
+    CHECK_FALSE(kumo::isPlainAssetPath("props/"));       // empty leaf component
+    CHECK_FALSE(kumo::isPlainAssetPath("/crate"));       // empty (absolute) first component
+    CHECK_FALSE(kumo::isPlainAssetPath("props//crate")); // empty middle component
+    CHECK_FALSE(kumo::isPlainAssetPath("../props/crate"));
+    CHECK_FALSE(kumo::isPlainAssetPath("props/../crate"));
+    CHECK_FALSE(kumo::isPlainAssetPath("props/.crate")); // leaf starts with '.'
+    CHECK_FALSE(kumo::isPlainAssetPath(".props/crate"));
+    CHECK_FALSE(kumo::isPlainAssetPath("props\\crate"));
+    CHECK_FALSE(kumo::isPlainAssetPath("props/crate", 1)); // maxComponents=1: no slash allowed
+    CHECK(kumo::isPlainAssetPath("crate", 1));
+}
+
 TEST_CASE("FileWatcher fires when a missing file appears") {
     fs::path path = fs::temp_directory_path() / "kumo_watch_appear.txt";
     std::error_code ec;

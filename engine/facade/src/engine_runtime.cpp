@@ -137,8 +137,13 @@ constexpr const char* kSceneSystemPrompt =
     "Verify, then deliver. After building, call scene_validate and fix warnings (floating "
     "objects, interpenetrating objects you did not intend, subject out of frame, unlit "
     "scenes); do not finish with unintended overlap warnings. Then call viewer_screenshot ONCE and "
-    "study the image like an art director: framing, exposure, scale, anything clearly "
-    "wrong or missing. If — and only if — you found a real defect, fix it and take one "
+    "judge the image against six points: composition (framing, balance), focal point "
+    "(one clear subject), layering (fore/mid/background), materials (varied, believable), "
+    "lighting (direction, contrast, mood) and detail (no bare or repetitive areas). When "
+    "the user supplied reference images, compare mood, palette and composition against "
+    "them. When shape, shading or spatial depth looks wrong, request views [\"clay\"], "
+    "[\"normal\"] or [\"depth\"] in that screenshot call to diagnose. If — and only if — "
+    "you found a real defect, fix it and take one "
     "second screenshot to confirm. Never take a third. Do not chase perfection: when the "
     "scene serves the theme, stop editing and reply, mentioning any remaining small flaws "
     "in one sentence instead of fixing them. An imperfect scene delivered beats an endless "
@@ -401,9 +406,18 @@ SessionPlan planSessions(const agent::AgentConfig& config, bool confirmDestructi
     SessionPlan plan;
     plan.confirmDestructive = confirmDestructiveOverride || config.confirmDestructive;
 
+    // OpenAI chat completions reject function tools alongside a reasoning
+    // effort, and both planned sessions carry tools (MB-4).
+    const auto coerceToolEffort = [](agent::AgentEndpoint& endpoint) {
+        if (endpoint.type == agent::ProviderType::OpenAi && !endpoint.reasoningEffort.empty()) {
+            endpoint.reasoningEffort = "none";
+        }
+    };
+
     plan.sceneEnabled = config.scene.available();
     if (plan.sceneEnabled) {
         plan.sceneEndpoint = config.scene;
+        coerceToolEffort(plan.sceneEndpoint);
     } else {
         plan.sceneUnavailableReason = config.scene.unavailableReason();
     }
@@ -411,6 +425,7 @@ SessionPlan planSessions(const agent::AgentConfig& config, bool confirmDestructi
     plan.shaderEnabled = config.shader.available();
     if (plan.shaderEnabled) {
         plan.shaderEndpoint = config.shader;
+        coerceToolEffort(plan.shaderEndpoint);
     } else {
         plan.shaderUnavailableReason = config.shader.unavailableReason();
     }
@@ -580,7 +595,7 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
             sceneDesc.model = plan.sceneEndpoint.model;
             sceneDesc.systemPrompt = kSceneSystemPrompt;
             sceneDesc.maxTokens = config->maxTokens;
-            sceneDesc.reasoningEffort = config->reasoningEffort;
+            sceneDesc.reasoningEffort = plan.sceneEndpoint.reasoningEffort;
             sceneDesc.maxToolRounds = config->maxToolRounds;
             sceneDesc.summaryThresholdTokens = config->summaryThresholdTokens;
             // The key never reaches the log (ADR 0012).
@@ -597,7 +612,7 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
             shaderDesc.model = plan.shaderEndpoint.model;
             shaderDesc.systemPrompt = kShaderSystemPrompt;
             shaderDesc.maxTokens = config->maxTokens;
-            shaderDesc.reasoningEffort = config->reasoningEffort;
+            shaderDesc.reasoningEffort = plan.shaderEndpoint.reasoningEffort;
             shaderDesc.maxToolRounds = config->maxToolRounds;
             shaderDesc.summaryThresholdTokens = config->summaryThresholdTokens;
             logInfo("shader agent ready: {} {} at {}",
@@ -765,12 +780,64 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     // into each registry, so every copy is just the (cheap) runtime pointer.
     const agent::ToolDef screenshotToolDef{
         .name = "viewer_screenshot",
-        .description = "Render the current scene offscreen and save a downscaled PNG; a "
-                       "downscaled copy of the image is attached to the result for you to "
-                       "inspect.",
-        .parametersSchema = R"({"type":"object","properties":{}})",
+        .description =
+            "Render the current scene offscreen and attach the images to the result. views "
+            "picks the render modes: main (final frame), clay (flat shading, judges shape and "
+            "composition), normal (world normals), depth (grey view depth, near=white).",
+        .parametersSchema = R"({"type":"object","properties":{
+"views":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"string","enum":["main","clay","normal","depth"]},"description":"Default [\"main\"]"},
+"long_side":{"type":"integer","minimum":64,"maximum":1024,"description":"Long side of the attached images in pixels; default 640"},
+"detail":{"type":"string","enum":["low","high"],"description":"Provider-side image detail; default low"}}})",
         .destructive = false};
-    auto viewerScreenshot = [runtime = self.get()](std::string_view) -> std::string {
+    auto viewerScreenshot = [runtime = self.get()](std::string_view argsJson) -> std::string {
+        const nlohmann::json args = nlohmann::json::parse(argsJson, nullptr, false);
+        std::vector<std::string> views{"main"};
+        std::uint32_t longSide = kScreenshotMaxLongSide;
+        std::string detailLevel = "low";
+        if (args.is_object()) {
+            if (const auto viewsIt = args.find("views"); viewsIt != args.end()) {
+                if (!viewsIt->is_array() || viewsIt->empty() || viewsIt->size() > 4) {
+                    return agent::errorJson("views must be an array of 1-4 view names");
+                }
+                views.clear();
+                for (const nlohmann::json& entry : *viewsIt) {
+                    if (!entry.is_string()) {
+                        return agent::errorJson("views entries must be strings");
+                    }
+                    views.push_back(entry.get<std::string>());
+                }
+            }
+            if (const auto sideIt = args.find("long_side"); sideIt != args.end()) {
+                if (!sideIt->is_number_integer() || sideIt->get<int>() < 64 ||
+                    sideIt->get<int>() > 1024) {
+                    return agent::errorJson("long_side must be an integer in [64, 1024]");
+                }
+                longSide = sideIt->get<std::uint32_t>();
+            }
+            if (const auto detailIt = args.find("detail"); detailIt != args.end()) {
+                if (!detailIt->is_string() || (*detailIt != "low" && *detailIt != "high")) {
+                    return agent::errorJson("detail must be \"low\" or \"high\"");
+                }
+                detailLevel = detailIt->get<std::string>();
+            }
+        }
+        using DebugView = renderer::ForwardRenderer::DebugView;
+        const auto toDebugView = [](const std::string& name) -> std::optional<DebugView> {
+            if (name == "main") {
+                return DebugView::None;
+            }
+            if (name == "clay") {
+                return DebugView::Clay;
+            }
+            if (name == "normal") {
+                return DebugView::Normal;
+            }
+            if (name == "depth") {
+                return DebugView::Depth;
+            }
+            return std::nullopt;
+        };
+
         const gpu::Extent2D extent = runtime->extent_;
         gpu::Ptr<gpu::Texture> target = runtime->device_->createTexture({
             .size = extent,
@@ -780,39 +847,69 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
         if (!target) {
             return agent::errorJson("failed to create offscreen render target");
         }
-        gpu::Ptr<gpu::CommandEncoder> encoder = runtime->device_->queue().createCommandEncoder();
-        runtime->renderer_.render(*encoder, runtime->world_, target.get());
-        encoder->finishAndSubmit(nullptr);
-        runtime->device_->queue().waitIdle();
 
+        // The previous call's files were encoded within that call's own tool
+        // round; only the newest batch stays on disk.
+        runtime->pruneScreenshots();
+        const std::uint32_t serial = ++runtime->screenshotSerial_;
+        const DebugView previousView = runtime->renderer_.debugView();
+        nlohmann::json paths = nlohmann::json::array();
+        nlohmann::json viewNames = nlohmann::json::array();
+        std::uint32_t outWidth = 0;
+        std::uint32_t outHeight = 0;
         std::vector<std::uint8_t> pixels(static_cast<std::size_t>(extent.width) * extent.height *
                                          4);
-        if (!runtime->device_->queue().readTexture(
-                *target, pixels.data(), static_cast<std::uint64_t>(extent.width) * 4, extent)) {
-            return agent::errorJson("screenshot readback failed");
-        }
-        // Swapchain is BGRA; PNG wants RGBA.
-        for (std::size_t i = 0; i < pixels.size(); i += 4) {
-            std::swap(pixels[i], pixels[i + 2]);
-        }
-        const asset::DownscaledImage scaled = asset::downscaleRgba(
-            pixels.data(), extent.width, extent.height, kScreenshotMaxLongSide);
+        for (const std::string& view : views) {
+            const std::optional<DebugView> mode = toDebugView(view);
+            if (!mode.has_value()) {
+                runtime->renderer_.setDebugView(previousView);
+                return agent::errorJson(
+                    std::format("unknown view '{}': use main, clay, normal or depth", view));
+            }
+            runtime->renderer_.setDebugView(*mode);
+            gpu::Ptr<gpu::CommandEncoder> encoder =
+                runtime->device_->queue().createCommandEncoder();
+            runtime->renderer_.render(*encoder, runtime->world_, target.get());
+            encoder->finishAndSubmit(nullptr);
+            runtime->device_->queue().waitIdle();
 
-        // The temp dir is writable from every shell; the SwiftUI app's cwd is
-        // whatever LaunchServices provides (often /) and must not be relied on.
-        // Per-pid name: the temp dir is shared, and a viewer and the app running
-        // side by side must not read each other's (possibly half-written) file.
-        const std::filesystem::path path = std::filesystem::temp_directory_path() /
-                                           std::format("kumo_screenshot_{}.png", getpid());
-        if (!asset::writePng(path, scaled.width, scaled.height, scaled.rgba.data())) {
-            return agent::errorJson(std::format("screenshot write failed: {}", path.string()));
+            if (!runtime->device_->queue().readTexture(
+                    *target, pixels.data(), static_cast<std::uint64_t>(extent.width) * 4, extent)) {
+                runtime->renderer_.setDebugView(previousView);
+                return agent::errorJson("screenshot readback failed");
+            }
+            // Swapchain is BGRA; PNG wants RGBA.
+            for (std::size_t i = 0; i < pixels.size(); i += 4) {
+                std::swap(pixels[i], pixels[i + 2]);
+            }
+            const asset::DownscaledImage scaled =
+                asset::downscaleRgba(pixels.data(), extent.width, extent.height, longSide);
+
+            // Temp dir: writable from every shell (the app's cwd is not).
+            // Per-pid + per-call serial + view name: parallel processes and
+            // consecutive calls must never read each other's files.
+            const std::filesystem::path path =
+                std::filesystem::temp_directory_path() /
+                std::format("kumo_screenshot_{}_{}_{}.png", getpid(), serial, view);
+            if (!asset::writePng(path, scaled.width, scaled.height, scaled.rgba.data())) {
+                runtime->renderer_.setDebugView(previousView);
+                return agent::errorJson(std::format("screenshot write failed: {}", path.string()));
+            }
+            runtime->screenshotFiles_.push_back(path);
+            paths.push_back(path.string());
+            viewNames.push_back(view);
+            outWidth = scaled.width;
+            outHeight = scaled.height;
         }
-        return nlohmann::json{{"status", "ok"},
-                              {"path", path.string()},
-                              {"image_path", path.string()},
-                              {"width", scaled.width},
-                              {"height", scaled.height}}
-            .dump();
+        runtime->renderer_.setDebugView(previousView);
+
+        nlohmann::json result{{"status", "ok"},       {"views", std::move(viewNames)},
+                              {"image_paths", paths}, {"image_detail", detailLevel},
+                              {"width", outWidth},    {"height", outHeight}};
+        // Legacy single-image fields, kept for MCP clients scripted against them.
+        result["path"] = paths[0];
+        result["image_path"] = paths[0];
+        return result.dump();
     };
     self->sceneToolRegistry_.add(screenshotToolDef, viewerScreenshot);
 
@@ -965,7 +1062,16 @@ bool EngineRuntime::reloadAgentSessions() {
     return true;
 }
 
+void EngineRuntime::pruneScreenshots() {
+    for (const std::filesystem::path& path : screenshotFiles_) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+    screenshotFiles_.clear();
+}
+
 EngineRuntime::~EngineRuntime() {
+    pruneScreenshots();
     if (mcpReader_.joinable()) {
         // The reader may be waiting on a posted item the loop will never drain
         // again; keep draining until it observes the stop flag and exits.

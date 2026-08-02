@@ -245,18 +245,32 @@ TEST_CASE("agents.max_tool_rounds defaults to 24 and can be overridden") {
     CHECK(overridden->maxToolRounds == 40);
 }
 
-TEST_CASE("provider.reasoning_effort defaults to empty and parses when set") {
+TEST_CASE("provider.reasoning_effort defaults to empty and seeds both endpoints") {
     ConfigSandbox sandbox;
     const auto defaulted = sandbox.load();
     REQUIRE(defaulted.has_value());
-    CHECK(defaulted->reasoningEffort.empty());
+    CHECK(defaulted->scene.reasoningEffort.empty());
+    CHECK(defaulted->shader.reasoningEffort.empty());
 
     sandbox.writeConfig(R"({
         "provider": { "reasoning_effort": "none" }
     })");
     const auto overridden = sandbox.load();
     REQUIRE(overridden.has_value());
-    CHECK(overridden->reasoningEffort == "none");
+    CHECK(overridden->scene.reasoningEffort == "none");
+    CHECK(overridden->shader.reasoningEffort == "none");
+}
+
+TEST_CASE("agents.<agent>.reasoning_effort overrides the provider seed per endpoint") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "provider": { "reasoning_effort": "none" },
+        "agents": { "shader": { "reasoning_effort": "high" } }
+    })");
+    const auto config = sandbox.load();
+    REQUIRE(config.has_value());
+    CHECK(config->scene.reasoningEffort == "none");
+    CHECK(config->shader.reasoningEffort == "high");
 }
 
 TEST_CASE("agents.max_tool_rounds below 2 is rejected") {

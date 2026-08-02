@@ -198,8 +198,9 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
     std::string baseApiKey;
     std::string baseModel;
 
-    std::string sceneTypeText, sceneBaseUrl, sceneApiKey, sceneModel;
-    std::string shaderTypeText, shaderBaseUrl, shaderApiKey, shaderModel;
+    std::string baseEffort;
+    std::string sceneTypeText, sceneBaseUrl, sceneApiKey, sceneModel, sceneEffort;
+    std::string shaderTypeText, shaderBaseUrl, shaderApiKey, shaderModel, shaderEffort;
 
     if (std::filesystem::exists(configPath)) {
         const auto text = readTextFile(configPath);
@@ -222,7 +223,7 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
                 !readField(provider, "api_key", baseApiKey, error) ||
                 !readField(provider, "model", baseModel, error) ||
                 !readField(provider, "max_tokens", config.maxTokens, error) ||
-                !readField(provider, "reasoning_effort", config.reasoningEffort, error) ||
+                !readField(provider, "reasoning_effort", baseEffort, error) ||
                 !readField(provider, "request_timeout_seconds", timeoutSeconds, error)) {
                 return std::unexpected("provider." + error);
             }
@@ -254,7 +255,8 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
                 if (!readField(scene, "type", sceneTypeText, error2) ||
                     !readField(scene, "base_url", sceneBaseUrl, error2) ||
                     !readField(scene, "api_key", sceneApiKey, error2) ||
-                    !readField(scene, "model", sceneModel, error2)) {
+                    !readField(scene, "model", sceneModel, error2) ||
+                    !readField(scene, "reasoning_effort", sceneEffort, error2)) {
                     return std::unexpected("agents.scene." + error2);
                 }
             }
@@ -263,7 +265,8 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
                 if (!readField(shader, "type", shaderTypeText, error2) ||
                     !readField(shader, "base_url", shaderBaseUrl, error2) ||
                     !readField(shader, "api_key", shaderApiKey, error2) ||
-                    !readField(shader, "model", shaderModel, error2)) {
+                    !readField(shader, "model", shaderModel, error2) ||
+                    !readField(shader, "reasoning_effort", shaderEffort, error2)) {
                     return std::unexpected("agents.shader." + error2);
                 }
             }
@@ -299,9 +302,11 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
     config.scene =
         finalizeEndpoint(*sceneType, pick(sceneBaseUrl, baseUrl), pick(sceneApiKey, baseApiKey),
                          pick(sceneModel, baseModel), env);
+    config.scene.reasoningEffort = pick(sceneEffort, baseEffort);
     config.shader =
         finalizeEndpoint(*shaderType, pick(shaderBaseUrl, baseUrl), pick(shaderApiKey, baseApiKey),
                          pick(shaderModel, baseModel), env);
+    config.shader.reasoningEffort = pick(shaderEffort, baseEffort);
     return config;
 }
 

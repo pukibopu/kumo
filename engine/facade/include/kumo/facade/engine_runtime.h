@@ -369,6 +369,13 @@ private:
     // (already out-of-line) is what makes unique_ptr<incomplete-in-this-header>
     // valid here.
     std::unique_ptr<agent::PolyHavenClient> polyHavenClient_;
+    // Per-call filename serial: consecutive screenshots must not overwrite
+    // files a provider round trip may still be reading.
+    std::uint32_t screenshotSerial_ = 0;
+    // Files the previous call wrote; pruned on the next call and at shutdown
+    // so agent review loops never accumulate temp files.
+    std::vector<std::filesystem::path> screenshotFiles_;
+    void pruneScreenshots();
 
     std::optional<agent::McpServer> mcpServer_;
     std::atomic<bool> mcpEof_{false};

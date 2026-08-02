@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Chat + tool log + destructive-confirmation surface (ADR 0044 slice G4): a
 // collapsible pane under the viewport, one tab per agent session. Both
@@ -120,6 +122,12 @@ private struct AgentChatPane: View {
     let entries: [KumoTranscriptEntry]
     @Binding var input: String
 
+    // Reference images (MB-5): copies live in the temp dir until sent.
+    @State private var attachments: [URL] = []
+    @State private var detailHigh = false
+    @State private var showImporter = false
+    private static let maxAttachments = 3
+
     var body: some View {
         if let engine = holder.engine, engine.agentAvailable(kind) {
             VStack(spacing: 4) {
@@ -143,7 +151,51 @@ private struct AgentChatPane: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 8)
+                if !attachments.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(attachments, id: \.self) { url in
+                            HStack(spacing: 2) {
+                                Image(systemName: "photo")
+                                Text(url.lastPathComponent).lineLimit(1)
+                                Button {
+                                    attachments.removeAll { $0 == url }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary, in: Capsule())
+                        }
+                        Picker("画质", selection: $detailHigh) {
+                            Text("低").tag(false)
+                            Text("高").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 90)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                }
                 HStack {
+                    Button {
+                        showImporter = true
+                    } label: {
+                        Image(systemName: "paperclip")
+                    }
+                    .help("附加参考图（png/jpeg，最多 \(Self.maxAttachments) 张）")
+                    .disabled(engine.agentBusy(kind) ||
+                             attachments.count >= Self.maxAttachments)
+                    Button {
+                        pasteImage()
+                    } label: {
+                        Image(systemName: "doc.on.clipboard")
+                    }
+                    .help("粘贴剪贴板里的图片")
+                    .disabled(engine.agentBusy(kind) ||
+                             attachments.count >= Self.maxAttachments)
                     TextField("输入消息，回车发送", text: $input)
                         .textFieldStyle(.roundedBorder)
                         .disabled(engine.agentBusy(kind))
@@ -153,6 +205,14 @@ private struct AgentChatPane: View {
                                  input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 .padding([.horizontal, .bottom], 8)
+                .fileImporter(isPresented: $showImporter,
+                             allowedContentTypes: [.png, .jpeg],
+                             allowsMultipleSelection: true) { result in
+                    guard case .success(let urls) = result else { return }
+                    for url in urls where attachments.count < Self.maxAttachments {
+                        importAttachment(url)
+                    }
+                }
             }
         } else {
             VStack {
@@ -171,9 +231,78 @@ private struct AgentChatPane: View {
     private func send(engine: KumoEngine) {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        if engine.submit(kind, text: input) {
-            input = ""
+        let sent: Bool
+        if attachments.isEmpty {
+            sent = engine.submit(kind, text: input)
+        } else {
+            sent = engine.submit(kind, text: input,
+                                imagePaths: attachments.map(\.path),
+                                imageDetail: detailHigh ? "high" : "low")
         }
+        if sent {
+            input = ""
+            attachments = []
+        }
+    }
+
+    // Reads under the importer's security scope, then decodes, downscales and
+    // re-encodes off the main thread: a full-resolution photo must neither
+    // freeze the UI nor reach the provider request unshrunk.
+    private func importAttachment(_ url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        let data = try? Data(contentsOf: url)
+        if scoped { url.stopAccessingSecurityScopedResource() }
+        guard let data, data.count <= Self.maxSourceBytes else { return }
+        storeProcessed(data)
+    }
+
+    private func pasteImage() {
+        let pasteboard = NSPasteboard.general
+        var data = pasteboard.data(forType: .png)
+        if data == nil { data = pasteboard.data(forType: .tiff) }
+        guard let data, data.count <= Self.maxSourceBytes else { return }
+        storeProcessed(data)
+    }
+
+    private nonisolated static let maxSourceBytes = 50 * 1024 * 1024
+    private nonisolated static let maxLongSidePixels = 1024
+
+    private func storeProcessed(_ data: Data) {
+        Task.detached(priority: .userInitiated) {
+            guard let png = Self.downscaledPng(data) else { return }
+            let target = FileManager.default.temporaryDirectory
+                .appendingPathComponent("kumo_ref_\(UUID().uuidString).png")
+            guard (try? png.write(to: target)) != nil else { return }
+            await MainActor.run {
+                if attachments.count < Self.maxAttachments {
+                    attachments.append(target)
+                }
+            }
+        }
+    }
+
+    private nonisolated static func downscaledPng(_ data: Data) -> Data? {
+        guard let rep = NSBitmapImageRep(data: data) else { return nil }
+        let width = rep.pixelsWide
+        let height = rep.pixelsHigh
+        guard width > 0, height > 0 else { return nil }
+        if max(width, height) <= maxLongSidePixels {
+            return rep.representation(using: .png, properties: [:])
+        }
+        let scale = Double(maxLongSidePixels) / Double(max(width, height))
+        let outWidth = max(1, Int(Double(width) * scale))
+        let outHeight = max(1, Int(Double(height) * scale))
+        guard let out = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: outWidth,
+                                         pixelsHigh: outHeight, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0,
+                                         bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: out) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSImage(data: data)?.draw(in: NSRect(x: 0, y: 0, width: outWidth, height: outHeight))
+        NSGraphicsContext.restoreGraphicsState()
+        return out.representation(using: .png, properties: [:])
     }
 
     @ViewBuilder

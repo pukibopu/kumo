@@ -544,6 +544,38 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
     return session != nullptr && session->submit(toStdString(text)) ? YES : NO;
 }
 
+- (BOOL)submit:(KumoAgentKind)kind
+           text:(NSString*)text
+     imagePaths:(NSArray<NSString*>*)imagePaths
+    imageDetail:(NSString*)imageDetail {
+    agent::AgentSession* session = sessionFor(*_runtime, kind);
+    if (session == nullptr) {
+        return NO;
+    }
+    std::vector<agent::UserImage> images;
+    for (NSString* path in imagePaths) {
+        NSString* ext = [[path pathExtension] lowercaseString];
+        std::string mediaType;
+        if ([ext isEqualToString:@"png"]) {
+            mediaType = "image/png";
+        } else if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) {
+            mediaType = "image/jpeg";
+        } else {
+            return NO;
+        }
+        NSData* data = [NSData dataWithContentsOfFile:path];
+        // The Swift side pre-downscales to <=1024px; the cap is a safety net
+        // against oversized requests from any other caller.
+        if (data == nil || data.length == 0 || data.length > 8 * 1024 * 1024) {
+            return NO;
+        }
+        images.push_back({.base64 = toStdString([data base64EncodedStringWithOptions:0]),
+                          .mediaType = std::move(mediaType)});
+    }
+    return session->submit(toStdString(text), std::move(images), toStdString(imageDetail)) ? YES
+                                                                                           : NO;
+}
+
 - (NSArray<KumoTranscriptEntry*>*)drainTranscript:(KumoAgentKind)kind {
     NSMutableArray<KumoTranscriptEntry*>* out = [NSMutableArray array];
     agent::AgentSession* session = sessionFor(*_runtime, kind);

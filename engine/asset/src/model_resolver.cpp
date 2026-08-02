@@ -39,8 +39,7 @@ std::filesystem::path resolveModelPath(const std::filesystem::path& modelsDir,
     if (slash != std::string::npos && n.find('/', slash + 1) != std::string::npos) {
         return {};
     }
-    const fs::path base =
-        slash == std::string::npos ? modelsDir : modelsDir / n.substr(0, slash);
+    const fs::path base = slash == std::string::npos ? modelsDir : modelsDir / n.substr(0, slash);
     const std::string leaf = slash == std::string::npos ? n : n.substr(slash + 1);
 
     const fs::path candidates[] = {base / (leaf + ".glb"), base / leaf / (leaf + ".gltf"),

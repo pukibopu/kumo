@@ -89,8 +89,7 @@ bool isFresh(const fs::path& thumbnail, const fs::path& source) {
 }
 
 // Model overload: freshness against the newest dependency, not just the root.
-bool isFreshModel(const fs::path& thumbnail, const fs::path& modelPath,
-                  const fs::path& modelsDir) {
+bool isFreshModel(const fs::path& thumbnail, const fs::path& modelPath, const fs::path& modelsDir) {
     std::error_code ec;
     if (!fs::exists(thumbnail, ec)) {
         return false;

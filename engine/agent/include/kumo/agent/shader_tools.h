@@ -22,6 +22,15 @@ namespace kumo::agent {
 // Renderer-decoupled hooks so CPU-only tests can inject fakes; the composition
 // root binds these to ForwardRenderer. The scene resolves entity ids to
 // material indices.
+// Renderer-free mirror of ForwardRenderer::SurfaceParam (MD): offsets are
+// engine-computed at splice/load time, values cached for introspection.
+struct SurfaceParamSpec {
+    std::string name;
+    bool isVec4 = false;
+    std::uint32_t offset = 0;
+    float value[4]{0.0f, 0.0f, 0.0f, 0.0f};
+};
+
 struct ShaderToolContext {
     scene::Scene* scene = nullptr;
     // ForwardRenderer::setMaterialShader shaped: install a custom fragment shader.
@@ -36,9 +45,24 @@ struct ShaderToolContext {
     // cap, docs/agents.md); shared so it survives across handler invocations.
     // registerShaderTools default-constructs it when left null.
     std::shared_ptr<std::unordered_map<std::int32_t, int>> failureCounts;
+
+    // Surface-function path (MD); null callbacks report the feature unsupported.
+    std::filesystem::path surfaceTemplatePath; // shaders/pbr_surface_template.frag
+    std::filesystem::path recipesDir;          // shaders/recipes
+    // ForwardRenderer::setMaterialSurfaceParams shaped.
+    std::function<bool(std::uint32_t materialIndex, const std::vector<SurfaceParamSpec>& params)>
+        setSurfaceParams;
+    // ForwardRenderer::setMaterialSurfaceParam shaped; values carries 1 or 4 floats.
+    std::function<bool(std::uint32_t materialIndex, const std::string& name,
+                       const std::vector<float>& values)>
+        setSurfaceParam;
+    // ForwardRenderer::materialSurfaceParams shaped; empty when none installed.
+    std::function<std::vector<SurfaceParamSpec>(std::uint32_t materialIndex)> surfaceParams;
 };
 
-// Registers shader_read and shader_write (ADR 0011/0029). The context is
+// Registers shader_read, surface_write, shader_set_param, recipe_list,
+// shader_apply_recipe and shader_write_full (ADR 0011/0029; MD adds the
+// surface path, shader_write stays as a deprecated alias). The context is
 // copied into the handlers; everything it references must outlive the registry.
 void registerShaderTools(ToolRegistry& registry, ShaderToolContext context);
 

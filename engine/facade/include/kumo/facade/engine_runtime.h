@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -129,6 +130,13 @@ public:
     // on success, leaves it pending on failure.
     bool setEntityMaterial(const std::string& id,
                            const renderer::ForwardRenderer::MaterialParams& params);
+    // Surface parameters of the entity's material (MD); empty when none.
+    std::vector<renderer::ForwardRenderer::SurfaceParam>
+    entitySurfaceParams(const std::string& id) const;
+    // Same pending-commit contract as setEntityMaterial; `value` carries 1
+    // float (or 4 for a vec4 param).
+    bool setEntitySurfaceParam(const std::string& id, const std::string& name,
+                               std::span<const float> value);
     std::optional<std::string> entityShaderSource(const std::string& id) const; // custom only
     bool clearEntityShader(const std::string& id); // opens and commits its own undo point
     std::filesystem::path generatedShaderPath(const std::string& id) const; // empty when none

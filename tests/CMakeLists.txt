@@ -18,6 +18,7 @@ add_executable(kumo_tests
     test_agent_asset_fetch.cpp
     test_agent_asset_index.cpp
     test_agent_placement.cpp
+    test_agent_surface_template.cpp
     test_agent_scene_tools.cpp
     test_agent_shader_tools.cpp
     test_agent_session.cpp
@@ -71,9 +72,12 @@ if(APPLE)
 
     add_executable(kumo_golden test_golden.cpp)
     target_link_libraries(kumo_golden PRIVATE doctest::doctest kumo_core kumo_math kumo_gpu
-        kumo_scene kumo_asset kumo_renderer)
+        kumo_scene kumo_asset kumo_renderer kumo_agent nlohmann_json::nlohmann_json)
+    # The recipe NaN testbed reaches into kumo_agent's private surface_template.h.
+    target_include_directories(kumo_golden PRIVATE ${CMAKE_SOURCE_DIR}/engine/agent/src)
     target_compile_definitions(kumo_golden PRIVATE
         KUMO_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
+        KUMO_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders"
         KUMO_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden"
         KUMO_GOLDEN_ACTUAL_DIR="${CMAKE_CURRENT_BINARY_DIR}")
     kumo_target_warnings(kumo_golden)

@@ -2,16 +2,24 @@
 #include <doctest/doctest.h>
 
 #include <kumo/asset/asset.h>
+#include <kumo/asset/primitives.h>
+#include <kumo/core/file.h>
 #include <kumo/gpu/gpu.h>
 #include <kumo/math/math.h>
 #include <kumo/renderer/forward_renderer.h>
 #include <kumo/renderer/ibl.h>
 #include <kumo/scene/scene.h>
 
+#include "surface_template.h"
+
+#include <nlohmann/json.hpp>
+
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
+#include <string>
 #include <vector>
 
 using namespace kumo;
@@ -180,4 +188,113 @@ TEST_CASE("debug views render distinct, non-black images and restore cleanly (me
     harness.forward.setDebugView(DebugView::None);
     const std::vector<std::uint8_t> restored = harness.render();
     CHECK(static_cast<double>(countDiffering(restored, main)) / total <= kMaxDifferingRatio);
+}
+
+TEST_CASE("recipe NaN testbed: every recipe renders finite, non-black at default and extreme "
+          "params (metal)") {
+    gpu::Ptr<gpu::Device> device = gpu::createDevice();
+    REQUIRE(device != nullptr);
+    HelmetHarness harness(*device);
+
+    // One sphere in front of the camera; the helmet entities are dropped so a
+    // recipe's output dominates the frame.
+    harness.world.entities.clear();
+    const std::optional<asset::MeshData> sphere = asset::makePrimitive("sphere", 1.6f);
+    REQUIRE(sphere.has_value());
+    const std::int32_t meshIndex = harness.forward.addMesh(*sphere);
+    REQUIRE(meshIndex >= 0);
+
+    const auto templateText =
+        readTextFile(std::filesystem::path(KUMO_SHADER_DIR) / "pbr_surface_template.frag");
+    REQUIRE(templateText.has_value());
+
+    const std::filesystem::path recipesDir = std::filesystem::path(KUMO_SHADER_DIR) / "recipes";
+    std::size_t recipeCount = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(recipesDir)) {
+        if (entry.path().extension() != ".json") {
+            continue;
+        }
+        ++recipeCount;
+        const std::string recipeName = entry.path().stem().string();
+        CAPTURE(recipeName);
+
+        const auto metaText = readTextFile(entry.path());
+        const auto functionText = readTextFile(recipesDir / (recipeName + ".frag"));
+        REQUIRE(metaText.has_value());
+        REQUIRE(functionText.has_value());
+        const nlohmann::json meta = nlohmann::json::parse(*metaText, nullptr, false);
+        REQUIRE(!meta.is_discarded());
+
+        // Defaults from metadata; the extreme pass pushes floats to max (or
+        // min when no max) to hunt NaN-producing math.
+        std::vector<agent::surface::ParamDecl> decls;
+        for (const nlohmann::json& param : meta["params"]) {
+            agent::surface::ParamDecl decl;
+            decl.name = param["name"].get<std::string>();
+            decl.isVec4 = param["type"] == "vec4";
+            if (decl.isVec4) {
+                for (std::size_t c = 0; c < 4; ++c) {
+                    decl.value[c] = param["value"][c].get<float>();
+                }
+            } else {
+                decl.value[0] = param["value"].get<float>();
+            }
+            decls.push_back(std::move(decl));
+        }
+        const auto spliced = agent::surface::spliceSurface(*templateText, *functionText, decls);
+        if (!spliced.has_value()) {
+            FAIL(recipeName << ": " << spliced.error());
+        }
+
+        const std::int32_t materialIndex =
+            harness.forward.addMaterial(renderer::ForwardRenderer::MaterialParams{});
+        REQUIRE(materialIndex >= 0);
+        scene::Entity entity;
+        entity.meshIndex = meshIndex;
+        entity.materialIndex = materialIndex;
+        const scene::EntityId id = harness.world.entities.insert(entity);
+
+        const auto installed = harness.forward.setMaterialShader(
+            static_cast<std::uint32_t>(materialIndex), spliced->source);
+        if (!installed.has_value()) {
+            FAIL(recipeName << ": " << installed.error().front().message);
+        }
+        std::vector<renderer::ForwardRenderer::SurfaceParam> params;
+        for (std::size_t i = 0; i < spliced->layout.size(); ++i) {
+            renderer::ForwardRenderer::SurfaceParam param{.name = spliced->layout[i].name,
+                                                          .isVec4 = spliced->layout[i].isVec4,
+                                                          .offset = spliced->layout[i].offset};
+            std::copy(std::begin(decls[i].value), std::end(decls[i].value), param.value);
+            params.push_back(std::move(param));
+        }
+        REQUIRE(harness.forward.setMaterialSurfaceParams(static_cast<std::uint32_t>(materialIndex),
+                                                         params));
+
+        const double total = static_cast<double>(kSize) * kSize;
+        for (const bool extreme : {false, true}) {
+            CAPTURE(extreme);
+            if (extreme) {
+                for (const nlohmann::json& param : meta["params"]) {
+                    if (param["type"] != "float") {
+                        continue;
+                    }
+                    const float pushed = param.contains("max") ? param["max"].get<float>()
+                                                               : param.value("min", 0.0f);
+                    REQUIRE(harness.forward.setMaterialSurfaceParam(
+                        static_cast<std::uint32_t>(materialIndex), param["name"].get<std::string>(),
+                        std::vector<float>{pushed}));
+                }
+            }
+            const std::vector<std::uint8_t> image = harness.render();
+            std::size_t lit = 0;
+            for (std::size_t i = 0; i < image.size(); i += 4) {
+                if (image[i] > 8 || image[i + 1] > 8 || image[i + 2] > 8) {
+                    ++lit;
+                }
+            }
+            CHECK(static_cast<double>(lit) / total > 0.05);
+        }
+        harness.world.entities.remove(id);
+    }
+    CHECK(recipeCount == 5);
 }

@@ -185,6 +185,15 @@ KumoLightDetail* toKumoLightDetail(const facade::EngineRuntime::LightState& stat
 @implementation KumoEntityDetail
 @end
 
+@interface KumoSurfaceParam ()
+@property(nonatomic, readwrite) NSString* name;
+@property(nonatomic, readwrite) BOOL isVec4;
+@property(nonatomic, readwrite) float value0, value1, value2, value3;
+@end
+
+@implementation KumoSurfaceParam
+@end
+
 namespace {
 
 KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail) {
@@ -443,6 +452,33 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
                                                            .roughness = roughness,
                                                            .emissive = {er, eg, eb}};
     return _runtime->setEntityMaterial(toStdString(entityId), params) ? YES : NO;
+}
+
+- (NSArray<KumoSurfaceParam*>*)entitySurfaceParams:(NSString*)entityId {
+    NSMutableArray<KumoSurfaceParam*>* out = [NSMutableArray array];
+    for (const renderer::ForwardRenderer::SurfaceParam& param :
+         _runtime->entitySurfaceParams(toStdString(entityId))) {
+        KumoSurfaceParam* item = [[KumoSurfaceParam alloc] init];
+        item.name = toNSString(param.name);
+        item.isVec4 = param.isVec4 ? YES : NO;
+        item.value0 = param.value[0];
+        item.value1 = param.value[1];
+        item.value2 = param.value[2];
+        item.value3 = param.value[3];
+        [out addObject:item];
+    }
+    return out;
+}
+
+- (BOOL)setEntitySurfaceParam:(NSString*)entityId
+                         name:(NSString*)name
+                       values:(NSArray<NSNumber*>*)values {
+    std::vector<float> value;
+    for (NSNumber* number in values) {
+        value.push_back(number.floatValue);
+    }
+    return _runtime->setEntitySurfaceParam(toStdString(entityId), toStdString(name), value) ? YES
+                                                                                            : NO;
 }
 
 - (nullable NSString*)entityShaderSource:(NSString*)entityId {

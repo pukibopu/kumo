@@ -45,6 +45,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) BOOL hasCustomShader;
 @end
 
+// One live-tunable surface parameter (MD): value-typed mirror of
+// ForwardRenderer::SurfaceParam. Floats use value0; vec4 uses all four.
+@interface KumoSurfaceParam : NSObject
+@property(nonatomic, readonly) NSString* name;
+@property(nonatomic, readonly) BOOL isVec4;
+@property(nonatomic, readonly) float value0, value1, value2, value3;
+@end
+
 // Which agent session a chat call targets (ADR 0044 slice G4): mirrors
 // EngineRuntime::sceneSession()/shaderSession().
 typedef NS_ENUM(NSInteger, KumoAgentKind) {
@@ -125,6 +133,12 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
                         sx:(float)sx
                         sy:(float)sy
                         sz:(float)sz;
+// Surface parameters of the entity's material (MD); empty when none.
+- (NSArray<KumoSurfaceParam*>*)entitySurfaceParams:(NSString*)entityId;
+// Same undo model as setEntityMaterial; pass 1 value for float params, 4 for vec4.
+- (BOOL)setEntitySurfaceParam:(NSString*)entityId
+                         name:(NSString*)name
+                       values:(NSArray<NSNumber*>*)values;
 - (BOOL)setEntityMaterial:(NSString*)entityId
                         r:(float)r
                         g:(float)g

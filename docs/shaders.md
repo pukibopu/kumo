@@ -55,6 +55,8 @@ shader 助手（见 agents.md）经 `ForwardRenderer::setMaterialShader` 为单�
 - 绘制循环按 pipeline 分组（共享管线在前），材质系数 UBO 按帧槽双缓冲；
 - 生效源码可由 `materialShaderSource` 读回，接受的结果落盘 `shaders/generated/material_<N>.frag`（gitignored）。
 
+**表面函数轨（MD）**：多数材质定制不再写整文件——agent 经 `surface_write` 只提交 `kumoSurface(inout SurfaceOutputs, in SurfaceInputs)` 表面函数与命名参数，引擎把它拼进 `shaders/pbr_surface_template.frag`（`//KUMO_SURFACE_PARAMS` 与 `//KUMO_SURFACE_FUNCTION` 双标记；模板自身以恒等函数独立可编译并纳入反射快照）。参数以 std140 追加在 `MaterialFactors` 64B 前缀后（float/vec4 两型，≤16 个、块 ≤192B，偏移由 `engine/agent/src/surface_template.{h,cpp}` 权威计算并与反射尺寸互证），值走 `setMaterialSurfaceParams/setMaterialSurfaceParam` 在 `flushDirtyMaterials` 第二段写入下发，免重编译、随 undo 与场景存档。recipe 库在 `shaders/recipes/`（函数 + JSON 元数据成对），golden 二进制的 NaN 台对每个 recipe 以默认与极值参数实渲断言非黑帧；`viewer --check-shaders` 批量编译 `generated/` 验证模板/ABI 兼容性。
+
 ## 测试
 
 CI 对 `shaders/` 全量执行完整编译链（纯 CPU，含 `.comp`），并将反射出的 set/binding 布局、push constant 大小、顶点输入位置、compute workgroup 尺寸与入库快照（`tests/snapshots/*.reflect.txt`）比对，任何绑定布局变化都会在提交粒度暴露。快照更新：`KUMO_UPDATE_SNAPSHOTS=1 ./build/<preset>/tests/kumo_tests` 后人工确认 diff。

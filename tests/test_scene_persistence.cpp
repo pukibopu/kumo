@@ -468,3 +468,55 @@ TEST_CASE("save/parse round trip preserves assembly ids and omits zero") {
     REQUIRE(first != std::string::npos);
     CHECK(json.rfind("\"assembly_id\"") == first);
 }
+
+// --- surface params (MD) ------------------------------------------------
+
+TEST_CASE("save/parse round trip preserves surface params by name, type and value") {
+    scene::Scene scene;
+    scene::Entity entity;
+    entity.name = "crate";
+    entity.materialIndex = 2;
+    scene.entities.insert(entity);
+
+    const scene::MaterialLookup noMaterials = [](std::int32_t) { return std::nullopt; };
+    const scene::SurfaceLookup surfaces =
+        [](std::int32_t materialIndex) -> std::vector<scene::SavedSurfaceParam> {
+        if (materialIndex != 2) {
+            return {};
+        }
+        scene::SavedSurfaceParam scale;
+        scale.name = "grainScale";
+        scale.value[0] = 8.0f;
+        scene::SavedSurfaceParam tint;
+        tint.name = "tint";
+        tint.isVec4 = true;
+        tint.value[0] = 0.1f;
+        tint.value[3] = 1.0f;
+        return {scale, tint};
+    };
+    const std::string json =
+        scene::saveSceneJson(scene, "assets/model.glb", noMaterials, std::nullopt, {}, surfaces);
+    const auto parsed = scene::parseSceneJson(json);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->entities.size() == 1);
+    const auto& params = parsed->entities[0].surfaceParams;
+    REQUIRE(params.size() == 2);
+    CHECK(params[0].name == "grainScale");
+    CHECK(!params[0].isVec4);
+    CHECK(params[0].value[0] == doctest::Approx(8.0f));
+    CHECK(params[1].name == "tint");
+    CHECK(params[1].isVec4);
+    CHECK(params[1].value[3] == doctest::Approx(1.0f));
+}
+
+TEST_CASE("parseSceneJson rejects malformed surface params and defaults to none when absent") {
+    const auto missing =
+        scene::parseSceneJson(R"({"version":0,"model":"","lights":[],"entities":[{"name":"e"}]})");
+    REQUIRE(missing.has_value());
+    CHECK(missing->entities[0].surfaceParams.empty());
+
+    const auto badArity = scene::parseSceneJson(
+        R"({"version":0,"model":"","lights":[],"entities":[{"name":"e",
+"surface_params":[{"name":"x","type":"vec4","value":[1,2]}]}]})");
+    CHECK(!badArity.has_value());
+}

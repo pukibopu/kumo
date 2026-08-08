@@ -267,6 +267,38 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
     if (!readOptionalString(obj, "shader_source", saved.shaderSource, error)) {
         return std::unexpected(error);
     }
+    if (obj.contains("surface_params")) {
+        const json& params = obj["surface_params"];
+        if (!params.is_array()) {
+            return std::unexpected("surface_params must be an array");
+        }
+        for (const json& param : params) {
+            if (!param.is_object() || !param.contains("name") || !param["name"].is_string() ||
+                !param.contains("type") || !param["type"].is_string() || !param.contains("value") ||
+                !param["value"].is_array()) {
+                return std::unexpected("each surface_params entry needs name, type and value");
+            }
+            SavedSurfaceParam saved_param;
+            saved_param.name = param["name"].get<std::string>();
+            const std::string type = param["type"].get<std::string>();
+            if (type != "float" && type != "vec4") {
+                return std::unexpected("surface_params type must be float or vec4");
+            }
+            saved_param.isVec4 = type == "vec4";
+            const json& value = param["value"];
+            const std::size_t expected = saved_param.isVec4 ? 4 : 1;
+            if (value.size() != expected) {
+                return std::unexpected("surface_params value arity does not match its type");
+            }
+            for (std::size_t i = 0; i < expected; ++i) {
+                if (!value[i].is_number()) {
+                    return std::unexpected("surface_params values must be numbers");
+                }
+                saved_param.value[i] = value[i].get<float>();
+            }
+            saved.surfaceParams.push_back(std::move(saved_param));
+        }
+    }
     return saved;
 }
 
@@ -275,7 +307,7 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
 std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
                           const MaterialLookup& materials,
                           const std::optional<SavedEnvironment>& environment,
-                          const ShaderLookup& shaders) {
+                          const ShaderLookup& shaders, const SurfaceLookup& surfaces) {
     json entities = json::array();
     scene.entities.forEach([&](EntityId, const Entity& entity) {
         json e{{"name", entity.name},
@@ -308,6 +340,22 @@ std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
             if (const std::optional<std::string> source = shaders(entity.materialIndex);
                 source.has_value()) {
                 e["shader_source"] = *source;
+            }
+        }
+        if (entity.materialIndex >= 0 && surfaces) {
+            const std::vector<SavedSurfaceParam> params = surfaces(entity.materialIndex);
+            if (!params.empty()) {
+                json list = json::array();
+                for (const SavedSurfaceParam& param : params) {
+                    json value = json::array();
+                    for (std::size_t i = 0; i < (param.isVec4 ? 4u : 1u); ++i) {
+                        value.push_back(param.value[i]);
+                    }
+                    list.push_back({{"name", param.name},
+                                    {"type", param.isVec4 ? "vec4" : "float"},
+                                    {"value", std::move(value)}});
+                }
+                e["surface_params"] = std::move(list);
             }
         }
         entities.push_back(std::move(e));

@@ -25,6 +25,14 @@ struct SavedMaterial {
     float uvTiling[2]{1.0f, 1.0f};
 };
 
+// Renderer-free mirror of a spliced surface parameter (MD); offsets are
+// recomputed from order+type at load, never persisted.
+struct SavedSurfaceParam {
+    std::string name;
+    bool isVec4 = false;
+    float value[4]{0.0f, 0.0f, 0.0f, 0.0f};
+};
+
 struct SavedEntity {
     Entity entity;
     std::optional<SavedMaterial> material;
@@ -32,6 +40,8 @@ struct SavedEntity {
     // never depends on the renderer. Absent when the material uses the shared
     // pbr pipeline.
     std::optional<std::string> shaderSource;
+    // Surface parameters riding on shaderSource (MD); empty when none.
+    std::vector<SavedSurfaceParam> surfaceParams;
 };
 
 // Renderer/asset-free mirror of asset::ProceduralSkyDesc (scene must not
@@ -64,14 +74,17 @@ using MaterialLookup = std::function<std::optional<SavedMaterial>(std::int32_t m
 // Renderer-side custom fragment shader for a material index, nullopt when
 // uncustomized (mirrors ForwardRenderer::materialShaderSource).
 using ShaderLookup = std::function<std::optional<std::string>(std::int32_t materialIndex)>;
+// Surface parameters for a material index, empty when none (MD).
+using SurfaceLookup = std::function<std::vector<SavedSurfaceParam>(std::int32_t materialIndex)>;
 
 // `environment` is nullopt when the scene uses no procedural sky (e.g. the
 // glTF-supplied HDR is still active); the key is then omitted entirely.
-// `shaders` is defaulted-empty for callers that never persist custom shaders.
+// `shaders`/`surfaces` are defaulted-empty for callers that never persist
+// custom shaders.
 std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
                           const MaterialLookup& materials,
                           const std::optional<SavedEnvironment>& environment = std::nullopt,
-                          const ShaderLookup& shaders = {});
+                          const ShaderLookup& shaders = {}, const SurfaceLookup& surfaces = {});
 std::expected<SavedScene, std::string> parseSceneJson(std::string_view json);
 
 } // namespace kumo::scene

@@ -1,0 +1,12 @@
+{
+    "description": "Brushed metal: horizontal micro-streaks modulating roughness over a tinted metallic base",
+    "params": [
+        {"name": "brushScale", "type": "float", "value": 220.0, "min": 20.0, "max": 800.0, "description": "Streak density along V"},
+        {"name": "roughnessMin", "type": "float", "value": 0.15, "min": 0.02, "max": 1.0, "description": "Polished floor"},
+        {"name": "roughnessMax", "type": "float", "value": 0.45, "min": 0.02, "max": 1.0, "description": "Brushed ceiling"},
+        {"name": "tint", "type": "vec4", "value": [0.9, 0.92, 0.95, 1.0], "description": "Metal tint (silver default)"}
+    ],
+    "tags": ["metal", "industrial", "appliance"],
+    "geometry": "uv-mapped surfaces; streaks follow the U axis",
+    "cost": "low"
+}

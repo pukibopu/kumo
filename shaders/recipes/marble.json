@@ -1,0 +1,11 @@
+{
+    "description": "Polished marble: turbulent sine veins over a bright base, low roughness",
+    "params": [
+        {"name": "veinScale", "type": "float", "value": 1.5, "min": 0.2, "max": 10.0, "description": "Vein density"},
+        {"name": "baseTone", "type": "vec4", "value": [0.93, 0.92, 0.9, 1.0], "description": "Stone base color"},
+        {"name": "veinColor", "type": "vec4", "value": [0.35, 0.36, 0.42, 1.0], "description": "Vein color"}
+    ],
+    "tags": ["stone", "luxury", "interior", "floor"],
+    "geometry": "any; veins run in the world XZ plane",
+    "cost": "medium"
+}

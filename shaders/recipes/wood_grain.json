@@ -1,0 +1,12 @@
+{
+    "description": "Procedural wood: concentric growth rings with turbulence, light/dark tone mix, matte finish",
+    "params": [
+        {"name": "grainScale", "type": "float", "value": 3.0, "min": 0.5, "max": 20.0, "description": "Ring density"},
+        {"name": "turbulence", "type": "float", "value": 1.2, "min": 0.0, "max": 4.0, "description": "Ring wobble"},
+        {"name": "lightColor", "type": "vec4", "value": [0.55, 0.38, 0.22, 1.0], "description": "Early wood tone"},
+        {"name": "darkColor", "type": "vec4", "value": [0.32, 0.2, 0.1, 1.0], "description": "Late wood tone"}
+    ],
+    "tags": ["wood", "natural", "furniture"],
+    "geometry": "any; rings grow in the world XZ plane",
+    "cost": "low"
+}

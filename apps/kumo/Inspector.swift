@@ -41,6 +41,7 @@ struct InspectorView: View {
     let onChanged: () -> Void
 
     @State private var detail: KumoEntityDetail?
+    @State private var surfaceParams: [KumoSurfaceParam] = []
 
     @State private var positionX = 0.0
     @State private var positionY = 0.0
@@ -100,6 +101,9 @@ struct InspectorView: View {
                                 .foregroundStyle(.red)
                         }
                     }
+                    if !surfaceParams.isEmpty {
+                        surfaceParamsSection
+                    }
                     if detail.hasCustomShader {
                         shaderSection
                     }
@@ -151,6 +155,42 @@ struct InspectorView: View {
                     .onSubmit { commitMaterial(beginNewEdit: true) }
                 TextField("B", value: $emissiveB, format: .number)
                     .onSubmit { commitMaterial(beginNewEdit: true) }
+            }
+        }
+    }
+
+    // Surface-function params (MD): floats get an adaptive slider, vec4s a
+    // color picker, mirroring the light panel's commit gating.
+    @ViewBuilder
+    private var surfaceParamsSection: some View {
+        Section("表面参数") {
+            ForEach(surfaceParams, id: \.name) { param in
+                if param.isVec4 {
+                    ColorPicker(param.name,
+                                selection: Binding(
+                                    get: {
+                                        Color(red: Double(param.value0),
+                                              green: Double(param.value1),
+                                              blue: Double(param.value2),
+                                              opacity: Double(param.value3))
+                                    },
+                                    set: { color in
+                                        let rgba = rgbaComponents(of: color)
+                                        commitSurfaceParam(name: param.name,
+                                                           values: [rgba.r, rgba.g, rgba.b,
+                                                                    rgba.a])
+                                    }),
+                                supportsOpacity: true)
+                } else {
+                    LabeledContent(param.name) {
+                        Slider(value: Binding(
+                            get: { Double(param.value0) },
+                            set: { commitSurfaceParam(name: param.name, values: [Float($0)]) }),
+                            in: 0...max(1.0, Double(param.value0) * 2)) { began in
+                            if began { holder.engine?.beginEdit("inspector") }
+                        }
+                    }
+                }
             }
         }
     }
@@ -220,6 +260,7 @@ struct InspectorView: View {
             shaderSource = ""
             generatedPath = nil
         }
+        surfaceParams = engine.entitySurfaceParams(entityId)
     }
 
     private func commitTransform() {
@@ -249,6 +290,19 @@ struct InspectorView: View {
                                           er: Float(emissiveR), eg: Float(emissiveG),
                                           eb: Float(emissiveB))
         inspectorError = ok ? nil : "材质设置失败"
+        onChanged()
+    }
+
+    private func commitSurfaceParam(name: String, values: [Float]) {
+        guard let engine = holder.engine, let entityId else { return }
+        let now = Date()
+        let isNewGesture = lastColorEditAt.map { now.timeIntervalSince($0) > 0.75 } ?? true
+        lastColorEditAt = now
+        if isNewGesture { engine.beginEdit("inspector") }
+        let ok = engine.setEntitySurfaceParam(entityId, name: name,
+                                              values: values.map { NSNumber(value: $0) })
+        inspectorError = ok ? nil : "表面参数设置失败"
+        surfaceParams = engine.entitySurfaceParams(entityId)
         onChanged()
     }
 

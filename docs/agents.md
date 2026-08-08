@@ -60,7 +60,7 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 - 破坏性操作默认直接执行，`agents.confirm_destructive`（或 `--confirm-destructive`）开启中文确认弹窗，拒绝以 `{"status":"cancelled_by_user"}` 返还模型；
 - 单轮工具轮数上限 `agents.max_tool_rounds`（默认 24，最低 2——末轮不执行工具）。
 
-**工具面按助手收窄**：场景助手持有上表十七个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + 两个 shader 工具 + `viewer_screenshot`（shader_write 编译通过后自查改完的材质）——本地小模型碰不到 shader_write，shader 模型删不了实体。
+**工具面按助手收窄**：场景助手持有上表十七个工具 + `viewer_screenshot`（离屏渲染降采样 PNG，结果附图）；shader 助手持有 `scene_list` + shader 工具组（MD 起 6 个：读/表面写/参数/recipe×2/整文件写）+ `viewer_screenshot`（写完编译通过后自查改完的材质）——本地小模型碰不到 shader 写入，shader 模型删不了实体。
 
 **多视图审图**（MB）：`viewer_screenshot` 接受 `views`（1-4 个：`main` 成品帧 / `clay` 平光素模看形体构图 / `normal` 世界法线 / `depth` 视深灰度近白远黑，缺省 `["main"]`）、`long_side`（64-1024，缺省 640）、`detail`（`low`/`high`，控制发给模型的图像精细档）；结果带 `image_paths` 数组（`image_path` 保留兼容单图消费者），session 与 MCP 都按数组全量附图，文件名带 pid + 调用序号 + 视图名不互相覆盖。调试视图由 renderer 的三条共享布局管线绘制（custom shader 材质也被强制走调试管线，critic 检查形体不受风格化干扰），截图后恢复原状态。
 
@@ -81,9 +81,15 @@ Shader 工具（M6）：
 | 工具 | 说明 |
 |---|---|
 | `shader_read` | 按实体取其材质当前生效的完整 fragment 源码（未定制时返回 pbr 模板） |
-| `shader_write` | 整文件替换该材质的 fragment shader（ADR 0029），只影响该材质（ADR 0011） |
+| `surface_write` | **默认轨**（MD）：只提交 `void kumoSurface(inout SurfaceOutputs s, in SurfaceInputs i)` 表面函数 + 命名参数（float/vec4 ≤16 个、块 ≤192B），引擎拼进 `pbr_surface_template.frag` 的标准光照壳；禁 uniform/main/layout/while/do/`frame.`/gl_FragCoord（越界报错指路 `shader_write_full`）；编译错误行号回映到函数内（`function_line`），拼接区外标 `template_error` |
+| `shader_set_param` | 免重编译改一个表面参数值；随 undo/存档走，Inspector 有对应滑杆/取色器 |
+| `recipe_list` | 列 recipe 库（`shaders/recipes/`）：名字/描述/参数 schema/tags/cost，**不含源码** |
+| `shader_apply_recipe` | 应用 recipe（首发 wood_grain / brushed_metal / rust / marble / emissive_pulse）并可覆盖参数，与 `surface_write` 同一拼接管线 |
+| `shader_write_full` | **高级轨**：整文件替换该材质的 fragment shader（ADR 0029），只影响该材质（ADR 0011）；仅限自定义光照/全风格化或用户点名；`shader_write` 为保留一版的兼容别名 |
 
+- 参数存储：拼接参数以 std140 追加在 `MaterialFactors` 64B 前缀之后（偏移引擎权威计算），值经 `flushDirtyMaterials` 的第二段写入下发；随 undo 快照与场景存档（`surface_params` 按名字+类型持久化，偏移载入时重算）；
 - 编译失败时结构化错误（file / line / `second_stage` 阶段路由）作为工具结果返还模型自行修正，每材质连续失败上限 5 次后要求停下向用户说明；渲染器在新 pipeline 就绪前保留旧 pipeline，失败不影响画面；
+- `viewer --check-shaders` 批量编译 `shaders/generated/` 全部产物，模板/ABI 变更的兼容性一次性验证（recipe 的渲染健康由 golden 二进制的 NaN 台覆盖：标准球 × 每 recipe × 默认+极值参数，断言非黑帧）；
 - 绑定契约双重防线（ADR 0029）：system prompt 嵌入约定（set 0/2 与模板逐字节一致、set 1 只允许在 `MaterialFactors` 尾部追加成员、push constant 不可动），反射兼容校验在引擎侧强制（不兼容同样以编译错误形态回灌）；
 - 成功的生成结果落盘 `shaders/generated/material_<N>.frag`（gitignored），人工审阅后可移入 `shaders/examples/`；
 - 编译在主线程串行执行（`compileGlsl` 非线程安全，工具本就经主线程队列执行，天然满足）。

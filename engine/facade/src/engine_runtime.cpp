@@ -9,6 +9,7 @@
 // since SceneToolContext::fetchAsset needs it as a complete type).
 #include "asset_fetch.h"
 #include "placement.h"
+#include "surface_template.h"
 
 #include <kumo/agent/config.h>
 #include <kumo/agent/entity_id.h>
@@ -158,10 +159,19 @@ constexpr const char* kSceneSystemPrompt =
 constexpr const char* kShaderSystemPrompt =
     "You are the shader assistant inside kumo, a physically based Metal renderer whose "
     "shaders are written in Vulkan-dialect GLSL 4.60 and cross-compiled to MSL. "
-    "You edit per-material fragment shaders: use scene_list to find the entity, "
-    "shader_read to get the CURRENT full source of its material's fragment shader, and "
-    "shader_write to replace the FULL file. Only that entity's material is affected. "
-    "Binding contract you must preserve exactly: set 0 and set 2 declarations must stay "
+    "You edit per-material shading: use scene_list to find the entity, then choose the "
+    "right tier. DEFAULT tier — surface_write: submit only a surface function 'void "
+    "kumoSurface(inout SurfaceOutputs s, in SurfaceInputs i)' plus named params "
+    "(float/vec4, at most 16); the engine splices it over the standard PBR lighting, and "
+    "params stay live-tunable via shader_set_param without recompiling. Check "
+    "recipe_list first — wood, brushed metal, rust, marble and pulsing glow ship as "
+    "recipes you apply with shader_apply_recipe and then tune. Use this tier for "
+    "materials, patterns, noise, roughness variation and emissive effects; declare "
+    "tunable values as params instead of hardcoding numbers. ADVANCED tier — "
+    "shader_write_full replaces the FULL fragment file (shader_read shows the current "
+    "source): only for custom lighting models, full stylization or anything the surface "
+    "outputs cannot express, or when the user explicitly asks for it. "
+    "Binding contract for full files: set 0 and set 2 declarations must stay "
     "byte-identical to the template (set 0 binding 0 is the FrameUniforms block included "
     "via include/common.glsl; set 2 is IBL). The push_constant block (mat4 model, mat4 "
     "normalMatrix) must not change. In set 1, bindings 0-5 (textures and sampler) must "
@@ -170,9 +180,10 @@ constexpr const char* kShaderSystemPrompt =
     "metallicRoughness, emissive and uvTiling are written by the engine, members appended "
     "after uvTiling read as zero until driven. Rendering is linear-light with reversed-Z, "
     "right-handed Y-up. "
-    "Compile errors return structured with file and line; fix the source and retry, at "
-    "most 5 attempts, then stop and explain. Keep the existing lighting structure unless "
-    "asked otherwise. After a shader_write that compiles, call viewer_screenshot once to "
+    "Compile errors return structured (surface_write maps them to function_line inside "
+    "your function); fix and retry, at most 5 attempts, then stop and explain. Keep the "
+    "existing lighting structure unless "
+    "asked otherwise. After a write that compiles, call viewer_screenshot once to "
     "inspect the material in situ; if — and only if — the look is clearly wrong, fix it and "
     "confirm with at most one more screenshot. Never loop beyond that.\n\n"
     "Material intent guide. Translate named intents into factors plus technique: brushed "
@@ -495,6 +506,9 @@ SceneState EngineRuntime::captureSceneState() const {
         state.shaderSources.push_back(source != nullptr ? std::make_optional(*source)
                                                         : std::nullopt);
         state.materialTextures.push_back(renderer_.materialTextureIndices(i));
+        const std::span<const renderer::ForwardRenderer::SurfaceParam> surface =
+            renderer_.materialSurfaceParams(i);
+        state.surfaceParams.emplace_back(surface.begin(), surface.end());
     }
     return state;
 }
@@ -518,6 +532,9 @@ void EngineRuntime::applySceneState(const SceneState& state) {
                 // current pipeline untouched, which is the best available
                 // outcome here.
                 (void)renderer_.setMaterialShader(index, *snapshotSource);
+            }
+            if (i < state.surfaceParams.size() && !state.surfaceParams[i].empty()) {
+                (void)renderer_.setMaterialSurfaceParams(index, state.surfaceParams[i]);
             }
         } else if (current != nullptr) {
             renderer_.clearMaterialShader(index);
@@ -925,6 +942,36 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     shaderTools.templatePath = desc.shaderDir / "pbr.frag";
     shaderTools.generatedDir = desc.shaderDir / "generated";
     self->generatedShaderDir_ = shaderTools.generatedDir;
+    shaderTools.surfaceTemplatePath = desc.shaderDir / "pbr_surface_template.frag";
+    shaderTools.recipesDir = desc.shaderDir / "recipes";
+    shaderTools.setSurfaceParams =
+        [renderer = &self->renderer_](std::uint32_t index,
+                                      const std::vector<agent::SurfaceParamSpec>& specs) {
+            std::vector<renderer::ForwardRenderer::SurfaceParam> params;
+            for (const agent::SurfaceParamSpec& spec : specs) {
+                renderer::ForwardRenderer::SurfaceParam param{
+                    .name = spec.name, .isVec4 = spec.isVec4, .offset = spec.offset};
+                std::copy(std::begin(spec.value), std::end(spec.value), param.value);
+                params.push_back(std::move(param));
+            }
+            return renderer->setMaterialSurfaceParams(index, std::move(params));
+        };
+    shaderTools.setSurfaceParam = [renderer = &self->renderer_](std::uint32_t index,
+                                                                const std::string& name,
+                                                                const std::vector<float>& values) {
+        return renderer->setMaterialSurfaceParam(index, name, values);
+    };
+    shaderTools.surfaceParams = [renderer = &self->renderer_](std::uint32_t index) {
+        std::vector<agent::SurfaceParamSpec> specs;
+        for (const renderer::ForwardRenderer::SurfaceParam& param :
+             renderer->materialSurfaceParams(index)) {
+            agent::SurfaceParamSpec spec{
+                .name = param.name, .isVec4 = param.isVec4, .offset = param.offset};
+            std::copy(std::begin(param.value), std::end(param.value), spec.value);
+            specs.push_back(std::move(spec));
+        }
+        return specs;
+    };
     // Shared across the chat registry and the MCP registry below, so the
     // 5-attempt shader_write cap is a single per-material counter regardless
     // of which caller is driving it.
@@ -1262,11 +1309,27 @@ bool EngineRuntime::saveScene(const std::filesystem::path& path) const {
             renderer_.materialShaderSource(static_cast<std::uint32_t>(materialIndex));
         return source != nullptr ? std::make_optional(*source) : std::nullopt;
     };
+    const scene::SurfaceLookup surfaceLookup =
+        [this](std::int32_t materialIndex) -> std::vector<scene::SavedSurfaceParam> {
+        std::vector<scene::SavedSurfaceParam> out;
+        if (materialIndex < 0) {
+            return out;
+        }
+        for (const renderer::ForwardRenderer::SurfaceParam& param :
+             renderer_.materialSurfaceParams(static_cast<std::uint32_t>(materialIndex))) {
+            scene::SavedSurfaceParam saved;
+            saved.name = param.name;
+            saved.isVec4 = param.isVec4;
+            std::copy(std::begin(param.value), std::end(param.value), saved.value);
+            out.push_back(std::move(saved));
+        }
+        return out;
+    };
     const std::optional<scene::SavedEnvironment> savedEnvironment =
         environmentSky_.has_value() ? std::make_optional(toSavedEnvironment(*environmentSky_))
                                     : std::nullopt;
-    const std::string json =
-        scene::saveSceneJson(world_, modelPath_.string(), lookup, savedEnvironment, shaderLookup);
+    const std::string json = scene::saveSceneJson(world_, modelPath_.string(), lookup,
+                                                  savedEnvironment, shaderLookup, surfaceLookup);
     std::ofstream out(path, std::ios::binary);
     out << json;
     if (!out) {
@@ -1405,6 +1468,37 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
                          entity.name);
                 for (const shaderc::CompileError& error : result.error()) {
                     logError("{}", error.message);
+                }
+            } else if (!savedEntity.surfaceParams.empty()) {
+                // Offsets are never persisted: recomputed from order+type by
+                // the same std140 routine the splice used (MD).
+                std::vector<agent::surface::ParamDecl> decls;
+                for (const scene::SavedSurfaceParam& param : savedEntity.surfaceParams) {
+                    agent::surface::ParamDecl decl{.name = param.name, .isVec4 = param.isVec4};
+                    std::copy(std::begin(param.value), std::end(param.value), decl.value);
+                    decls.push_back(std::move(decl));
+                }
+                const auto layout = agent::surface::computeLayout(decls);
+                if (layout.has_value()) {
+                    std::vector<renderer::ForwardRenderer::SurfaceParam> params;
+                    for (std::size_t i = 0; i < layout->size(); ++i) {
+                        renderer::ForwardRenderer::SurfaceParam param{.name = (*layout)[i].name,
+                                                                      .isVec4 = (*layout)[i].isVec4,
+                                                                      .offset =
+                                                                          (*layout)[i].offset};
+                        std::copy(std::begin(decls[i].value), std::end(decls[i].value),
+                                  param.value);
+                        params.push_back(std::move(param));
+                    }
+                    if (!renderer_.setMaterialSurfaceParams(
+                            static_cast<std::uint32_t>(entity.materialIndex), std::move(params))) {
+                        logError("scene load: surface params for entity '{}' do not fit its "
+                                 "shader, skipping",
+                                 entity.name);
+                    }
+                } else {
+                    logError("scene load: surface params for entity '{}' invalid: {}", entity.name,
+                             layout.error());
                 }
             }
         }
@@ -1819,6 +1913,45 @@ bool EngineRuntime::setEntityTransform(const std::string& id, math::float3 posit
     undo_.commitPending();
     markDirty();
     return true;
+}
+
+std::vector<renderer::ForwardRenderer::SurfaceParam>
+EngineRuntime::entitySurfaceParams(const std::string& id) const {
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return {};
+    }
+    const scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr || entity->materialIndex < 0) {
+        return {};
+    }
+    const auto params =
+        renderer_.materialSurfaceParams(static_cast<std::uint32_t>(entity->materialIndex));
+    return {params.begin(), params.end()};
+}
+
+bool EngineRuntime::setEntitySurfaceParam(const std::string& id, const std::string& name,
+                                          std::span<const float> value) {
+    const std::optional<scene::EntityId> parsed = agent::parseEntityId(id);
+    if (!parsed.has_value()) {
+        return false;
+    }
+    const scene::Entity* entity = world_.entities.get(*parsed);
+    if (entity == nullptr || entity->materialIndex < 0) {
+        return false;
+    }
+    for (const float component : value) {
+        if (!std::isfinite(component)) {
+            return false;
+        }
+    }
+    const bool applied = renderer_.setMaterialSurfaceParam(
+        static_cast<std::uint32_t>(entity->materialIndex), name, value);
+    if (applied) {
+        undo_.commitPending();
+        markDirty();
+    }
+    return applied;
 }
 
 bool EngineRuntime::setEntityMaterial(const std::string& id, const MaterialParams& params) {

@@ -32,6 +32,8 @@ struct SceneState {
     // above already rely on), so a snapshot's indices stay valid to reapply
     // as long as no loadScene happened in between.
     std::vector<renderer::ForwardRenderer::MaterialTextureIndices> materialTextures;
+    // Spliced surface parameters per material (MD); empty vector = none.
+    std::vector<std::vector<renderer::ForwardRenderer::SurfaceParam>> surfaceParams;
     // nullopt means "the loaded startup HDR is active, not an environment_set
     // choice"; applying this snapshot only re-bakes when it differs from the
     // current value (EnvironmentSource::operator== is defaulted), so undoing

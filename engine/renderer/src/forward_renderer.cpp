@@ -717,6 +717,14 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
         }
     }
 
+    // A same-source reinstall (hot reload) keeps the installed params; a new
+    // source starts clean and the caller re-installs its own layout.
+    std::vector<SurfaceParam> keptParams;
+    if (materialShaders_[materialIndex] &&
+        materialShaders_[materialIndex]->fragmentSource == source) {
+        keptParams = std::move(materialShaders_[materialIndex]->surfaceParams);
+    }
+
     materialFactorBuffers_[materialIndex] = std::move(buffers);
     materialGroups_[materialIndex] = std::move(groups);
     materialDirty_[materialIndex] = {};
@@ -727,8 +735,12 @@ ForwardRenderer::compileMaterialShader(std::size_t materialIndex, std::string_vi
         .factorBufferBinding = factors->binding,
         .factorBufferSize = bufferSize,
         .factorWriteSize = writeSize,
+        .surfaceParams = std::move(keptParams),
         .referencesTime = detail::sourceReferencesTime(source),
     };
+    if (!materialShaders_[materialIndex]->surfaceParams.empty()) {
+        materialDirty_[materialIndex].fill(true);
+    }
     return {};
 }
 
@@ -1169,6 +1181,52 @@ void ForwardRenderer::updateFrameUniforms(const scene::Scene& scene,
     device_->queue().writeBuffer(*frameUniforms_[frameSlot_], 0, &data, sizeof(data));
 }
 
+bool ForwardRenderer::setMaterialSurfaceParams(std::uint32_t materialIndex,
+                                               std::vector<SurfaceParam> params) {
+    if (materialIndex >= materialShaders_.size() || !materialShaders_[materialIndex]) {
+        return false;
+    }
+    MaterialShaderRecord& record = *materialShaders_[materialIndex];
+    for (const SurfaceParam& param : params) {
+        const std::uint32_t size = param.isVec4 ? 16u : 4u;
+        if (param.offset < sizeof(MaterialFactorsData) ||
+            param.offset + size > record.factorBufferSize) {
+            return false;
+        }
+    }
+    record.surfaceParams = std::move(params);
+    materialDirty_[materialIndex].fill(true);
+    return true;
+}
+
+bool ForwardRenderer::setMaterialSurfaceParam(std::uint32_t materialIndex, std::string_view name,
+                                              std::span<const float> value) {
+    if (materialIndex >= materialShaders_.size() || !materialShaders_[materialIndex]) {
+        return false;
+    }
+    for (SurfaceParam& param : materialShaders_[materialIndex]->surfaceParams) {
+        if (param.name != name) {
+            continue;
+        }
+        const std::size_t expected = param.isVec4 ? 4 : 1;
+        if (value.size() != expected) {
+            return false;
+        }
+        std::copy(value.begin(), value.end(), param.value);
+        materialDirty_[materialIndex].fill(true);
+        return true;
+    }
+    return false;
+}
+
+std::span<const ForwardRenderer::SurfaceParam>
+ForwardRenderer::materialSurfaceParams(std::uint32_t materialIndex) const {
+    if (materialIndex >= materialShaders_.size() || !materialShaders_[materialIndex]) {
+        return {};
+    }
+    return materialShaders_[materialIndex]->surfaceParams;
+}
+
 void ForwardRenderer::flushDirtyMaterials() {
     for (std::size_t i = 0; i < materialParams_.size(); ++i) {
         if (!materialDirty_[i][frameSlot_]) {
@@ -1186,6 +1244,20 @@ void ForwardRenderer::flushDirtyMaterials() {
                                                 ? materialShaders_[i]->factorWriteSize
                                                 : static_cast<std::uint32_t>(sizeof(factors));
             device_->queue().writeBuffer(*buffer, 0, &factors, writeSize);
+            if (materialShaders_[i] && !materialShaders_[i]->surfaceParams.empty()) {
+                const auto& params = materialShaders_[i]->surfaceParams;
+                std::uint32_t end = 0;
+                for (const SurfaceParam& param : params) {
+                    end = std::max(end, param.offset + (param.isVec4 ? 16u : 4u));
+                }
+                std::vector<std::byte> staging(end - sizeof(factors), std::byte{0});
+                for (const SurfaceParam& param : params) {
+                    std::memcpy(staging.data() + param.offset - sizeof(factors), param.value,
+                                param.isVec4 ? 16 : 4);
+                }
+                device_->queue().writeBuffer(*buffer, sizeof(factors), staging.data(),
+                                             staging.size());
+            }
         }
         materialDirty_[i][frameSlot_] = false;
     }

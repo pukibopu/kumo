@@ -13,6 +13,7 @@
 #include <expected>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -94,6 +95,25 @@ public:
     // any error the material keeps its current pipeline untouched.
     std::expected<void, std::vector<shaderc::CompileError>>
     setMaterialShader(std::uint32_t materialIndex, std::string_view fragmentSource);
+    // Named parameter of a spliced surface shader (MD): std140 offset within
+    // the factor block is engine-computed, the value is cached for undo/saves.
+    struct SurfaceParam {
+        std::string name;
+        bool isVec4 = false;
+        std::uint32_t offset = 0;
+        float value[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        bool operator==(const SurfaceParam&) const = default;
+    };
+    // Installs the parameter layout+values for a custom-shader material (after
+    // setMaterialShader); false when the material has no custom shader or an
+    // offset falls outside the reflected factor block.
+    bool setMaterialSurfaceParams(std::uint32_t materialIndex, std::vector<SurfaceParam> params);
+    // Updates one value; `value` must carry 1 float (or 4 for a vec4 param).
+    bool setMaterialSurfaceParam(std::uint32_t materialIndex, std::string_view name,
+                                 std::span<const float> value);
+    // Empty when the material has no custom shader or no installed params.
+    std::span<const SurfaceParam> materialSurfaceParams(std::uint32_t materialIndex) const;
+
     // Reverts the material to the shared pipeline. False when index is invalid
     // or the material has no custom shader.
     bool clearMaterialShader(std::uint32_t materialIndex);
@@ -151,6 +171,8 @@ private:
         // detail::factorPrefixSize from the block's reflected member names;
         // reused by every subsequent flushDirtyMaterials write.
         std::uint32_t factorWriteSize = 0;
+        // Spliced surface parameters (MD); values flushed at offset 64+.
+        std::vector<SurfaceParam> surfaceParams;
         // Cached detail::sourceReferencesTime(fragmentSource): backs
         // hasAnimatedMaterials() without re-scanning the source every frame.
         bool referencesTime = false;

@@ -38,6 +38,8 @@ namespace kumo::agent {
 // forward-declares it and holds it by pointer, keeping the private type out
 // of this public facade header.
 class PolyHavenClient;
+// Embeddings client behind asset_search (MR); private like PolyHavenClient.
+class EmbeddingClient;
 } // namespace kumo::agent
 
 namespace kumo::facade {
@@ -377,6 +379,10 @@ private:
     // (already out-of-line) is what makes unique_ptr<incomplete-in-this-header>
     // valid here.
     std::unique_ptr<agent::PolyHavenClient> polyHavenClient_;
+    // Query embedder behind asset_search/material_recipe_search (MR); rebuilt
+    // by assembleAgentSessions from whichever endpoint is openai-typed, null
+    // when none is (the tools then degrade to FTS + filters).
+    std::unique_ptr<agent::EmbeddingClient> embeddingClient_;
     // Per-call filename serial: consecutive screenshots must not overwrite
     // files a provider round trip may still be reading.
     std::uint32_t screenshotSerial_ = 0;

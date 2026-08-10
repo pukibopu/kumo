@@ -41,6 +41,10 @@ struct AgentConfig {
     // agents.max_tool_rounds; global like summary_threshold_tokens (no
     // per-agent override), applied to both the scene and shader sessions.
     int maxToolRounds = 24;
+    // retrieval.embedding_model (MR): the /v1/embeddings model used by the
+    // index builder and query-time asset_search; the endpoint itself comes
+    // from whichever configured agent endpoint is openai-typed.
+    std::string embeddingModel = "text-embedding-3-small";
 };
 
 // Loads kumo.config.json then applies overrides: real environment beats .env

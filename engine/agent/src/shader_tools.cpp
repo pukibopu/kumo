@@ -1,5 +1,6 @@
 #include <kumo/agent/shader_tools.h>
 
+#include "asset_search.h"
 #include "surface_template.h"
 
 #include <kumo/agent/entity_id.h>
@@ -15,8 +16,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -465,12 +468,118 @@ std::string shaderApplyRecipe(const ShaderToolContext& context, const json& args
     return installSurface(context, args, *functionText, *decls);
 }
 
+// Hybrid retrieval over the index's recipe entries (MR): each result carries
+// the recipe's full tunable-param schema from its own metadata, but never its
+// .frag source (anti-goal) -- application goes through shader_apply_recipe.
+std::string materialRecipeSearch(const ShaderToolContext& context, const json& args) {
+    if (context.recipesDir.empty()) {
+        return errorJson("no recipe library configured");
+    }
+    if (context.assetDir.empty() || context.searchCache == nullptr) {
+        return errorJson("no asset index configured; browse with recipe_list instead");
+    }
+    const auto queryIt = args.find("query");
+    if (queryIt == args.end() || !queryIt->is_string() || queryIt->get<std::string>().empty()) {
+        return errorJson("query (string) is required");
+    }
+    const std::string query = queryIt->get<std::string>();
+    if (query.size() > 64) {
+        return errorJson("query must be at most 64 characters; use a short descriptive phrase");
+    }
+    int limit = search::kDefaultResults;
+    if (const auto it = args.find("limit"); it != args.end()) {
+        if (!it->is_number_integer() || it->get<int>() < 1 ||
+            it->get<int>() > search::kMaxResults) {
+            return errorJson(
+                std::format("limit must be an integer between 1 and {}", search::kMaxResults));
+        }
+        limit = it->get<int>();
+    }
+
+    std::lock_guard<std::mutex> lock(context.searchCache->mutex);
+    search::refreshSearchCacheLocked(*context.searchCache, context.assetDir);
+    if (!context.searchCache->index.has_value()) {
+        return errorJson("no asset index found; build it with `viewer --index`, or browse with "
+                         "recipe_list");
+    }
+    const AssetIndex& index = *context.searchCache->index;
+    const bool anyRecipeEntry =
+        std::any_of(index.entries.begin(), index.entries.end(),
+                    [](const AssetIndexEntry& e) { return e.kind == AssetIndexKind::Recipe; });
+    if (!anyRecipeEntry) {
+        return errorJson("the asset index has no recipe entries; rebuild it with `viewer "
+                         "--index`, or browse with recipe_list");
+    }
+
+    search::Filters filters;
+    filters.kinds = {AssetIndexKind::Recipe};
+    const std::vector<std::string> tokens = search::tokenizeQuery(query);
+    std::vector<float> queryVec;
+    if (context.embedQuery && index.embedding.has_value() && index.embedding->dim > 0 &&
+        !context.searchCache->rows.empty()) {
+        if (std::optional<std::vector<float>> vec = context.embedQuery(query);
+            vec.has_value() && vec->size() == index.embedding->dim) {
+            queryVec = std::move(*vec);
+        }
+    }
+    const std::vector<search::Match> matches =
+        search::searchIndex(index, context.searchCache->rows, filters, tokens, queryVec, limit);
+
+    json results = json::array();
+    json imagePaths = json::array();
+    for (std::size_t i = 0; i < matches.size(); ++i) {
+        const AssetIndexEntry& entry = index.entries[matches[i].entryIndex];
+        json j{{"name", entry.id}, {"score", matches[i].score}};
+        if (!entry.tags.empty()) {
+            j["tags"] = entry.tags;
+        }
+        if (!entry.caption.empty()) {
+            j["caption"] = entry.caption;
+        }
+        // The tunable-param schema lives in the recipe's own metadata, richer
+        // than the index row (min/max/per-param descriptions).
+        if (const auto metaText = readTextFile(context.recipesDir / (entry.id + ".json"))) {
+            const json meta = json::parse(*metaText, nullptr, false);
+            if (meta.is_object()) {
+                for (const char* key : {"description", "params", "geometry", "cost"}) {
+                    if (meta.contains(key)) {
+                        j[key] = meta[key];
+                    }
+                }
+            }
+        }
+        if (i < 3 && !entry.thumbnail.empty()) {
+            const std::filesystem::path thumb = context.assetDir / entry.thumbnail;
+            std::error_code ec;
+            if (std::filesystem::exists(thumb, ec)) {
+                j["thumbnail_attached"] = true;
+                imagePaths.push_back(thumb.string());
+            }
+        }
+        results.push_back(std::move(j));
+    }
+
+    json out{
+        {"status", "ok"}, {"results", std::move(results)}, {"vector_search", !queryVec.empty()}};
+    if (!imagePaths.empty()) {
+        out["image_paths"] = std::move(imagePaths);
+        out["image_detail"] = "low";
+    }
+    if (matches.empty()) {
+        out["note"] = "nothing matched; try different words, or recipe_list for the full library";
+    }
+    return out.dump();
+}
+
 } // namespace
 
 void registerShaderTools(ToolRegistry& registry, ShaderToolContext context) {
     KUMO_ASSERT(context.scene != nullptr);
     if (!context.failureCounts) {
         context.failureCounts = std::make_shared<std::unordered_map<std::int32_t, int>>();
+    }
+    if (context.searchCache == nullptr) {
+        context.searchCache = std::make_shared<search::SearchCache>();
     }
 
     auto add = [&](const char* name, const char* description, const char* schema, auto handler) {
@@ -524,6 +633,19 @@ void registerShaderTools(ToolRegistry& registry, ShaderToolContext context) {
         "Apply one with shader_apply_recipe.",
         R"({"type":"object","properties":{}})",
         [](const ShaderToolContext& ctx, const json& args) { return recipeList(ctx, args); });
+
+    add("material_recipe_search",
+        "Search the recipe library by description ('brushed old metal', 'glowing sci-fi "
+        "panel'): hybrid keyword + semantic retrieval returning each match's tunable params, "
+        "suited geometry, cost and a preview thumbnail. Prefer this over recipe_list when "
+        "looking for a specific feel; apply a result with shader_apply_recipe.",
+        R"({"type":"object","properties":{
+"query":{"type":"string","minLength":1,"maxLength":64,"description":"Short descriptive phrase"},
+"limit":{"type":"integer","minimum":1,"maximum":5,"description":"Default 3"}},
+"required":["query"]})",
+        [](const ShaderToolContext& ctx, const json& args) {
+            return materialRecipeSearch(ctx, args);
+        });
 
     add("shader_apply_recipe",
         "Apply a library recipe (name from recipe_list) to an entity's material, optionally "

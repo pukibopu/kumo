@@ -1,0 +1,18 @@
+{
+    "caption": "Product studio shot: one hero object on a seamless neutral backdrop, soft three-point lighting, shallow elevation, nothing else in frame",
+    "tags": ["studio", "product", "clean", "minimal", "showcase"],
+    "style": "realistic",
+    "palette": ["#f2f2f0", "#c8c8c4", "#3a6ea5"],
+    "camera": {
+        "fov_y_deg": 35,
+        "elevation_deg": 12,
+        "notes": "close, hero fills two thirds of the frame, slightly off-center"
+    },
+    "lighting": {
+        "environment": "studio preset, exposure a touch above neutral",
+        "key": "soft directional from 45 degrees camera-left, intensity 3",
+        "fill": "cool low-intensity fill from camera-right",
+        "rim": "subtle bright rim from behind to separate the silhouette"
+    },
+    "notes": "ground stays bare (no texture tiling artifacts near the subject); background must never distract from the hero object"
+}

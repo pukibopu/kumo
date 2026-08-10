@@ -271,6 +271,20 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
                 }
             }
         }
+        if (parsed.contains("retrieval")) {
+            const json& retrieval = parsed["retrieval"];
+            if (!retrieval.is_object()) {
+                return std::unexpected("retrieval must be an object");
+            }
+            std::string error3;
+            std::string embeddingModel;
+            if (!readField(retrieval, "embedding_model", embeddingModel, error3)) {
+                return std::unexpected("retrieval." + error3);
+            }
+            if (!embeddingModel.empty()) {
+                config.embeddingModel = embeddingModel;
+            }
+        }
     }
 
     const EnvLookup env{parseDotEnv(envPath)};

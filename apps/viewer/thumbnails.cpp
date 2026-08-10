@@ -1,15 +1,27 @@
-// Headless batch mode (MA milestone): `viewer --thumbnails` renders a preview
-// PNG per model/texture-set/env under the asset library and (re)writes
-// index.json, without opening a window (mirrors tests/test_gpu_contract.cpp's
-// windowless gpu::createDevice() pattern) or going through EngineRuntime (this
-// tool needs to swap scenes far more often than EngineRuntime's one-scene-per-
-// process contract allows).
+// Headless batch mode (MA milestone; MR extends it): `viewer --thumbnails`
+// renders a preview PNG per model/texture-set/env under the asset library and
+// (re)writes index.json, without opening a window (mirrors
+// tests/test_gpu_contract.cpp's windowless gpu::createDevice() pattern) or
+// going through EngineRuntime (this tool needs to swap scenes far more often
+// than EngineRuntime's one-scene-per-process contract allows). `viewer
+// --index` is its superset: also indexes recipes (rendered on a standard
+// sphere) and scene-spec templates, captions thumbnails through the
+// configured vision model and embeds every entry for asset_search.
 
-#include "asset_index.h" // private kumo_agent header (engine/agent/src)
+// Private kumo_agent headers (engine/agent/src).
+#include "asset_index.h"
+#include "base64.h"
+#include "embedding_client.h"
+#include "surface_template.h"
 
+#include <kumo/agent/chat.h>
+#include <kumo/agent/config.h>
+#include <kumo/agent/http_provider.h>
 #include <kumo/asset/asset.h>
 #include <kumo/asset/model_resolver.h>
+#include <kumo/asset/primitives.h>
 #include <kumo/asset/procedural_sky.h>
+#include <kumo/core/file.h>
 #include <kumo/core/log.h>
 #include <kumo/gpu/gpu.h>
 #include <kumo/math/math.h>
@@ -26,11 +38,14 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace kumo;
@@ -172,6 +187,18 @@ struct Tally {
     int rendered = 0;
     int skipped = 0;
     int failed = 0;
+    // Ids whose thumbnail was (re)rendered this run: their carried-over
+    // caption is stale and must be regenerated.
+    std::vector<std::string> rerendered;
+};
+
+// What runs beyond the MA thumbnail/metadata baseline; --thumbnails leaves
+// everything off, --index turns it all on (minus captions with --no-captions).
+struct IndexOptions {
+    bool force = false;
+    bool recipesAndSpecs = false;
+    bool captions = false;
+    bool embeddings = false;
 };
 
 // --- models ------------------------------------------------------------------
@@ -337,6 +364,7 @@ void processModels(gpu::Device& device, renderer::ForwardRenderer& renderer,
                 fitCamera(world.camera, center, diagonal);
                 if (renderSceneToPng(device, renderer, world, pngPath)) {
                     ++tally.rendered;
+                    tally.rerendered.push_back(id);
                 } else {
                     logError("thumbnails: render failed for model '{}'", id);
                     ++tally.failed;
@@ -428,6 +456,7 @@ void processTextureSets(const fs::path& assetDir, bool force, agent::AssetIndex&
                 fs::create_directories(pngPath.parent_path(), mkdirEc);
                 if (asset::writePng(pngPath, down.width, down.height, down.rgba.data())) {
                     ++tally.rendered;
+                    tally.rerendered.push_back(id);
                 } else {
                     logError("thumbnails: failed to write thumbnail for texture set '{}'", id);
                     ++tally.failed;
@@ -506,6 +535,7 @@ void processEnvironments(const fs::path& assetDir, bool force, agent::AssetIndex
                 ++tally.failed;
             } else {
                 ++tally.rendered;
+                tally.rerendered.push_back(id);
             }
         } else {
             ++tally.skipped;
@@ -517,9 +547,469 @@ void processEnvironments(const fs::path& assetDir, bool force, agent::AssetIndex
     }
 }
 
-} // namespace
+// --- recipes (MR) ------------------------------------------------------------
 
-int runThumbnails(const std::filesystem::path& assetDir, bool force) {
+fs::file_time_type newestOf(std::initializer_list<fs::path> paths) {
+    fs::file_time_type newest = fs::file_time_type::min();
+    for (const fs::path& path : paths) {
+        std::error_code ec;
+        const fs::file_time_type t = fs::last_write_time(path, ec);
+        if (!ec && t > newest) {
+            newest = t;
+        }
+    }
+    return newest;
+}
+
+std::string jsonString(const nlohmann::json& obj, const char* key) {
+    const auto it = obj.find(key);
+    return it != obj.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
+std::vector<std::string> jsonStringArray(const nlohmann::json& obj, const char* key) {
+    std::vector<std::string> out;
+    const auto it = obj.find(key);
+    if (it == obj.end() || !it->is_array()) {
+        return out;
+    }
+    for (const auto& item : *it) {
+        if (item.is_string()) {
+            out.push_back(item.get<std::string>());
+        }
+    }
+    return out;
+}
+
+// Default-valued decls from the recipe metadata; entries that do not parse
+// are skipped (the recipe still renders, at zeroed params).
+std::vector<agent::surface::ParamDecl> recipeParamDecls(const nlohmann::json& meta) {
+    std::vector<agent::surface::ParamDecl> decls;
+    const auto paramsIt = meta.find("params");
+    if (paramsIt == meta.end() || !paramsIt->is_array()) {
+        return decls;
+    }
+    for (const nlohmann::json& param : *paramsIt) {
+        if (!param.is_object()) {
+            continue;
+        }
+        agent::surface::ParamDecl decl;
+        decl.name = jsonString(param, "name");
+        if (decl.name.empty()) {
+            continue;
+        }
+        decl.isVec4 = jsonString(param, "type") == "vec4";
+        const auto valueIt = param.find("value");
+        if (valueIt != param.end()) {
+            if (decl.isVec4 && valueIt->is_array() && valueIt->size() == 4) {
+                for (std::size_t c = 0; c < 4; ++c) {
+                    if ((*valueIt)[c].is_number()) {
+                        decl.value[c] = (*valueIt)[c].get<float>();
+                    }
+                }
+            } else if (!decl.isVec4 && valueIt->is_number()) {
+                decl.value[0] = valueIt->get<float>();
+            }
+        }
+        decls.push_back(std::move(decl));
+    }
+    return decls;
+}
+
+// Every recipe rendered on one standard sphere (the MD NaN-testbed setup),
+// reusing material slot 0 across recipes. Caption and tags come from the
+// recipe's own metadata -- no vision call for recipes.
+void processRecipes(gpu::Device& device, renderer::ForwardRenderer& renderer,
+                    const renderer::ibl::Environment& environment, const fs::path& assetDir,
+                    const fs::path& shaderDir, bool force, agent::AssetIndex& index, Tally& tally) {
+    const fs::path recipesDir = shaderDir / "recipes";
+    std::error_code ec;
+    if (!fs::is_directory(recipesDir, ec)) {
+        return;
+    }
+    std::vector<std::string> ids;
+    for (const auto& entry : fs::directory_iterator(recipesDir, ec)) {
+        if (entry.path().extension() == ".json") {
+            ids.push_back(entry.path().stem().string());
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    if (ids.empty()) {
+        return;
+    }
+
+    const fs::path templatePath = shaderDir / "pbr_surface_template.frag";
+    const auto templateText = readTextFile(templatePath);
+    if (!templateText.has_value()) {
+        logError("index: cannot read {}", templatePath.string());
+        tally.failed += static_cast<int>(ids.size());
+        return;
+    }
+
+    asset::SceneAsset sphereAsset;
+    // Larger than the NaN testbed's sphere: recipes pattern in world space,
+    // so a bigger ball shows several noise/ring cycles instead of a sliver.
+    std::optional<asset::MeshData> sphere = asset::makePrimitive("sphere", 3.2f);
+    if (!sphere.has_value()) {
+        tally.failed += static_cast<int>(ids.size());
+        return;
+    }
+    sphere->materialIndex = 0;
+    const float diagonal = math::length(sphere->localAabb.max - sphere->localAabb.min);
+    sphereAsset.meshes.push_back(std::move(*sphere));
+    asset::MaterialData baseMaterial;
+    baseMaterial.metallic = 0.0f;
+    baseMaterial.roughness = 0.6f;
+    sphereAsset.materials.push_back(baseMaterial);
+    sphereAsset.nodes.push_back(asset::NodeInstance{.name = "sphere", .meshIndex = 0});
+    if (!renderer.loadScene(sphereAsset, environment)) {
+        logError("index: recipe preview scene setup failed");
+        tally.failed += static_cast<int>(ids.size());
+        return;
+    }
+    scene::Scene world;
+    scene::Entity sphereEntity;
+    sphereEntity.meshIndex = 0;
+    sphereEntity.materialIndex = 0;
+    world.entities.insert(sphereEntity);
+    world.addLight(keyLight());
+    fitCamera(world.camera, {0.0f, 0.0f, 0.0f}, diagonal);
+
+    for (const std::string& id : ids) {
+        const fs::path metaPath = recipesDir / (id + ".json");
+        const fs::path fragPath = recipesDir / (id + ".frag");
+        const auto metaText = readTextFile(metaPath);
+        const nlohmann::json meta = metaText.has_value()
+                                        ? nlohmann::json::parse(*metaText, nullptr, false)
+                                        : nlohmann::json(nlohmann::json::value_t::discarded);
+        if (meta.is_discarded() || !meta.is_object()) {
+            logError("index: recipe '{}' metadata is corrupt", id);
+            ++tally.failed;
+            continue;
+        }
+
+        agent::AssetIndexEntry entry;
+        entry.id = id;
+        entry.kind = agent::AssetIndexKind::Recipe;
+        entry.caption = jsonString(meta, "description");
+        entry.tags = jsonStringArray(meta, "tags");
+
+        const fs::path pngPath = thumbnailPath(assetDir, "recipes", id);
+        std::error_code freshEc;
+        const bool fresh =
+            fs::exists(pngPath, freshEc) &&
+            fs::last_write_time(pngPath, freshEc) >= newestOf({fragPath, metaPath, templatePath});
+        if (force || !fresh) {
+            const auto functionText = readTextFile(fragPath);
+            if (!functionText.has_value()) {
+                logError("index: cannot read {}", fragPath.string());
+                ++tally.failed;
+            } else {
+                const std::vector<agent::surface::ParamDecl> decls = recipeParamDecls(meta);
+                const auto spliced =
+                    agent::surface::spliceSurface(*templateText, *functionText, decls);
+                bool ok = spliced.has_value();
+                if (!ok) {
+                    logError("index: recipe '{}': {}", id, spliced.error());
+                } else {
+                    const auto installed = renderer.setMaterialShader(0, spliced->source);
+                    ok = installed.has_value();
+                    if (!ok) {
+                        logError("index: recipe '{}' failed to compile: {}", id,
+                                 installed.error().empty() ? std::string("unknown")
+                                                           : installed.error().front().message);
+                    } else {
+                        std::vector<renderer::ForwardRenderer::SurfaceParam> params;
+                        for (std::size_t i = 0; i < spliced->layout.size(); ++i) {
+                            renderer::ForwardRenderer::SurfaceParam param{
+                                .name = spliced->layout[i].name,
+                                .isVec4 = spliced->layout[i].isVec4,
+                                .offset = spliced->layout[i].offset};
+                            std::copy(std::begin(decls[i].value), std::end(decls[i].value),
+                                      param.value);
+                            params.push_back(std::move(param));
+                        }
+                        renderer.setMaterialSurfaceParams(0, std::move(params));
+                        ok = renderSceneToPng(device, renderer, world, pngPath);
+                        if (!ok) {
+                            logError("index: render failed for recipe '{}'", id);
+                        }
+                    }
+                }
+                if (ok) {
+                    ++tally.rendered;
+                    tally.rerendered.push_back(id);
+                } else {
+                    ++tally.failed;
+                }
+            }
+        } else {
+            ++tally.skipped;
+        }
+        if (fs::exists(pngPath, freshEc)) {
+            entry.thumbnail = relativeThumbnail(assetDir, pngPath);
+        }
+        index.entries.push_back(std::move(entry));
+    }
+}
+
+// --- scene-spec templates (MR) ----------------------------------------------
+
+// assets/specs/*.json, hand-authored: indexed for retrieval (the director
+// pipeline injects the top matches as tone references, MC); caption/tags/
+// style come from the file itself, no thumbnail.
+void processSpecs(const fs::path& assetDir, agent::AssetIndex& index, Tally& tally) {
+    const fs::path specsDir = assetDir / "specs";
+    std::error_code ec;
+    if (!fs::is_directory(specsDir, ec)) {
+        return;
+    }
+    std::vector<std::string> ids;
+    for (const auto& entry : fs::directory_iterator(specsDir, ec)) {
+        if (entry.path().extension() == ".json") {
+            ids.push_back(entry.path().stem().string());
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    for (const std::string& id : ids) {
+        const auto text = readTextFile(specsDir / (id + ".json"));
+        const nlohmann::json parsed = text.has_value()
+                                          ? nlohmann::json::parse(*text, nullptr, false)
+                                          : nlohmann::json(nlohmann::json::value_t::discarded);
+        if (parsed.is_discarded() || !parsed.is_object()) {
+            logError("index: spec '{}' is not valid JSON", id);
+            ++tally.failed;
+            continue;
+        }
+        agent::AssetIndexEntry entry;
+        entry.id = id;
+        entry.kind = agent::AssetIndexKind::Spec;
+        entry.caption = jsonString(parsed, "caption");
+        entry.tags = jsonStringArray(parsed, "tags");
+        entry.style = jsonString(parsed, "style");
+        index.entries.push_back(std::move(entry));
+    }
+}
+
+// --- captions and embeddings (MR) --------------------------------------------
+
+std::string trimmedCaption(std::string text) {
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    const std::size_t begin = text.find_first_not_of(" \t\r");
+    const std::size_t end = text.find_last_not_of(" \t\r");
+    if (begin == std::string::npos) {
+        return {};
+    }
+    text = text.substr(begin, end - begin + 1);
+    if (text.size() > 240) {
+        text.resize(240);
+    }
+    return text;
+}
+
+// Carries captions forward from the previous index (matched on id+kind),
+// invalidates the re-rendered ones, then asks the vision provider for the
+// rest. Recipe/spec captions come from their own metadata and are never
+// touched here.
+void fillCaptions(agent::AssetIndex& index, const std::optional<agent::AssetIndex>& previous,
+                  const Tally& rerendered, const fs::path& assetDir, agent::ILLMProvider* vision,
+                  const std::string& visionModel) {
+    std::unordered_map<std::string, const agent::AssetIndexEntry*> prevById;
+    if (previous.has_value()) {
+        for (const agent::AssetIndexEntry& entry : previous->entries) {
+            prevById.emplace(entry.id, &entry);
+        }
+    }
+    auto wasRerendered = [&](const std::string& id) {
+        return std::find(rerendered.rerendered.begin(), rerendered.rerendered.end(), id) !=
+               rerendered.rerendered.end();
+    };
+    int captioned = 0;
+    int failed = 0;
+    for (agent::AssetIndexEntry& entry : index.entries) {
+        if (entry.kind == agent::AssetIndexKind::Recipe ||
+            entry.kind == agent::AssetIndexKind::Spec) {
+            continue;
+        }
+        if (entry.caption.empty()) {
+            if (const auto it = prevById.find(entry.id);
+                it != prevById.end() && it->second->kind == entry.kind) {
+                entry.caption = it->second->caption;
+            }
+        }
+        if (wasRerendered(entry.id)) {
+            entry.caption.clear();
+        }
+        if (vision == nullptr || !entry.caption.empty() || entry.thumbnail.empty()) {
+            continue;
+        }
+        const std::optional<std::string> png =
+            agent::detail::base64EncodeFile(assetDir / entry.thumbnail);
+        if (!png.has_value()) {
+            continue;
+        }
+        agent::ChatMessage message;
+        message.role = agent::Role::User;
+        message.text = "One short sentence describing this 3D asset preview for a search "
+                       "index: subject, style, dominant colors, material feel. Reply with "
+                       "only the sentence.";
+        message.userImages.push_back(agent::UserImage{.base64 = *png});
+        message.userImageDetail = "low";
+        agent::ChatRequest request;
+        request.model = visionModel;
+        request.messages = {std::move(message)};
+        // Reasoning off: an OpenAI reasoning model left at its default effort
+        // can burn the whole budget on reasoning and return empty text.
+        request.reasoningEffort = "none";
+        request.maxTokens = 300;
+        const agent::CompleteResult result = vision->complete(request);
+        if (result.has_value()) {
+            entry.caption = trimmedCaption(result->text);
+            ++captioned;
+        } else {
+            ++failed;
+            logWarn("index: caption for '{}' failed: {}", entry.id, result.error().message);
+        }
+    }
+    if (captioned > 0 || failed > 0) {
+        logInfo("index: {} captions generated, {} failed", captioned, failed);
+    }
+}
+
+std::string embeddingText(const agent::AssetIndexEntry& entry) {
+    std::string text = entry.caption;
+    text += ' ';
+    text += entry.name.empty() ? entry.id : entry.name;
+    for (const std::string& tag : entry.tags) {
+        text += ' ';
+        text += tag;
+    }
+    if (!entry.category.empty()) {
+        text += ' ';
+        text += entry.category;
+    }
+    return text;
+}
+
+// Embeds every entry's caption+name+tags+category, reusing the previous
+// sidecar row when the text (and model) is unchanged, so an idempotent re-run
+// makes zero requests. A null `client` (--thumbnails, or no openai endpoint)
+// runs in reuse-only mode, so a plain thumbnail refresh never wipes the
+// sidecar a previous --index built. Any failure leaves the affected entries
+// at offset -1; asset_search then covers them with FTS only.
+void fillEmbeddings(agent::AssetIndex& index, const std::optional<agent::AssetIndex>& previous,
+                    const std::vector<float>& previousRows, const fs::path& assetDir,
+                    agent::EmbeddingClient* client) {
+    const std::string model =
+        client != nullptr
+            ? client->model()
+            : (previous.has_value() && previous->embedding.has_value() ? previous->embedding->model
+                                                                       : std::string());
+    if (model.empty()) {
+        return;
+    }
+    std::unordered_map<std::string, const agent::AssetIndexEntry*> prevById;
+    if (previous.has_value()) {
+        for (const agent::AssetIndexEntry& entry : previous->entries) {
+            prevById.emplace(entry.id, &entry);
+        }
+    }
+    const bool canReuse = previous.has_value() && previous->embedding.has_value() &&
+                          previous->embedding->model == model && previous->embedding->dim > 0 &&
+                          !previousRows.empty();
+    if (client == nullptr && !canReuse) {
+        return;
+    }
+    const std::size_t prevDim = canReuse ? previous->embedding->dim : 0;
+
+    std::vector<std::string> texts(index.entries.size());
+    std::vector<const float*> reused(index.entries.size(), nullptr);
+    std::vector<std::string> toEmbed;
+    std::vector<std::size_t> toEmbedIndex;
+    for (std::size_t i = 0; i < index.entries.size(); ++i) {
+        texts[i] = embeddingText(index.entries[i]);
+        const agent::AssetIndexEntry* prev = nullptr;
+        if (const auto it = prevById.find(index.entries[i].id); it != prevById.end()) {
+            prev = it->second;
+        }
+        if (canReuse && prev != nullptr && prev->kind == index.entries[i].kind &&
+            prev->embeddingOffset >= 0 &&
+            (static_cast<std::size_t>(prev->embeddingOffset) + 1) * prevDim <=
+                previousRows.size() &&
+            embeddingText(*prev) == texts[i]) {
+            reused[i] =
+                previousRows.data() + static_cast<std::size_t>(prev->embeddingOffset) * prevDim;
+        } else {
+            toEmbed.push_back(texts[i]);
+            toEmbedIndex.push_back(i);
+        }
+    }
+
+    std::vector<std::vector<float>> fresh;
+    if (!toEmbed.empty() && client != nullptr) {
+        auto rows = client->embed(toEmbed);
+        if (!rows.has_value()) {
+            logWarn("index: embeddings skipped: {}", rows.error());
+            return;
+        }
+        fresh = std::move(*rows);
+    } else if (!toEmbed.empty()) {
+        logInfo("index: {} entries left unembedded (no embeddings endpoint; rerun --index "
+                "with an openai-typed provider)",
+                toEmbed.size());
+    }
+    const std::size_t dim = !fresh.empty() ? fresh[0].size() : prevDim;
+    if (dim == 0) {
+        return;
+    }
+    if (prevDim != 0 && !fresh.empty() && fresh[0].size() != prevDim) {
+        // Same model returning a new dimension: drop reuse, re-embed all.
+        auto rows = client->embed(texts);
+        if (!rows.has_value()) {
+            logWarn("index: embeddings skipped: {}", rows.error());
+            return;
+        }
+        fresh = std::move(*rows);
+        toEmbedIndex.resize(index.entries.size());
+        for (std::size_t i = 0; i < toEmbedIndex.size(); ++i) {
+            toEmbedIndex[i] = i;
+        }
+        std::fill(reused.begin(), reused.end(), nullptr);
+    }
+
+    std::vector<float> rows;
+    rows.reserve(index.entries.size() * dim);
+    std::size_t freshCursor = 0;
+    int embedded = 0;
+    for (std::size_t i = 0; i < index.entries.size(); ++i) {
+        const float* source = reused[i];
+        if (source == nullptr && freshCursor < fresh.size() && toEmbedIndex[freshCursor] == i) {
+            source = fresh[freshCursor].data();
+            ++freshCursor;
+        }
+        if (source == nullptr) {
+            index.entries[i].embeddingOffset = -1;
+            continue;
+        }
+        index.entries[i].embeddingOffset = static_cast<std::int64_t>(rows.size() / dim);
+        rows.insert(rows.end(), source, source + dim);
+        ++embedded;
+    }
+
+    index.embedding = agent::AssetIndexEmbedding{
+        .model = model, .dim = static_cast<std::uint32_t>(dim), .file = "index_embeddings.bin"};
+    if (!agent::saveEmbeddingRows(assetDir, *index.embedding, rows)) {
+        logError("index: failed to write the embedding sidecar");
+        index.embedding.reset();
+        for (agent::AssetIndexEntry& entry : index.entries) {
+            entry.embeddingOffset = -1;
+        }
+        return;
+    }
+    logInfo("index: {} entries embedded ({} rows reused), dim {}", embedded,
+            embedded - static_cast<int>(freshCursor), dim);
+}
+
+int runIndexing(const fs::path& assetDir, const fs::path& shaderDir, const IndexOptions& options) {
     gpu::Ptr<gpu::Device> device = gpu::createDevice();
     if (!device) {
         logError("thumbnails: failed to create a GPU device");
@@ -542,15 +1032,90 @@ int runThumbnails(const std::filesystem::path& assetDir, bool force) {
         return 1;
     }
 
+    // The previous index feeds caption carry-forward and embedding-row reuse,
+    // so a rebuild only pays for what actually changed.
+    const std::optional<agent::AssetIndex> previous = agent::loadAssetIndex(assetDir);
+    std::vector<float> previousRows;
+    if (previous.has_value() && previous->embedding.has_value()) {
+        if (std::optional<std::vector<float>> rows =
+                agent::loadEmbeddingRows(assetDir, *previous->embedding)) {
+            previousRows = std::move(*rows);
+        }
+    }
+
     agent::AssetIndex index;
-    index.generated = "viewer --thumbnails";
+    index.generated = options.recipesAndSpecs ? "viewer --index" : "viewer --thumbnails";
 
     Tally modelTally;
-    processModels(*device, renderer, environment, assetDir, force, index, modelTally);
+    processModels(*device, renderer, environment, assetDir, options.force, index, modelTally);
     Tally textureTally;
-    processTextureSets(assetDir, force, index, textureTally);
+    processTextureSets(assetDir, options.force, index, textureTally);
     Tally envTally;
-    processEnvironments(assetDir, force, index, envTally);
+    processEnvironments(assetDir, options.force, index, envTally);
+    Tally recipeTally;
+    if (options.recipesAndSpecs) {
+        processRecipes(*device, renderer, environment, assetDir, shaderDir, options.force, index,
+                       recipeTally);
+        processSpecs(assetDir, index, recipeTally);
+    }
+
+    // Config-backed clients for the enrichment passes; either may be absent,
+    // each pass degrades on its own.
+    std::unique_ptr<agent::ILLMProvider> vision;
+    std::string visionModel;
+    std::unique_ptr<agent::EmbeddingClient> embedder;
+    if (options.captions || options.embeddings) {
+        const auto config = agent::loadAgentConfig("kumo.config.json", ".env");
+        if (!config.has_value()) {
+            logWarn("index: agent config: {}; captions and embeddings skipped", config.error());
+        } else {
+            if (options.captions) {
+                const agent::AgentEndpoint* endpoint = config->scene.available() ? &config->scene
+                                                       : config->shader.available()
+                                                           ? &config->shader
+                                                           : nullptr;
+                if (endpoint != nullptr) {
+                    if (endpoint->type == agent::ProviderType::OpenAi) {
+                        vision = std::make_unique<agent::OpenAiProvider>(
+                            endpoint->baseUrl, endpoint->apiKey, agent::makeUrlSessionTransport());
+                    } else {
+                        vision = std::make_unique<agent::ClaudeProvider>(
+                            endpoint->baseUrl, endpoint->apiKey, agent::makeUrlSessionTransport());
+                    }
+                    visionModel = endpoint->model;
+                } else {
+                    logInfo("index: captions skipped (no configured agent endpoint)");
+                }
+            }
+            if (options.embeddings) {
+                const agent::AgentEndpoint* endpoint = nullptr;
+                if (config->scene.type == agent::ProviderType::OpenAi &&
+                    config->scene.available()) {
+                    endpoint = &config->scene;
+                } else if (config->shader.type == agent::ProviderType::OpenAi &&
+                           config->shader.available()) {
+                    endpoint = &config->shader;
+                }
+                if (endpoint != nullptr) {
+                    embedder = std::make_unique<agent::EmbeddingClient>(
+                        agent::makeUrlSessionTransport(), endpoint->baseUrl, endpoint->apiKey,
+                        config->embeddingModel);
+                } else {
+                    logInfo("index: embeddings skipped (needs an openai-typed endpoint)");
+                }
+            }
+        }
+    }
+
+    Tally allRerendered;
+    for (const Tally* tally : {&modelTally, &textureTally, &envTally, &recipeTally}) {
+        allRerendered.rerendered.insert(allRerendered.rerendered.end(), tally->rerendered.begin(),
+                                        tally->rerendered.end());
+    }
+    // Both passes run even caption/embedding-less: carry-forward and reuse-only
+    // keep a later --thumbnails run from wiping what --index built.
+    fillCaptions(index, previous, allRerendered, assetDir, vision.get(), visionModel);
+    fillEmbeddings(index, previous, previousRows, assetDir, embedder.get());
 
     if (!agent::saveAssetIndex(assetDir, index)) {
         logError("thumbnails: failed to write {}", (assetDir / "index.json").string());
@@ -563,8 +1128,29 @@ int runThumbnails(const std::filesystem::path& assetDir, bool force) {
             textureTally.skipped, textureTally.failed);
     logInfo("thumbnails: env {} rendered, {} skipped, {} failed", envTally.rendered,
             envTally.skipped, envTally.failed);
+    if (options.recipesAndSpecs) {
+        logInfo("thumbnails: recipes/specs {} rendered, {} skipped, {} failed",
+                recipeTally.rendered, recipeTally.skipped, recipeTally.failed);
+    }
     logInfo("thumbnails: wrote {} with {} entries", (assetDir / "index.json").string(),
             index.entries.size());
 
-    return (modelTally.failed > 0 || textureTally.failed > 0 || envTally.failed > 0) ? 1 : 0;
+    return (modelTally.failed > 0 || textureTally.failed > 0 || envTally.failed > 0 ||
+            recipeTally.failed > 0)
+               ? 1
+               : 0;
+}
+
+} // namespace
+
+int runThumbnails(const std::filesystem::path& assetDir, bool force) {
+    return runIndexing(assetDir, {}, IndexOptions{.force = force});
+}
+
+int runIndex(const std::filesystem::path& assetDir, const std::filesystem::path& shaderDir,
+             bool force, bool captions) {
+    return runIndexing(
+        assetDir, shaderDir,
+        IndexOptions{
+            .force = force, .recipesAndSpecs = true, .captions = captions, .embeddings = true});
 }

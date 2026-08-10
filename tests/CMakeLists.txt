@@ -17,6 +17,8 @@ add_executable(kumo_tests
     test_agent_mcp_server.cpp
     test_agent_asset_fetch.cpp
     test_agent_asset_index.cpp
+    test_agent_asset_search.cpp
+    test_agent_embedding_client.cpp
     test_agent_placement.cpp
     test_agent_surface_template.cpp
     test_agent_scene_tools.cpp

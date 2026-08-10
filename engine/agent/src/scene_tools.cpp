@@ -1,6 +1,7 @@
 #include <kumo/agent/scene_tools.h>
 
 #include "asset_index.h"
+#include "asset_search.h"
 #include "placement.h"
 
 #include <kumo/agent/entity_id.h>
@@ -25,6 +26,7 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1339,6 +1341,176 @@ std::string assetList(const SceneToolContext& context) {
     return dumpSafe(out);
 }
 
+std::string kindString(AssetIndexKind kind) {
+    switch (kind) {
+    case AssetIndexKind::Texture:
+        return "texture";
+    case AssetIndexKind::Model:
+        return "model";
+    case AssetIndexKind::Environment:
+        return "env";
+    case AssetIndexKind::Recipe:
+        return "recipe";
+    case AssetIndexKind::Spec:
+        return "spec";
+    }
+    return "texture";
+}
+
+// Everything structured the index knows, caption included (unlike asset_list's
+// mergeIndexMetadata, which stays caption-free by design): a search result is
+// the moment the model needs the full picture of few candidates.
+json searchResultJson(const AssetIndexEntry& entry, float score) {
+    json j{{"id", entry.id}, {"kind", kindString(entry.kind)}, {"score", score}};
+    if (!entry.name.empty()) {
+        j["display_name"] = entry.name;
+    }
+    if (!entry.category.empty()) {
+        j["category"] = entry.category;
+    }
+    if (!entry.style.empty()) {
+        j["style"] = entry.style;
+    }
+    if (!entry.license.empty()) {
+        j["license"] = entry.license;
+    }
+    if (!entry.source.empty()) {
+        j["source"] = entry.source;
+    }
+    if (!entry.tags.empty()) {
+        j["tags"] = entry.tags;
+    }
+    if (!entry.caption.empty()) {
+        j["caption"] = entry.caption;
+    }
+    if (!entry.maps.empty()) {
+        j["maps"] = entry.maps;
+    }
+    if (entry.resolution.has_value()) {
+        j["resolution"] = *entry.resolution;
+    }
+    if (entry.dimensions.has_value()) {
+        j["dimensions"] =
+            json::array({entry.dimensions->x, entry.dimensions->y, entry.dimensions->z});
+    }
+    if (entry.triangles.has_value()) {
+        j["triangles"] = *entry.triangles;
+    }
+    if (entry.instancingOk.has_value()) {
+        j["instancing_ok"] = *entry.instancingOk;
+    }
+    return j;
+}
+
+// Hybrid retrieval over index.json (MR): hard filters, FTS over
+// id/name/tags/caption/category, and -- when both an embedQuery effector and
+// the index's embedding sidecar exist -- cosine over the query embedding,
+// fused by Reciprocal Rank Fusion. Recipe/spec entries never surface here
+// (material_recipe_search and the director pipeline own those). Top-3
+// results attach their thumbnails via image_paths (MB-1 multi-image results).
+std::string assetSearch(const SceneToolContext& context, const json& args) {
+    if (context.assetDir.empty()) {
+        return errorJson("asset directory not configured");
+    }
+    const auto queryIt = args.find("query");
+    if (queryIt == args.end() || !queryIt->is_string() || queryIt->get<std::string>().empty()) {
+        return errorJson("query (string) is required");
+    }
+    const std::string query = queryIt->get<std::string>();
+    if (query.size() > 64) {
+        return errorJson("query must be at most 64 characters; use a short descriptive phrase");
+    }
+
+    search::Filters filters;
+    if (const auto it = args.find("kind"); it != args.end()) {
+        if (!it->is_string()) {
+            return errorJson("kind must be a string");
+        }
+        const std::string kind = it->get<std::string>();
+        if (kind == "texture") {
+            filters.kinds = {AssetIndexKind::Texture};
+        } else if (kind == "model") {
+            filters.kinds = {AssetIndexKind::Model};
+        } else if (kind == "env") {
+            filters.kinds = {AssetIndexKind::Environment};
+        } else {
+            return errorJson("kind must be one of: texture, model, env");
+        }
+    } else {
+        filters.kinds = {AssetIndexKind::Texture, AssetIndexKind::Model,
+                         AssetIndexKind::Environment};
+    }
+    if (const auto it = args.find("category"); it != args.end() && it->is_string()) {
+        filters.category = it->get<std::string>();
+    }
+    if (const auto it = args.find("style"); it != args.end() && it->is_string()) {
+        filters.style = it->get<std::string>();
+    }
+    if (const auto it = args.find("max_dimension"); it != args.end()) {
+        if (!it->is_number() || it->get<float>() <= 0.0f) {
+            return errorJson("max_dimension must be a positive number (meters)");
+        }
+        filters.maxDimension = it->get<float>();
+    }
+    int limit = search::kDefaultResults;
+    if (const auto it = args.find("limit"); it != args.end()) {
+        if (!it->is_number_integer() || it->get<int>() < 1 ||
+            it->get<int>() > search::kMaxResults) {
+            return errorJson(
+                std::format("limit must be an integer between 1 and {}", search::kMaxResults));
+        }
+        limit = it->get<int>();
+    }
+
+    std::lock_guard<std::mutex> lock(context.searchCache->mutex);
+    search::refreshSearchCacheLocked(*context.searchCache, context.assetDir);
+    if (!context.searchCache->index.has_value()) {
+        return errorJson("no asset index found; build it with `viewer --index`, or browse with "
+                         "asset_list");
+    }
+    const AssetIndex& index = *context.searchCache->index;
+
+    const std::vector<std::string> tokens = search::tokenizeQuery(query);
+    std::vector<float> queryVec;
+    if (context.embedQuery && index.embedding.has_value() && index.embedding->dim > 0 &&
+        !context.searchCache->rows.empty()) {
+        if (std::optional<std::vector<float>> vec = context.embedQuery(query);
+            vec.has_value() && vec->size() == index.embedding->dim) {
+            queryVec = std::move(*vec);
+        }
+    }
+
+    const std::vector<search::Match> matches =
+        search::searchIndex(index, context.searchCache->rows, filters, tokens, queryVec, limit);
+
+    json results = json::array();
+    json imagePaths = json::array();
+    for (std::size_t i = 0; i < matches.size(); ++i) {
+        const AssetIndexEntry& entry = index.entries[matches[i].entryIndex];
+        results.push_back(searchResultJson(entry, matches[i].score));
+        if (i < 3 && !entry.thumbnail.empty()) {
+            const std::filesystem::path thumb = context.assetDir / entry.thumbnail;
+            std::error_code ec;
+            if (std::filesystem::exists(thumb, ec)) {
+                results.back()["thumbnail_attached"] = true;
+                imagePaths.push_back(thumb.string());
+            }
+        }
+    }
+
+    json out{
+        {"status", "ok"}, {"results", std::move(results)}, {"vector_search", !queryVec.empty()}};
+    if (!imagePaths.empty()) {
+        out["image_paths"] = std::move(imagePaths);
+        out["image_detail"] = "low";
+    }
+    if (matches.empty()) {
+        out["note"] = "nothing matched; try different words or fewer filters, or asset_fetch to "
+                      "download something new";
+    }
+    return dumpSafe(out);
+}
+
 // Applies (or, with no `tiling` argument, keeps) a texture set on an entity's
 // material. Errors: no such entity, entity has no material, bad tiling, asset
 // library not configured, unknown texture set (lists available names), or
@@ -2102,6 +2274,9 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
         context.textureSets =
             std::make_shared<std::unordered_map<std::string, TextureSetIndices>>();
     }
+    if (context.searchCache == nullptr) {
+        context.searchCache = std::make_shared<search::SearchCache>();
+    }
 
     registerSceneListTool(registry, context);
 
@@ -2123,6 +2298,23 @@ void registerSceneTools(ToolRegistry& registry, SceneToolContext context) {
                   .parametersSchema = R"({"type":"object","properties":{}})",
                   .destructive = false},
                  [context](std::string_view) { return assetList(context); });
+
+    add("asset_search",
+        "Search the asset library by description: hybrid keyword + semantic retrieval over the "
+        "pre-built index, returning the top matches with structured metadata and thumbnails. "
+        "Prefer this over asset_list when looking for something specific ('mossy brick wall', "
+        "'small wooden crate'); use asset_list only for a full inventory. Falls back to keyword "
+        "matching when no embeddings are available.",
+        R"({"type":"object","properties":{
+"query":{"type":"string","minLength":1,"maxLength":64,"description":"Short descriptive phrase, e.g. wet asphalt, night city sky, rusty barrel"},
+"kind":{"type":"string","enum":["texture","model","env"],"description":"Restrict to one asset kind; default searches all three"},
+"category":{"type":"string","description":"Exact category, e.g. survival or nature"},
+"style":{"type":"string","enum":["realistic","stylized"]},
+"max_dimension":{"type":"number","description":"Models only: longest bounding-box axis must fit, in meters"},
+"limit":{"type":"integer","minimum":1,"maximum":5,"description":"Default 3"}},
+"required":["query"]})",
+        false,
+        [](const SceneToolContext& ctx, const json& args) { return assetSearch(ctx, args); });
 
     add("scene_add_entity",
         "Add a procedural primitive entity to the scene; returns its entity_id and world-space "

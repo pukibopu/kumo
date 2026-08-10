@@ -1,6 +1,8 @@
 add_library(kumo_agent STATIC
     src/asset_fetch.cpp
     src/asset_index.cpp
+    src/asset_search.cpp
+    src/embedding_client.cpp
     src/placement.cpp
     src/surface_template.cpp
     src/base64.cpp

@@ -8,6 +8,8 @@
 // construct one (asset_fetch's FetchedAsset itself IS public, in scene_tools.h,
 // since SceneToolContext::fetchAsset needs it as a complete type).
 #include "asset_fetch.h"
+#include "asset_search.h"
+#include "embedding_client.h"
 #include "placement.h"
 #include "surface_template.h"
 
@@ -113,9 +115,12 @@ constexpr const char* kSceneSystemPrompt =
     "deliberately across the scene and avoid saturated pure primaries — real surfaces are "
     "mixed. For effects factors cannot express — iridescence, patterns, glass, procedural "
     "texture — tell the user to ask the shader assistant.\n\n"
-    "Assets. Call asset_list once per conversation before building: real assets beat "
-    "primitives. Prefer scene_add_model for organic or detailed things (trees, props) when "
-    "a fitting model exists; use primitives for simple geometry (walls, platforms, "
+    "Assets. To find assets, describe what you need to asset_search ('mossy stone wall', "
+    "'small wooden crate', kind/style/max_dimension filters as needed) — it returns the "
+    "best matches with thumbnails; go straight to an asset name only when you already "
+    "know it, and use asset_list only for a full inventory. Real assets beat primitives: "
+    "prefer scene_add_model for organic or detailed things (trees, props) when a fitting "
+    "model exists; use primitives for simple geometry (walls, platforms, "
     "panels). Dress every large surface with material_set_texture (ground gets sand or "
     "grass or rock, structures get planks or bark) and set tiling so texels stay roughly "
     "square — a 20 m ground with a 1 m texture wants tiling around 20. Prefer an HDR file "
@@ -163,9 +168,11 @@ constexpr const char* kShaderSystemPrompt =
     "right tier. DEFAULT tier — surface_write: submit only a surface function 'void "
     "kumoSurface(inout SurfaceOutputs s, in SurfaceInputs i)' plus named params "
     "(float/vec4, at most 16); the engine splices it over the standard PBR lighting, and "
-    "params stay live-tunable via shader_set_param without recompiling. Check "
-    "recipe_list first — wood, brushed metal, rust, marble and pulsing glow ship as "
-    "recipes you apply with shader_apply_recipe and then tune. Use this tier for "
+    "params stay live-tunable via shader_set_param without recompiling. Search the "
+    "recipe library first — describe the feel to material_recipe_search ('brushed old "
+    "metal', 'glowing panel'); wood, brushed metal, rust, marble and pulsing glow ship as "
+    "recipes you apply with shader_apply_recipe and then tune (recipe_list shows the "
+    "full inventory). Use this tier for "
     "materials, patterns, noise, roughness variation and emissive effects; declare "
     "tunable values as params instead of hardcoding numbers. ADVANCED tier — "
     "shader_write_full replaces the FULL fragment file (shader_read shows the current "
@@ -367,9 +374,9 @@ EnvironmentSource toEnvironmentSource(const scene::SavedEnvironment& saved) {
 // and never touches the scene or renderer either. environment_set is NOT
 // here: it mutates environmentSky_/the renderer and gets its undo checkpoint
 // from this same hook like every other scene tool.
-constexpr std::array<std::string_view, 7> kReadOnlyTools{
-    "scene_list",     "shader_read", "viewer_screenshot", "scene_define_group",
-    "scene_validate", "asset_list",  "asset_fetch"};
+constexpr std::array<std::string_view, 9> kReadOnlyTools{
+    "scene_list", "shader_read", "viewer_screenshot", "scene_define_group",    "scene_validate",
+    "asset_list", "asset_fetch", "asset_search",      "material_recipe_search"};
 
 bool isFinite3(const math::float3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -595,6 +602,7 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
     agent::AgentSession::Desc sceneDesc;
     agent::AgentSession::Desc shaderDesc;
     bool wantConfirm = confirmDestructiveOverride_;
+    embeddingClient_.reset();
     if (offline_) {
         sceneProvider_ = std::make_unique<agent::FakeProvider>(makeOfflineScript(world_),
                                                                "离线演示脚本已播放完毕。");
@@ -638,6 +646,23 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
                     plan.shaderEndpoint.model, plan.shaderEndpoint.baseUrl);
         } else {
             logInfo("shader agent disabled: {}", plan.shaderUnavailableReason);
+        }
+        // Query embeddings ride whichever endpoint is OpenAI-compatible
+        // (/v1/embeddings is not an Anthropic API); none means asset_search
+        // degrades to FTS + filters, deterministically.
+        const agent::AgentEndpoint* embedEndpoint = nullptr;
+        if (config->scene.type == agent::ProviderType::OpenAi && config->scene.available()) {
+            embedEndpoint = &config->scene;
+        } else if (config->shader.type == agent::ProviderType::OpenAi &&
+                   config->shader.available()) {
+            embedEndpoint = &config->shader;
+        }
+        if (embedEndpoint != nullptr) {
+            embeddingClient_ = std::make_unique<agent::EmbeddingClient>(
+                agent::makeUrlSessionTransport(), embedEndpoint->baseUrl, embedEndpoint->apiKey,
+                config->embeddingModel);
+            logInfo("retrieval embeddings ready: {} at {}", config->embeddingModel,
+                    embedEndpoint->baseUrl);
         }
     }
     if (wantConfirm) {
@@ -787,6 +812,27 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
             return runtime->polyHavenClient_->fetchModel(query, runtime->assetDir_ / "models");
         }
         return std::unexpected(std::string("unknown asset kind: ") + std::string(kind));
+    };
+    // Retrieval (MR): one index/sidecar cache shared by asset_search and
+    // material_recipe_search across every registry; the embedder consults the
+    // client assembleAgentSessions builds (null in offline/anthropic-only
+    // setups -- the tools then degrade to FTS).
+    auto searchCache = std::make_shared<agent::search::SearchCache>();
+    sceneTools.searchCache = searchCache;
+    sceneTools.embedQuery =
+        [runtime = self.get()](std::string_view query) -> std::optional<std::vector<float>> {
+        if (runtime->embeddingClient_ == nullptr) {
+            return std::nullopt;
+        }
+        const std::vector<std::string> texts{std::string(query)};
+        auto rows = runtime->embeddingClient_->embed(texts);
+        if (!rows.has_value() || rows->empty()) {
+            if (!rows.has_value()) {
+                logWarn("asset_search: query embedding failed: {}", rows.error());
+            }
+            return std::nullopt;
+        }
+        return std::move((*rows)[0]);
     };
     agent::registerSceneTools(self->sceneToolRegistry_, sceneTools);
     agent::registerSceneListTool(self->shaderToolRegistry_, sceneTools);
@@ -976,6 +1022,9 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
     // 5-attempt shader_write cap is a single per-material counter regardless
     // of which caller is driving it.
     shaderTools.failureCounts = std::make_shared<std::unordered_map<std::int32_t, int>>();
+    shaderTools.assetDir = self->assetDir_;
+    shaderTools.searchCache = searchCache;
+    shaderTools.embedQuery = sceneTools.embedQuery;
     agent::registerShaderTools(self->shaderToolRegistry_, shaderTools);
     // Lets the shader assistant look at its own edits in situ (docs/agents.md);
     // same tool def and handler as the scene assistant's copy above.

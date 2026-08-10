@@ -57,6 +57,12 @@ int runApp(int maxFrames, const std::filesystem::path& modelPath,
 // GLFW window. `force` re-renders every thumbnail even when its PNG is newer
 // than the source asset. Returns the process exit code.
 int runThumbnails(const std::filesystem::path& assetDir, bool force);
+// --thumbnails superset (MR): also indexes shader recipes (rendered on a
+// standard sphere) and assets/specs templates, captions thumbnails through
+// the configured vision model and writes the embedding sidecar asset_search
+// fuses with FTS.
+int runIndex(const std::filesystem::path& assetDir, const std::filesystem::path& shaderDir,
+             bool force, bool captions);
 #endif
 
 int main(int argc, char** argv) {
@@ -66,6 +72,8 @@ int main(int argc, char** argv) {
     bool confirmDestructive = false;
     bool mcp = false;
     bool thumbnails = false;
+    bool buildIndex = false;
+    bool noCaptions = false;
     bool force = false;
     bool checkShaders = false;
     std::filesystem::path modelPath =
@@ -89,6 +97,10 @@ int main(int argc, char** argv) {
             checkShaders = true;
         } else if (arg == "--thumbnails") {
             thumbnails = true;
+        } else if (arg == "--index") {
+            buildIndex = true;
+        } else if (arg == "--no-captions") {
+            noCaptions = true;
         } else if (arg == "--force") {
             force = true;
         } else if (arg == "--env") {
@@ -103,7 +115,7 @@ int main(int argc, char** argv) {
             kumo::logError(
                 "unknown option '{}' (usage: viewer [model.glb] [--env path.hdr] "
                 "[--frames N] [--demo-primitives] [--offline] [--confirm-destructive] [--mcp] "
-                "[--thumbnails [--force]] [--check-shaders])",
+                "[--thumbnails [--force]] [--index [--force] [--no-captions]] [--check-shaders])",
                 arg);
             return 1;
         }
@@ -121,6 +133,9 @@ int main(int argc, char** argv) {
     }
 
 #if defined(KUMO_HAS_RUNAPP)
+    if (buildIndex) {
+        return runIndex(KUMO_ASSET_DIR, KUMO_SHADER_DIR, force, !noCaptions);
+    }
     if (thumbnails) {
         return runThumbnails(KUMO_ASSET_DIR, force);
     }
@@ -133,6 +148,8 @@ int main(int argc, char** argv) {
     (void)confirmDestructive;
     (void)mcp;
     (void)thumbnails;
+    (void)buildIndex;
+    (void)noCaptions;
     (void)force;
     kumo::logInfo("no rendering backend for this platform yet");
     return 0;

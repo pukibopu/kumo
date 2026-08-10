@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+// Private kumo_agent header (engine/agent/src), for the asset_search fixtures.
+#include "asset_index.h"
+
 #include <kumo/agent/entity_id.h>
 #include <kumo/agent/scene_tools.h>
 #include <kumo/agent/tool_registry.h>
@@ -1795,4 +1798,182 @@ TEST_CASE("scene_add_entity avoid_overlap ignores clearance as a collision toler
     CHECK(rejected["status"] == "error");
     REQUIRE(rejected.contains("conflicting_entity_ids"));
     CHECK(f.scene.entities.size() == 1);
+}
+
+// --- asset_search (MR) ------------------------------------------------
+
+namespace {
+
+// One searchable library: two textures, one model, one env, plus recipe/spec
+// entries that must stay invisible to asset_search.
+AssetIndex searchableIndex() {
+    AssetIndex index;
+    AssetIndexEntry asphalt;
+    asphalt.id = "asphalt";
+    asphalt.kind = AssetIndexKind::Texture;
+    asphalt.tags = {"road", "urban"};
+    asphalt.caption = "wet asphalt road surface";
+    asphalt.thumbnail = ".thumbnails/textures/asphalt.png";
+    index.entries.push_back(asphalt);
+    AssetIndexEntry grass;
+    grass.id = "grass";
+    grass.kind = AssetIndexKind::Texture;
+    grass.tags = {"ground", "nature"};
+    index.entries.push_back(grass);
+    AssetIndexEntry crate;
+    crate.id = "props/crate";
+    crate.kind = AssetIndexKind::Model;
+    crate.category = "props";
+    crate.tags = {"wooden", "box"};
+    crate.dimensions = math::float3{0.5f, 0.5f, 0.5f};
+    index.entries.push_back(crate);
+    AssetIndexEntry night;
+    night.id = "city_night";
+    night.kind = AssetIndexKind::Environment;
+    night.tags = {"night", "urban"};
+    index.entries.push_back(night);
+    AssetIndexEntry recipe;
+    recipe.id = "wood_grain";
+    recipe.kind = AssetIndexKind::Recipe;
+    recipe.tags = {"wood"};
+    index.entries.push_back(recipe);
+    AssetIndexEntry spec;
+    spec.id = "product_studio";
+    spec.kind = AssetIndexKind::Spec;
+    spec.tags = {"studio"};
+    index.entries.push_back(spec);
+    return index;
+}
+
+ToolRegistry makeSearchRegistry(scene::Scene& scene, const std::filesystem::path& assetDir,
+                                SceneToolContext overrides = {}) {
+    ToolRegistry registry;
+    overrides.scene = &scene;
+    overrides.renderer = nullptr;
+    overrides.assetDir = assetDir;
+    registerSceneTools(registry, overrides);
+    return registry;
+}
+
+} // namespace
+
+TEST_CASE("asset_search reports unset assetDir as unsupported") {
+    Fixture f;
+    const json result = f.invoke("asset_search", R"({"query":"asphalt"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("not configured") != std::string::npos);
+}
+
+TEST_CASE("asset_search without an index points at viewer --index") {
+    TempDir dir("kumo_scene_tools_search_noindex");
+    scene::Scene scene;
+    ToolRegistry registry = makeSearchRegistry(scene, dir.path);
+    const json result = invokeOn(registry, "asset_search", R"({"query":"asphalt"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("--index") != std::string::npos);
+}
+
+TEST_CASE("asset_search validates its arguments") {
+    TempDir dir("kumo_scene_tools_search_args");
+    scene::Scene scene;
+    ToolRegistry registry = makeSearchRegistry(scene, dir.path);
+    CHECK(invokeOn(registry, "asset_search", "{}")["status"] == "error");
+    CHECK(invokeOn(registry, "asset_search",
+                   json{{"query", std::string(65, 'x')}}.dump())["status"] == "error");
+    CHECK(invokeOn(registry, "asset_search", R"({"query":"a","kind":"recipe"})")["status"] ==
+          "error");
+    CHECK(invokeOn(registry, "asset_search", R"({"query":"a","limit":0})")["status"] == "error");
+    CHECK(invokeOn(registry, "asset_search", R"({"query":"a","limit":6})")["status"] == "error");
+    CHECK(invokeOn(registry, "asset_search", R"({"query":"a","max_dimension":-1})")["status"] ==
+          "error");
+}
+
+TEST_CASE("asset_search ranks FTS hits, excludes recipe/spec entries and attaches existing "
+          "thumbnails") {
+    TempDir dir("kumo_scene_tools_search_fts");
+    REQUIRE(saveAssetIndex(dir.path, searchableIndex()));
+    touch(dir.path / ".thumbnails" / "textures" / "asphalt.png");
+    scene::Scene scene;
+    ToolRegistry registry = makeSearchRegistry(scene, dir.path);
+
+    const json result = invokeOn(registry, "asset_search", R"({"query":"wet asphalt"})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["vector_search"] == false);
+    REQUIRE(result["results"].size() == 1);
+    CHECK(result["results"][0]["id"] == "asphalt");
+    CHECK(result["results"][0]["kind"] == "texture");
+    CHECK(result["results"][0]["thumbnail_attached"] == true);
+    REQUIRE(result["image_paths"].size() == 1);
+    CHECK(result["image_paths"][0].get<std::string>().find("asphalt.png") != std::string::npos);
+    CHECK(result["image_detail"] == "low");
+
+    // "wood" matches the wood_grain recipe and the crate's tag; only the
+    // model may surface here.
+    const json wood = invokeOn(registry, "asset_search", R"({"query":"wooden"})");
+    REQUIRE(wood["status"] == "ok");
+    REQUIRE(wood["results"].size() == 1);
+    CHECK(wood["results"][0]["id"] == "props/crate");
+
+    const json none = invokeOn(registry, "asset_search", R"({"query":"volcano"})");
+    REQUIRE(none["status"] == "ok");
+    CHECK(none["results"].empty());
+    CHECK(none.contains("note"));
+}
+
+TEST_CASE("asset_search applies kind, category and max_dimension filters") {
+    TempDir dir("kumo_scene_tools_search_filters");
+    REQUIRE(saveAssetIndex(dir.path, searchableIndex()));
+    scene::Scene scene;
+    ToolRegistry registry = makeSearchRegistry(scene, dir.path);
+
+    const json urbanEnv = invokeOn(registry, "asset_search", R"({"query":"urban","kind":"env"})");
+    REQUIRE(urbanEnv["status"] == "ok");
+    REQUIRE(urbanEnv["results"].size() == 1);
+    CHECK(urbanEnv["results"][0]["id"] == "city_night");
+
+    const json fits =
+        invokeOn(registry, "asset_search", R"({"query":"box","kind":"model","max_dimension":1.0})");
+    REQUIRE(fits["results"].size() == 1);
+    const json tooBig =
+        invokeOn(registry, "asset_search", R"({"query":"box","kind":"model","max_dimension":0.2})");
+    CHECK(tooBig["results"].empty());
+}
+
+TEST_CASE("asset_search fuses the embedded query when sidecar and effector exist, and degrades "
+          "without them") {
+    TempDir dir("kumo_scene_tools_search_vec");
+    AssetIndex index = searchableIndex();
+    index.embedding = AssetIndexEmbedding{.model = "test", .dim = 2, .file = "rows.bin"};
+    index.entries[0].embeddingOffset = 0; // asphalt -> [1, 0]
+    index.entries[1].embeddingOffset = 1; // grass   -> [0, 1]
+    REQUIRE(saveAssetIndex(dir.path, index));
+    REQUIRE(
+        saveEmbeddingRows(dir.path, *index.embedding, std::vector<float>{1.0f, 0.0f, 0.0f, 1.0f}));
+    scene::Scene scene;
+
+    SceneToolContext withEmbed;
+    std::string capturedQuery;
+    withEmbed.embedQuery = [&capturedQuery](std::string_view query) {
+        capturedQuery = std::string(query);
+        return std::optional<std::vector<float>>{{1.0f, 0.0f}};
+    };
+    ToolRegistry registry = makeSearchRegistry(scene, dir.path, withEmbed);
+    // "pavement" shares no token with any entry: only the vector can find it.
+    const json result = invokeOn(registry, "asset_search", R"({"query":"pavement"})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["vector_search"] == true);
+    CHECK(capturedQuery == "pavement");
+    REQUIRE(result["results"].size() == 2);
+    CHECK(result["results"][0]["id"] == "asphalt");
+
+    // A wrong-dimension embedding degrades to FTS silently.
+    SceneToolContext badEmbed;
+    badEmbed.embedQuery = [](std::string_view) {
+        return std::optional<std::vector<float>>{{1.0f, 0.0f, 0.0f}};
+    };
+    ToolRegistry degraded = makeSearchRegistry(scene, dir.path, badEmbed);
+    const json fallback = invokeOn(degraded, "asset_search", R"({"query":"pavement"})");
+    REQUIRE(fallback["status"] == "ok");
+    CHECK(fallback["vector_search"] == false);
+    CHECK(fallback["results"].empty());
 }

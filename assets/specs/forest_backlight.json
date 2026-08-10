@@ -1,0 +1,18 @@
+{
+    "caption": "Forest clearing backlit by low sun: layered tree silhouettes, warm rim light through cool shadowed greens, mist-like depth falloff",
+    "tags": ["forest", "nature", "backlight", "atmospheric", "outdoor"],
+    "style": "realistic",
+    "palette": ["#2e4a2f", "#7a8c5a", "#ffd9a0", "#1d2b21"],
+    "camera": {
+        "fov_y_deg": 50,
+        "elevation_deg": 5,
+        "notes": "near ground level looking into the light, subject framed against the brightest sky patch"
+    },
+    "lighting": {
+        "environment": "sunset preset with sun barely above the horizon behind the scene",
+        "key": "the sun itself, warm and low, pointing toward the camera",
+        "fill": "dim cool skylight so shadow sides stay readable",
+        "rim": "comes free from the backlight; keep every tree edge glowing"
+    },
+    "notes": "scatter trees in at least three depth layers with min_spacing; foreground props stay dark and large, background fades bright and small"
+}

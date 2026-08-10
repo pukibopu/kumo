@@ -28,6 +28,10 @@ struct ProceduralSkyDesc;
 
 namespace kumo::agent {
 
+namespace search {
+struct SearchCache;
+}
+
 // Mirrors renderer::ForwardRenderer::MaterialParams in plain fields: that type
 // is only forward-declared here (the header must not pull in the full
 // forward_renderer.h), and a group definition must outlive any renderer.
@@ -150,6 +154,14 @@ struct SceneToolContext {
     std::function<std::expected<FetchedAsset, std::string>(std::string_view kind,
                                                            std::string_view query)>
         fetchAsset;
+    // asset_search's query embedder (MR): one short text in, its vector out.
+    // Null or a nullopt return degrades that search to FTS + filters only.
+    // Runs synchronously like fetchAsset (one embeddings request, ~100ms).
+    std::function<std::optional<std::vector<float>>(std::string_view)> embedQuery;
+    // Lazily loaded index.json + embedding sidecar behind asset_search,
+    // shared with the shader registry's material_recipe_search like `groups`;
+    // registerSceneTools default-constructs it when left null.
+    std::shared_ptr<search::SearchCache> searchCache;
 };
 
 // Registers only scene_list (ADR 0028): the read-only listing tool other agents

@@ -21,6 +21,10 @@ std::string kindToString(AssetIndexKind kind) {
         return "model";
     case AssetIndexKind::Environment:
         return "env";
+    case AssetIndexKind::Recipe:
+        return "recipe";
+    case AssetIndexKind::Spec:
+        return "spec";
     }
     return "texture";
 }
@@ -35,7 +39,35 @@ std::optional<AssetIndexKind> kindFromString(const std::string& text) {
     if (text == "env") {
         return AssetIndexKind::Environment;
     }
+    if (text == "recipe") {
+        return AssetIndexKind::Recipe;
+    }
+    if (text == "spec") {
+        return AssetIndexKind::Spec;
+    }
     return std::nullopt;
+}
+
+// Temp-sibling write + rename, so readers never observe a partial file.
+bool writeFileAtomic(const std::filesystem::path& path, const char* data, std::size_t size) {
+    const std::filesystem::path temp = path.string() + ".tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return false;
+        }
+        out.write(data, static_cast<std::streamsize>(size));
+        if (!out) {
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, path, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    return true;
 }
 
 std::string readStringField(const json& obj, const char* key) {
@@ -214,13 +246,42 @@ std::optional<AssetIndex> loadAssetIndex(const std::filesystem::path& assetDir) 
 bool saveAssetIndex(const std::filesystem::path& assetDir, const AssetIndex& index) {
     std::error_code ec;
     std::filesystem::create_directories(assetDir, ec);
-    std::ofstream out(assetDir / "index.json", std::ios::binary);
-    if (!out) {
+    const std::string text = serializeAssetIndex(index);
+    return writeFileAtomic(assetDir / "index.json", text.data(), text.size());
+}
+
+std::optional<std::vector<float>> loadEmbeddingRows(const std::filesystem::path& assetDir,
+                                                    const AssetIndexEmbedding& embedding) {
+    if (embedding.dim == 0 || embedding.file.empty()) {
+        return std::nullopt;
+    }
+    std::ifstream in(assetDir / embedding.file, std::ios::binary | std::ios::ate);
+    if (!in) {
+        return std::nullopt;
+    }
+    const std::streamoff size = in.tellg();
+    const std::size_t rowBytes = static_cast<std::size_t>(embedding.dim) * sizeof(float);
+    if (size < 0 || static_cast<std::size_t>(size) % rowBytes != 0) {
+        return std::nullopt;
+    }
+    std::vector<float> rows(static_cast<std::size_t>(size) / sizeof(float));
+    in.seekg(0);
+    in.read(reinterpret_cast<char*>(rows.data()), size);
+    if (!in) {
+        return std::nullopt;
+    }
+    return rows;
+}
+
+bool saveEmbeddingRows(const std::filesystem::path& assetDir, const AssetIndexEmbedding& embedding,
+                       std::span<const float> rows) {
+    if (embedding.dim == 0 || embedding.file.empty() || rows.size() % embedding.dim != 0) {
         return false;
     }
-    const std::string text = serializeAssetIndex(index);
-    out.write(text.data(), static_cast<std::streamsize>(text.size()));
-    return static_cast<bool>(out);
+    std::error_code ec;
+    std::filesystem::create_directories(assetDir, ec);
+    return writeFileAtomic(assetDir / embedding.file, reinterpret_cast<const char*>(rows.data()),
+                           rows.size() * sizeof(float));
 }
 
 } // namespace kumo::agent

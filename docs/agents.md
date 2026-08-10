@@ -30,12 +30,13 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 
 ## 工具
 
-十七个场景工具（英文 schema 与错误、变更类只回最小确认、全貌查询走 `scene_list`——ADR 0028）：
+十八个场景工具（英文 schema 与错误、变更类只回最小确认、全貌查询走 `scene_list`——ADR 0028）：
 
 | 工具 | 说明 |
 |---|---|
 | `scene_list` | 全场景：实体（id / 变换 / world AABB / 材质 / 图元溯源）+ 相机 + 灯 + 已定义组名 |
 | `asset_list` | 只读列出素材库（M6.98 PR-2；v2 见 MA）：`textures/` 下每套贴图的名字与现有贴图种类、模型名（含分类前缀）、`env/*.hdr` 环境文件；assetDir 未配置则报不支持 |
+| `asset_search` | 按描述检索素材库（MR）：结构化硬筛选（kind / category / style / max_dimension）∩（FTS ∪ 查询 embedding 余弦）经 RRF 融合，top 3-5 带结构化元数据，前 3 名附缩略图；recipe/spec 条目不出现在此工具；无 index 报错指路 `viewer --index`，无 embedding 降级纯 FTS |
 | `scene_add_entity` | 程序化图元 sphere / cube / plane / cylinder / cone / torus / capsule，返回 entity_id 与 world AABB；缺省材质为非金属灰（metallic 0 / roughness 0.6）；摆放参数见下（MP） |
 | `scene_add_entities` | 批量创建（单次 ≤128），先全量校验后落地，中途 GPU 失败整体回滚 |
 | `scene_add_model` | 从素材库放置真实 glTF 模型（名字来自 `asset_list`，可带一层分类前缀如 `survival/barrel`），返回每个 mesh 节点对应的 entity_id 与聚合 world AABB；根缩放限均匀；摆放参数见下（MP） |
@@ -76,6 +77,8 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 
 **素材库 v2**（MA）：模型名可带一层分类前缀（`<category>/<name>`，`kumo::isPlainAssetPath`），解析顺序 `models/<name>.glb` → `models/<name>/<name>.gltf` → `models/<name>/scene.gltf` → 同三种布局套一层分类目录（`asset::resolveModelPath`），首个存在的文件生效；`asset_fetch` 的 `kind:"model"` 从 Poly Haven 下载多文件 glTF 包，整理为 `models/<id>/scene.gltf` + 相对路径贴图/`.bin`；`tools/fetch_assets.sh` 的 `fetch_pack` 拉取 Kenney 等分类风格化道具包（每分类一个 `pack.json`：`category`/`style`/`source`/`license`）。`viewer --thumbnails`（离屏、无窗口）为模型/贴图套/环境各渲染一张 256px 预览图到 `assets/.thumbnails/`，并（重）写 `assets/index.json`（含分类/风格/尺寸/三角形数等摘要）；`asset_list` 始终扫目录枚举实际存在的素材（目录才是真相源，避免索引滞后于 `asset_fetch`/手动拷贝新增的素材），`index.json` 存在时仅作元数据叠加（按 id 匹配补充分类/风格/尺寸等字段，磁盘上没有的条目不出现，索引没有的条目不带额外字段）；两者均为生成产物不入库，单个模型加载失败只记日志跳过，不中断整批。曾纳入的 Kenney Nature Kit 因上游 UniGLTF 导出缺陷（`cgltf` 全量拒绝解析）已整包移除，见 `assets/README.md`。
 
+**专用检索**（MR）：`viewer --index` 是 `--thumbnails` 的超集——除模型/贴图/环境外，还把 shader recipe（标准球实渲预览图）与 `assets/specs/*.json` 场景模板（人工模板，导演流水线的基调参考）纳入 `assets/index.json`，为每张缩略图经配置的视觉模型生成一句话 caption（`--no-captions` 跳过；重跑只为变化的条目付费），并把 `caption+名字+tags+分类` 文本经 OpenAI 兼容端点 `/v1/embeddings` 批量向量化（64 条/请求，模型走 `retrieval.embedding_model`，默认 text-embedding-3-small）写进 sidecar `index_embeddings.bin`（float32 连续行，条目存行号）；index 与 sidecar 均临时文件+rename 原子落盘，文本未变的条目复用旧向量零请求。查询时 `asset_search` / `material_recipe_search` 共享一个 mtime 失效的进程内缓存：硬筛选 → FTS（id/名字 > tags > caption > 分类分层计分）与查询向量余弦各自排序 → RRF（k=60）融合 → top 3-5，检索核心为纯函数（`engine/agent/src/asset_search.{h,cpp}`）全 fixture 可测。降级链条确定性：无 embedding 端点/离线 → 纯 FTS+筛选；无 index → 报错指路 `--index`（`asset_list` / `recipe_list` 始终可用）。**反目标**（固化）：不索引 `shaders/generated/`、不做文档知识库、检索结果永不含 shader 源码、候选封顶 5。
+
 Shader 工具（M6）：
 
 | 工具 | 说明 |
@@ -84,6 +87,7 @@ Shader 工具（M6）：
 | `surface_write` | **默认轨**（MD）：只提交 `void kumoSurface(inout SurfaceOutputs s, in SurfaceInputs i)` 表面函数 + 命名参数（float/vec4 ≤16 个、块 ≤192B），引擎拼进 `pbr_surface_template.frag` 的标准光照壳；禁 uniform/main/layout/while/do/`frame.`/gl_FragCoord（越界报错指路 `shader_write_full`）；编译错误行号回映到函数内（`function_line`），拼接区外标 `template_error` |
 | `shader_set_param` | 免重编译改一个表面参数值；随 undo/存档走，Inspector 有对应滑杆/取色器 |
 | `recipe_list` | 列 recipe 库（`shaders/recipes/`）：名字/描述/参数 schema/tags/cost，**不含源码** |
+| `material_recipe_search` | 按描述检索 recipe 库（MR）：与 `asset_search` 同一混合检索核心（kind=recipe 预筛），结果含参数 schema/适用几何/成本与效果缩略图，**同样不含源码**——应用一律走 `shader_apply_recipe` |
 | `shader_apply_recipe` | 应用 recipe（首发 wood_grain / brushed_metal / rust / marble / emissive_pulse）并可覆盖参数，与 `surface_write` 同一拼接管线 |
 | `shader_write_full` | **高级轨**：整文件替换该材质的 fragment shader（ADR 0029），只影响该材质（ADR 0011）；仅限自定义光照/全风格化或用户点名；`shader_write` 为保留一版的兼容别名 |
 

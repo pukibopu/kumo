@@ -1,0 +1,18 @@
+{
+    "caption": "Cozy interior corner: warm lamp-lit nook with wooden furniture and soft fabrics, gentle window daylight mixing with tungsten glow",
+    "tags": ["interior", "cozy", "warm", "domestic", "intimate"],
+    "style": "stylized",
+    "palette": ["#b98a5a", "#e8d8b8", "#6b4a35", "#93a8b8"],
+    "camera": {
+        "fov_y_deg": 40,
+        "elevation_deg": 15,
+        "notes": "eye-level three-quarter view into the corner; walls frame both sides"
+    },
+    "lighting": {
+        "environment": "overcast preset at low intensity standing in for window light",
+        "key": "warm point light at the lamp position, intensity 30-80",
+        "fill": "cool soft daylight from the window side at low intensity",
+        "rim": "none; contact shadows and warm pools carry the mood"
+    },
+    "notes": "build the room shell first (floor, two walls), then furniture, then small props on surfaces with snap_to_ground; wood and fabric materials over bare factors"
+}

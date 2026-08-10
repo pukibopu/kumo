@@ -1,0 +1,18 @@
+{
+    "caption": "Night scene with classic three-point lighting: cool moonlight key, warm practical fill from a lamp or fire, subject clearly brighter than the dark surroundings",
+    "tags": ["night", "moody", "three-point", "contrast", "cinematic"],
+    "style": "realistic",
+    "palette": ["#1a2233", "#8fa3c7", "#ffb45e", "#0b0e14"],
+    "camera": {
+        "fov_y_deg": 45,
+        "elevation_deg": 10,
+        "notes": "subject one third from frame edge, dark negative space kept on the other side"
+    },
+    "lighting": {
+        "environment": "night preset, exposure raised until the silhouette separates from the sky",
+        "key": "cool blue directional moonlight, intensity 2-3",
+        "fill": "warm point light motivated by a visible prop (lamp, fire, window), intensity 20-60 near the subject",
+        "rim": "faint cool rim opposite the fill"
+    },
+    "notes": "the frame must stay readable: never deliver a mostly-black image; every emissive prop gets a matching point light"
+}

@@ -23,7 +23,7 @@
 | v0.11.1 | MP | 摆放约束 v1：贴地/避撞放置 + 碰撞感知 scatter + 重叠验证升级 | 完成 |
 | v0.11.2 | MB | 反馈闭环 v2：多视图审图 + 参考图上传 + per-agent 模型配置 | 完成 |
 | v0.11.3 | MD | Shader 表面函数：surface_write + 参数滑杆 + recipe 库 | 完成 |
-| v0.11.4 | MR | 专用检索：asset_search + material_recipe_search | — |
+| v0.11.4 | MR | 专用检索：asset_search + material_recipe_search | 完成 |
 | v0.11.5 | MC | 导演流水线：SceneSpec + 编排 + 视觉 Critic | — |
 | v0.11.6 | ME | 渲染扩容：曝光/白平衡 + spot light + 雾 + bloom | — |
 

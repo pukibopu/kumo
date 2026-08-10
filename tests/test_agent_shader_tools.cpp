@@ -1,5 +1,9 @@
 #include <doctest/doctest.h>
 
+// Private kumo_agent header (engine/agent/src), reached the same way
+// test_agent_asset_index.cpp does, for the material_recipe_search fixtures.
+#include "asset_index.h"
+
 #include <kumo/agent/entity_id.h>
 #include <kumo/agent/shader_tools.h>
 #include <kumo/agent/tool_registry.h>
@@ -307,6 +311,9 @@ struct SurfaceFixture : Fixture {
         context.setShader = std::ref(shader);
         context.surfaceTemplatePath = dir / "surface_template.frag";
         context.recipesDir = dir / "recipes";
+        // material_recipe_search's index root; individual tests write (or
+        // deliberately omit) dir/assets/index.json.
+        context.assetDir = dir / "assets";
         context.setSurfaceParams = [this](std::uint32_t,
                                           const std::vector<SurfaceParamSpec>& specs) {
             installed = specs;
@@ -444,4 +451,81 @@ TEST_CASE("shader_write_full and its deprecated shader_write alias share the han
         REQUIRE_MESSAGE(result["status"] == "ok", tool);
     }
     CHECK(shader.calls.size() == 2);
+}
+
+// --- material_recipe_search (MR) --------------------------------------
+
+TEST_CASE("material_recipe_search without an index points at viewer --index") {
+    SurfaceFixture f;
+    const json result = f.invoke("material_recipe_search", R"({"query":"glow"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("--index") != std::string::npos);
+}
+
+TEST_CASE("material_recipe_search returns the recipe param schema, tags and score but never "
+          "the source") {
+    SurfaceFixture f;
+    AssetIndex index;
+    AssetIndexEntry glow;
+    glow.id = "glow";
+    glow.kind = AssetIndexKind::Recipe;
+    glow.caption = "test glow";
+    glow.tags = {"emissive"};
+    index.entries.push_back(glow);
+    REQUIRE(saveAssetIndex(f.dir / "assets", index));
+
+    const json result = f.invoke("material_recipe_search", R"({"query":"glow"})");
+    REQUIRE(result["status"] == "ok");
+    CHECK(result["vector_search"] == false);
+    REQUIRE(result["results"].size() == 1);
+    const json& hit = result["results"][0];
+    CHECK(hit["name"] == "glow");
+    CHECK(hit["description"] == "test glow");
+    CHECK(hit["cost"] == "low");
+    REQUIRE(hit["params"].size() == 2);
+    CHECK(hit["params"][0]["name"] == "intensity");
+    CHECK(hit["params"][0]["max"] == 10);
+    CHECK(hit["params"][1]["type"] == "vec4");
+    CHECK(hit.contains("score"));
+    // Anti-goal: retrieval never leaks shader source; application goes
+    // through shader_apply_recipe.
+    CHECK(result.dump().find("kumoSurface") == std::string::npos);
+
+    const json miss = f.invoke("material_recipe_search", R"({"query":"marble"})");
+    REQUIRE(miss["status"] == "ok");
+    CHECK(miss["results"].empty());
+    CHECK(miss.contains("note"));
+}
+
+TEST_CASE("material_recipe_search on an index without recipe entries suggests a rebuild") {
+    SurfaceFixture f;
+    AssetIndex index;
+    AssetIndexEntry texture;
+    texture.id = "sand";
+    texture.kind = AssetIndexKind::Texture;
+    index.entries.push_back(texture);
+    REQUIRE(saveAssetIndex(f.dir / "assets", index));
+
+    const json result = f.invoke("material_recipe_search", R"({"query":"glow"})");
+    CHECK(result["status"] == "error");
+    CHECK(result["message"].get<std::string>().find("no recipe entries") != std::string::npos);
+}
+
+TEST_CASE("material_recipe_search attaches an existing preview thumbnail") {
+    SurfaceFixture f;
+    AssetIndex index;
+    AssetIndexEntry glow;
+    glow.id = "glow";
+    glow.kind = AssetIndexKind::Recipe;
+    glow.thumbnail = ".thumbnails/recipes/glow.png";
+    index.entries.push_back(glow);
+    REQUIRE(saveAssetIndex(f.dir / "assets", index));
+    std::filesystem::create_directories(f.dir / "assets" / ".thumbnails" / "recipes");
+    std::ofstream(f.dir / "assets" / ".thumbnails" / "recipes" / "glow.png") << "png";
+
+    const json result = f.invoke("material_recipe_search", R"({"query":"glow"})");
+    REQUIRE(result["status"] == "ok");
+    REQUIRE(result["image_paths"].size() == 1);
+    CHECK(result["image_detail"] == "low");
+    CHECK(result["results"][0]["thumbnail_attached"] == true);
 }

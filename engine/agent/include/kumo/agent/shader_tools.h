@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -18,6 +19,10 @@ class Scene;
 }
 
 namespace kumo::agent {
+
+namespace search {
+struct SearchCache;
+}
 
 // Renderer-decoupled hooks so CPU-only tests can inject fakes; the composition
 // root binds these to ForwardRenderer. The scene resolves entity ids to
@@ -58,12 +63,20 @@ struct ShaderToolContext {
         setSurfaceParam;
     // ForwardRenderer::materialSurfaceParams shaped; empty when none installed.
     std::function<std::vector<SurfaceParamSpec>(std::uint32_t materialIndex)> surfaceParams;
+
+    // material_recipe_search (MR): the asset library root holding index.json,
+    // plus the same embedder/cache the scene registry's asset_search uses
+    // (the composition root passes one shared SearchCache instance to both).
+    std::filesystem::path assetDir;
+    std::function<std::optional<std::vector<float>>(std::string_view)> embedQuery;
+    std::shared_ptr<search::SearchCache> searchCache;
 };
 
 // Registers shader_read, surface_write, shader_set_param, recipe_list,
-// shader_apply_recipe and shader_write_full (ADR 0011/0029; MD adds the
-// surface path, shader_write stays as a deprecated alias). The context is
-// copied into the handlers; everything it references must outlive the registry.
+// material_recipe_search, shader_apply_recipe and shader_write_full (ADR
+// 0011/0029; MD adds the surface path, MR the recipe search, shader_write
+// stays as a deprecated alias). The context is copied into the handlers;
+// everything it references must outlive the registry.
 void registerShaderTools(ToolRegistry& registry, ShaderToolContext context);
 
 } // namespace kumo::agent

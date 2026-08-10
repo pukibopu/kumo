@@ -12,6 +12,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <vector>
 
 using namespace kumo;
 using namespace kumo::agent;
@@ -223,4 +224,54 @@ TEST_CASE("saveAssetIndex creates the asset directory when it does not exist yet
     REQUIRE(!std::filesystem::exists(assetDir));
     CHECK(saveAssetIndex(assetDir, sampleIndex()));
     CHECK(std::filesystem::exists(assetDir / "index.json"));
+}
+
+TEST_CASE("recipe and spec kinds round-trip through serialize/parse (MR)") {
+    AssetIndex index;
+    AssetIndexEntry recipe;
+    recipe.id = "wood_grain";
+    recipe.kind = AssetIndexKind::Recipe;
+    recipe.caption = "Procedural wood rings";
+    recipe.tags = {"wood", "natural"};
+    recipe.thumbnail = ".thumbnails/recipes/wood_grain.png";
+    recipe.embeddingOffset = 3;
+    index.entries.push_back(recipe);
+    AssetIndexEntry spec;
+    spec.id = "product_studio";
+    spec.kind = AssetIndexKind::Spec;
+    spec.caption = "Studio shot";
+    spec.style = "realistic";
+    index.entries.push_back(spec);
+
+    const std::optional<AssetIndex> loaded = parseAssetIndex(serializeAssetIndex(index));
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->entries.size() == 2);
+    CHECK(loaded->entries[0].kind == AssetIndexKind::Recipe);
+    CHECK(loaded->entries[0].embeddingOffset == 3);
+    CHECK(loaded->entries[1].kind == AssetIndexKind::Spec);
+    CHECK(loaded->entries[1].caption == "Studio shot");
+}
+
+TEST_CASE("embedding sidecar rows round-trip and reject a torn file (MR)") {
+    TempDir dir("kumo_asset_index_sidecar");
+    const AssetIndexEmbedding embedding{.model = "test-embed", .dim = 4, .file = "rows.bin"};
+    const std::vector<float> rows{1.0f, 2.0f, 3.0f, 4.0f, -1.0f, 0.5f, 0.25f, 8.0f};
+    REQUIRE(saveEmbeddingRows(dir.path, embedding, rows));
+
+    const std::optional<std::vector<float>> loaded = loadEmbeddingRows(dir.path, embedding);
+    REQUIRE(loaded.has_value());
+    CHECK(*loaded == rows);
+
+    // Not a whole number of dim-sized rows: torn write or dim drift.
+    writeFile(dir.path / "rows.bin", "123456");
+    CHECK(!loadEmbeddingRows(dir.path, embedding).has_value());
+    CHECK(!loadEmbeddingRows(dir.path, {.model = "m", .dim = 0, .file = "rows.bin"}).has_value());
+    CHECK(!loadEmbeddingRows(dir.path, {.model = "m", .dim = 4, .file = "absent.bin"}).has_value());
+}
+
+TEST_CASE("saveEmbeddingRows rejects a row/dim mismatch (MR)") {
+    TempDir dir("kumo_asset_index_sidecar_mismatch");
+    CHECK(!saveEmbeddingRows(dir.path, {.model = "m", .dim = 4, .file = "rows.bin"},
+                             std::vector<float>{1.0f, 2.0f, 3.0f}));
+    CHECK(!std::filesystem::exists(dir.path / "rows.bin"));
 }

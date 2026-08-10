@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,11 +13,11 @@
 namespace kumo::agent {
 
 // A pre-scanned summary of the asset library (MA milestone), written by
-// `viewer --thumbnails` to <assetDir>/index.json and read by asset_list (so
-// it can answer without a directory scan) and, later, an embedding-search
-// tool (MR milestone). Generated, not hand-authored: parsing is lenient by
-// design (see parseAssetIndex).
-enum class AssetIndexKind { Texture, Model, Environment };
+// `viewer --thumbnails`/`--index` to <assetDir>/index.json and read by
+// asset_list (so it can answer without a directory scan) and the retrieval
+// tools asset_search/material_recipe_search (MR). Generated, not
+// hand-authored: parsing is lenient by design (see parseAssetIndex).
+enum class AssetIndexKind { Texture, Model, Environment, Recipe, Spec };
 
 // One row of index.json. Every kind-specific field stays at its default
 // (nullopt / empty) for kinds it does not apply to, e.g. an environment
@@ -73,7 +74,19 @@ std::optional<AssetIndex> parseAssetIndex(std::string_view json);
 // callers like asset_list.
 std::optional<AssetIndex> loadAssetIndex(const std::filesystem::path& assetDir);
 
-// Writes <assetDir>/index.json. False on a filesystem failure.
+// Writes <assetDir>/index.json atomically (temp file + rename), so a reader
+// racing the builder never sees a half-written index. False on any failure.
 bool saveAssetIndex(const std::filesystem::path& assetDir, const AssetIndex& index);
+
+// The embedding sidecar (MR): contiguous float32 rows of `embedding.dim`
+// floats each; an entry's embeddingOffset is its row number. Load returns
+// nullopt on a missing/unreadable file, a zero dim, or a byte size that is
+// not a whole number of rows -- callers then degrade to FTS-only search.
+std::optional<std::vector<float>> loadEmbeddingRows(const std::filesystem::path& assetDir,
+                                                    const AssetIndexEmbedding& embedding);
+
+// Atomic like saveAssetIndex. `rows` must be a whole number of dim-sized rows.
+bool saveEmbeddingRows(const std::filesystem::path& assetDir, const AssetIndexEmbedding& embedding,
+                       std::span<const float> rows);
 
 } // namespace kumo::agent

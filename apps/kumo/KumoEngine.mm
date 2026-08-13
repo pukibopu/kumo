@@ -246,6 +246,16 @@ KumoEntityDetail* toKumoDetail(const facade::EngineRuntime::EntityDetail& detail
 @implementation KumoConfirmPrompt
 @end
 
+@interface KumoDirectorEvent ()
+@property(nonatomic, readwrite) KumoDirectorEventKind kind;
+@property(nonatomic, readwrite) NSString* stage;
+@property(nonatomic, readwrite) NSString* text;
+@property(nonatomic, readwrite) NSArray<NSString*>* imagePaths;
+@end
+
+@implementation KumoDirectorEvent
+@end
+
 namespace {
 
 KumoTranscriptEntry* toKumoEntry(const agent::AgentSession::TranscriptEntry& entry) {
@@ -639,6 +649,79 @@ KumoConfirmPrompt* toKumoPrompt(const agent::ConfirmationGate::Prompt& prompt) {
         return;
     }
     gate->resolve(promptId, approved == YES);
+}
+
+- (BOOL)directorConfigured {
+    return _runtime->directorSession() != nullptr;
+}
+
+- (BOOL)criticConfigured {
+    return _runtime->criticSession() != nullptr;
+}
+
+- (BOOL)directorActive {
+    facade::Director* director = _runtime->director();
+    return director != nullptr && director->active();
+}
+
+- (NSString*)directorState {
+    facade::Director* director = _runtime->director();
+    return toNSString(director != nullptr ? facade::Director::stateName(director->state())
+                                          : "idle");
+}
+
+- (BOOL)directorStart:(NSString*)brief hero:(BOOL)hero {
+    facade::Director* director = _runtime->director();
+    if (director == nullptr) {
+        return NO;
+    }
+    return director->start(std::string([brief UTF8String] ?: ""),
+                           hero ? facade::Director::Tier::Hero : facade::Director::Tier::Standard)
+               ? YES
+               : NO;
+}
+
+- (void)directorCancel {
+    if (facade::Director* director = _runtime->director()) {
+        director->cancel();
+    }
+}
+
+- (NSArray<KumoDirectorEvent*>*)directorDrainEvents {
+    NSMutableArray<KumoDirectorEvent*>* out = [NSMutableArray array];
+    facade::Director* director = _runtime->director();
+    if (director == nullptr) {
+        return out;
+    }
+    for (const facade::Director::Event& event : director->drainEvents()) {
+        KumoDirectorEvent* bridged = [[KumoDirectorEvent alloc] init];
+        switch (event.kind) {
+        case facade::Director::Event::Kind::Stage:
+            bridged.kind = KumoDirectorEventKindStage;
+            break;
+        case facade::Director::Event::Kind::Note:
+            bridged.kind = KumoDirectorEventKindNote;
+            break;
+        case facade::Director::Event::Kind::Screenshots:
+            bridged.kind = KumoDirectorEventKindScreenshots;
+            break;
+        case facade::Director::Event::Kind::Verdict:
+            bridged.kind = KumoDirectorEventKindVerdict;
+            break;
+        case facade::Director::Event::Kind::Error:
+            bridged.kind = KumoDirectorEventKindError;
+            break;
+        }
+        bridged.stage = toNSString(facade::Director::stateName(event.stage));
+        bridged.text = toNSString(event.text);
+        NSMutableArray<NSString*>* paths = [NSMutableArray array];
+        for (const std::string& path : event.imagePaths) {
+            [paths addObject:toNSString(path)];
+        }
+        bridged.imagePaths = paths;
+        [out addObject:bridged];
+    }
+    return out;
 }
 
 - (NSString*)configPath {

@@ -333,3 +333,33 @@ TEST_CASE("agent config rejects malformed input with a pointed message") {
     REQUIRE(!badThreshold.has_value());
     CHECK(badThreshold.error().find("summary_threshold_tokens") != std::string::npos);
 }
+
+TEST_CASE("agents.director and agents.critic overlay the base like scene/shader (MC)") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "provider": {"type": "openai", "base_url": "http://127.0.0.1:11434",
+                     "model": "base-model", "reasoning_effort": "none"},
+        "agents": {
+            "director": {"model": "director-model", "reasoning_effort": "high"},
+            "critic": {"model": "critic-model"}
+        }
+    })");
+    const auto config = sandbox.load();
+    REQUIRE(config.has_value());
+    CHECK(config->director.model == "director-model");
+    CHECK(config->director.reasoningEffort == "high");
+    CHECK(config->director.baseUrl == "http://127.0.0.1:11434");
+    CHECK(config->critic.model == "critic-model");
+    CHECK(config->critic.reasoningEffort == "none"); // inherits the base effort
+    CHECK(config->director.available());
+    // Absent blocks still inherit the base wholesale.
+    CHECK(config->scene.model == "base-model");
+}
+
+TEST_CASE("a wrong-typed director field points at its own path (MC)") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({"agents": {"director": {"model": 42}}})");
+    const auto config = sandbox.load();
+    REQUIRE(!config.has_value());
+    CHECK(config.error().find("agents.director.model") != std::string::npos);
+}

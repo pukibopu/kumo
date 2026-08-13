@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cstdlib>
 #include <format>
 #include <fstream>
@@ -197,10 +198,16 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
     std::string baseUrl;
     std::string baseApiKey;
     std::string baseModel;
-
     std::string baseEffort;
-    std::string sceneTypeText, sceneBaseUrl, sceneApiKey, sceneModel, sceneEffort;
-    std::string shaderTypeText, shaderBaseUrl, shaderApiKey, shaderModel, shaderEffort;
+
+    struct RawEndpoint {
+        std::string type, baseUrl, apiKey, model, effort;
+    };
+    // agents.<name> overlay blocks, one per role (scene/shader from ADR 0012,
+    // director/critic from MC).
+    static constexpr std::array<const char*, 4> kAgentNames{"scene", "shader", "director",
+                                                            "critic"};
+    std::array<RawEndpoint, 4> raw;
 
     if (std::filesystem::exists(configPath)) {
         const auto text = readTextFile(configPath);
@@ -250,24 +257,17 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
             if (config.maxToolRounds < 2) {
                 return std::unexpected("agents.max_tool_rounds must be at least 2");
             }
-            if (agents.contains("scene") && agents["scene"].is_object()) {
-                const json& scene = agents["scene"];
-                if (!readField(scene, "type", sceneTypeText, error2) ||
-                    !readField(scene, "base_url", sceneBaseUrl, error2) ||
-                    !readField(scene, "api_key", sceneApiKey, error2) ||
-                    !readField(scene, "model", sceneModel, error2) ||
-                    !readField(scene, "reasoning_effort", sceneEffort, error2)) {
-                    return std::unexpected("agents.scene." + error2);
+            for (std::size_t i = 0; i < kAgentNames.size(); ++i) {
+                if (!agents.contains(kAgentNames[i]) || !agents[kAgentNames[i]].is_object()) {
+                    continue;
                 }
-            }
-            if (agents.contains("shader") && agents["shader"].is_object()) {
-                const json& shader = agents["shader"];
-                if (!readField(shader, "type", shaderTypeText, error2) ||
-                    !readField(shader, "base_url", shaderBaseUrl, error2) ||
-                    !readField(shader, "api_key", shaderApiKey, error2) ||
-                    !readField(shader, "model", shaderModel, error2) ||
-                    !readField(shader, "reasoning_effort", shaderEffort, error2)) {
-                    return std::unexpected("agents.shader." + error2);
+                const json& block = agents[kAgentNames[i]];
+                if (!readField(block, "type", raw[i].type, error2) ||
+                    !readField(block, "base_url", raw[i].baseUrl, error2) ||
+                    !readField(block, "api_key", raw[i].apiKey, error2) ||
+                    !readField(block, "model", raw[i].model, error2) ||
+                    !readField(block, "reasoning_effort", raw[i].effort, error2)) {
+                    return std::unexpected(std::format("agents.{}.{}", kAgentNames[i], error2));
                 }
             }
         }
@@ -304,23 +304,20 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
     if (!baseType.has_value()) {
         return std::unexpected(baseType.error());
     }
-    const auto sceneType = resolveType(sceneTypeText, "agents.scene.type", *baseType);
-    if (!sceneType.has_value()) {
-        return std::unexpected(sceneType.error());
-    }
-    const auto shaderType = resolveType(shaderTypeText, "agents.shader.type", *baseType);
-    if (!shaderType.has_value()) {
-        return std::unexpected(shaderType.error());
-    }
 
-    config.scene =
-        finalizeEndpoint(*sceneType, pick(sceneBaseUrl, baseUrl), pick(sceneApiKey, baseApiKey),
-                         pick(sceneModel, baseModel), env);
-    config.scene.reasoningEffort = pick(sceneEffort, baseEffort);
-    config.shader =
-        finalizeEndpoint(*shaderType, pick(shaderBaseUrl, baseUrl), pick(shaderApiKey, baseApiKey),
-                         pick(shaderModel, baseModel), env);
-    config.shader.reasoningEffort = pick(shaderEffort, baseEffort);
+    std::array<AgentEndpoint*, 4> endpoints{&config.scene, &config.shader, &config.director,
+                                            &config.critic};
+    for (std::size_t i = 0; i < kAgentNames.size(); ++i) {
+        const auto type = resolveType(
+            raw[i].type, std::format("agents.{}.type", kAgentNames[i]).c_str(), *baseType);
+        if (!type.has_value()) {
+            return std::unexpected(type.error());
+        }
+        *endpoints[i] =
+            finalizeEndpoint(*type, pick(raw[i].baseUrl, baseUrl), pick(raw[i].apiKey, baseApiKey),
+                             pick(raw[i].model, baseModel), env);
+        endpoints[i]->reasoningEffort = pick(raw[i].effort, baseEffort);
+    }
     return config;
 }
 

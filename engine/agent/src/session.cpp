@@ -85,6 +85,16 @@ std::vector<AgentSession::TranscriptEntry> AgentSession::drainTranscript() {
     return std::exchange(transcript_, {});
 }
 
+std::size_t AgentSession::completedTurns() const {
+    std::lock_guard lock(mutex_);
+    return completedTurns_;
+}
+
+std::string AgentSession::lastAssistantText() const {
+    std::lock_guard lock(mutex_);
+    return lastAssistantText_;
+}
+
 void AgentSession::workerLoop() {
     for (;;) {
         std::string userText;
@@ -101,12 +111,17 @@ void AgentSession::workerLoop() {
             imageDetail = std::move(pendingImageDetail_);
             hasPending_ = false;
         }
+        {
+            std::lock_guard lock(mutex_);
+            lastAssistantText_.clear();
+        }
         runTurn(std::move(userText), std::move(images), std::move(imageDetail));
         compressIfNeeded();
         {
             std::lock_guard lock(mutex_);
             busy_ = false;
             status_ = Status::Idle;
+            ++completedTurns_;
         }
     }
 }
@@ -320,6 +335,9 @@ std::string AgentSession::awaitJson(std::future<std::string> future) {
 
 void AgentSession::pushEntry(TranscriptEntry entry) {
     std::lock_guard lock(mutex_);
+    if (entry.kind == TranscriptEntry::Kind::Assistant) {
+        lastAssistantText_ = entry.text;
+    }
     transcript_.push_back(std::move(entry));
 }
 

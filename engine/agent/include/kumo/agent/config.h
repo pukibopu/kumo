@@ -33,6 +33,10 @@ struct AgentEndpoint {
 struct AgentConfig {
     AgentEndpoint scene;
     AgentEndpoint shader;
+    // Director pipeline roles (MC): tool-less sessions, so unlike scene/shader
+    // their reasoning effort is never coerced away on OpenAI endpoints.
+    AgentEndpoint director;
+    AgentEndpoint critic;
     std::uint32_t maxTokens = 4096;
     std::chrono::seconds requestTimeout{120};
     bool confirmDestructive = false;

@@ -85,6 +85,23 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
 @property(nonatomic, readonly) NSString *toolName, *argumentsJson;
 @end
 
+// Flattened mirror of kumo::facade::Director::Event (MC).
+typedef NS_ENUM(NSInteger, KumoDirectorEventKind) {
+    KumoDirectorEventKindStage,
+    KumoDirectorEventKindNote,
+    KumoDirectorEventKindScreenshots,
+    KumoDirectorEventKindVerdict,
+    KumoDirectorEventKindError,
+};
+
+@interface KumoDirectorEvent : NSObject
+@property(nonatomic, readonly) KumoDirectorEventKind kind;
+@property(nonatomic, readonly) NSString* stage; // Director::stateName, e.g. "building"
+@property(nonatomic, readonly) NSString* text;
+// Screenshots only: PNG files on disk, valid until the next critique round.
+@property(nonatomic, readonly) NSArray<NSString*>* imagePaths;
+@end
+
 // ObjC++ facade over kumo::facade::EngineRuntime (ADR 0044): the only seam the
 // Swift shell talks to. All methods must be called on the main thread.
 @interface KumoEngine : NSObject
@@ -200,6 +217,21 @@ typedef NS_ENUM(NSInteger, KumoTranscriptKind) {
 - (NSArray<KumoTranscriptEntry*>*)drainTranscript:(KumoAgentKind)kind;
 - (nullable KumoConfirmPrompt*)pendingConfirm;
 - (void)resolveConfirm:(uint64_t)promptId approved:(BOOL)approved;
+
+// Director pipeline (MC). Configured-ness reflects the agents.director/
+// agents.critic config roles; the pipeline itself exists whenever the scene
+// agent does and degrades per missing role. While it is active the shell
+// must keep chat input disabled (the orchestrator owns both sessions).
+- (BOOL)directorConfigured;
+- (BOOL)criticConfigured;
+- (BOOL)directorActive;
+// Director::stateName: idle/directing/building/materials/critique/
+// repair_build/repair_materials/done/failed/cancelled.
+- (NSString*)directorState;
+- (BOOL)directorStart:(NSString*)brief hero:(BOOL)hero;
+- (void)directorCancel;
+// Drain every poll tick while active, like drainTranscript.
+- (NSArray<KumoDirectorEvent*>*)directorDrainEvents;
 
 // Full path to kumo.config.json, for the settings form to read/overlay/write
 // (api_key fields excluded; those live in the Keychain only).

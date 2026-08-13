@@ -10,7 +10,9 @@ import UniformTypeIdentifiers
 struct ChatView: View {
     @ObservedObject var holder: EngineHolder
 
-    @State private var selectedAgent: KumoAgentKind = .scene
+    private enum ChatTab: Hashable { case scene, shader, director }
+
+    @State private var selectedAgent: ChatTab = .scene
     @State private var sceneEntries: [KumoTranscriptEntry] = []
     @State private var shaderEntries: [KumoTranscriptEntry] = []
     @State private var sceneInput = ""
@@ -24,8 +26,9 @@ struct ChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("助手", selection: $selectedAgent) {
-                Text("场景").tag(KumoAgentKind.scene)
-                Text("Shader").tag(KumoAgentKind.shader)
+                Text("场景").tag(ChatTab.scene)
+                Text("Shader").tag(ChatTab.shader)
+                Text("导演").tag(ChatTab.director)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -39,8 +42,8 @@ struct ChatView: View {
             case .shader:
                 AgentChatPane(holder: holder, kind: .shader, entries: shaderEntries,
                              input: $shaderInput)
-            default:
-                EmptyView()
+            case .director:
+                DirectorView(holder: holder)
             }
 
             Divider()
@@ -128,6 +131,12 @@ private struct AgentChatPane: View {
     @State private var showImporter = false
     private static let maxAttachments = 3
 
+    // The director pipeline owns both sessions while it runs (MC): manual
+    // chat input would inject into its turn protocol, so it locks here.
+    private func inputLocked(_ engine: KumoEngine) -> Bool {
+        engine.agentBusy(kind) || engine.directorActive()
+    }
+
     var body: some View {
         if let engine = holder.engine, engine.agentAvailable(kind) {
             VStack(spacing: 4) {
@@ -186,7 +195,7 @@ private struct AgentChatPane: View {
                         Image(systemName: "paperclip")
                     }
                     .help("附加参考图（png/jpeg，最多 \(Self.maxAttachments) 张）")
-                    .disabled(engine.agentBusy(kind) ||
+                    .disabled(inputLocked(engine) ||
                              attachments.count >= Self.maxAttachments)
                     Button {
                         pasteImage()
@@ -194,14 +203,14 @@ private struct AgentChatPane: View {
                         Image(systemName: "doc.on.clipboard")
                     }
                     .help("粘贴剪贴板里的图片")
-                    .disabled(engine.agentBusy(kind) ||
+                    .disabled(inputLocked(engine) ||
                              attachments.count >= Self.maxAttachments)
                     TextField("输入消息，回车发送", text: $input)
                         .textFieldStyle(.roundedBorder)
-                        .disabled(engine.agentBusy(kind))
+                        .disabled(inputLocked(engine))
                         .onSubmit { send(engine: engine) }
                     Button("发送") { send(engine: engine) }
-                        .disabled(engine.agentBusy(kind) ||
+                        .disabled(inputLocked(engine) ||
                                  input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 .padding([.horizontal, .bottom], 8)

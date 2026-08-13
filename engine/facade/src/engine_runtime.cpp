@@ -66,6 +66,19 @@ constexpr std::uint32_t kScreenshotMaxLongSide = 640;
 // explanation for why the earlier conversation is gone.
 constexpr const char* kAgentReloadNotice = "Agent 配置已重新加载，会话历史已重置。";
 
+// Director pipeline roles (MC): short by design, the orchestrator's stage
+// messages carry the schema and context.
+constexpr const char* kDirectorSystemPrompt =
+    "You are the scene director inside kumo, a physically based 3D renderer. You plan scenes "
+    "as structured JSON for builder agents to execute; you never build anything yourself. "
+    "Always reply with exactly one JSON object matching the schema in the user message — no "
+    "prose, no code fences.";
+
+constexpr const char* kCriticSystemPrompt =
+    "You are the visual critic inside kumo, a physically based 3D renderer. You judge "
+    "rendered screenshots of a scene against the brief and the director's plan, strictly but "
+    "fairly, and always reply with exactly one verdict JSON object as instructed — no prose.";
+
 // English for tool-call stability; the closing instruction keeps replies in the
 // user's language (ADR 0028). The craft sections raise the default output from
 // tech-demo to composed scene; budgets mirror the tool-layer caps.
@@ -448,6 +461,23 @@ SessionPlan planSessions(const agent::AgentConfig& config, bool confirmDestructi
         plan.shaderUnavailableReason = config.shader.unavailableReason();
     }
 
+    // Tool-less roles keep their configured effort (MC). The critic is only
+    // meaningful with a scene session to review.
+    plan.directorEnabled = config.director.available();
+    if (plan.directorEnabled) {
+        plan.directorEndpoint = config.director;
+    } else {
+        plan.directorUnavailableReason = config.director.unavailableReason();
+    }
+    plan.criticEnabled = config.critic.available() && plan.sceneEnabled;
+    if (plan.criticEnabled) {
+        plan.criticEndpoint = config.critic;
+    } else {
+        plan.criticUnavailableReason = !config.critic.available()
+                                           ? config.critic.unavailableReason()
+                                           : "critic requires the scene agent to be available";
+    }
+
     return plan;
 }
 
@@ -601,6 +631,8 @@ void EngineRuntime::applySceneState(const SceneState& state) {
 void EngineRuntime::assembleAgentSessions(bool isReload) {
     agent::AgentSession::Desc sceneDesc;
     agent::AgentSession::Desc shaderDesc;
+    agent::AgentSession::Desc directorDesc;
+    agent::AgentSession::Desc criticDesc;
     bool wantConfirm = confirmDestructiveOverride_;
     embeddingClient_.reset();
     if (offline_) {
@@ -647,6 +679,30 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
         } else {
             logInfo("shader agent disabled: {}", plan.shaderUnavailableReason);
         }
+        // Director pipeline roles (MC): tool-less sessions, no confirmation
+        // gate, no history compression (each stage message is self-contained).
+        if (plan.directorEnabled) {
+            directorProvider_ =
+                makeHttpProvider(plan.directorEndpoint, config->requestTimeout, sceneRetryNotice_);
+            directorDesc.model = plan.directorEndpoint.model;
+            directorDesc.systemPrompt = kDirectorSystemPrompt;
+            directorDesc.maxTokens = config->maxTokens;
+            directorDesc.reasoningEffort = plan.directorEndpoint.reasoningEffort;
+            logInfo("director agent ready: {}", plan.directorEndpoint.model);
+        } else {
+            logInfo("director agent disabled: {}", plan.directorUnavailableReason);
+        }
+        if (plan.criticEnabled) {
+            criticProvider_ =
+                makeHttpProvider(plan.criticEndpoint, config->requestTimeout, sceneRetryNotice_);
+            criticDesc.model = plan.criticEndpoint.model;
+            criticDesc.systemPrompt = kCriticSystemPrompt;
+            criticDesc.maxTokens = config->maxTokens;
+            criticDesc.reasoningEffort = plan.criticEndpoint.reasoningEffort;
+            logInfo("critic agent ready: {}", plan.criticEndpoint.model);
+        } else {
+            logInfo("critic agent disabled: {}", plan.criticUnavailableReason);
+        }
         // Query embeddings ride whichever endpoint is OpenAI-compatible
         // (/v1/embeddings is not an Anthropic API); none means asset_search
         // degrades to FTS + filters, deterministically.
@@ -682,6 +738,26 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
     if (shaderProvider_ != nullptr) {
         shaderSession_.emplace(*shaderProvider_, shaderToolRegistry_, mainQueue_,
                                confirmGate_.has_value() ? &*confirmGate_ : nullptr, shaderDesc);
+    }
+    if (directorProvider_ != nullptr) {
+        directorSession_.emplace(*directorProvider_, directorToolRegistry_, mainQueue_, nullptr,
+                                 directorDesc);
+    }
+    if (criticProvider_ != nullptr) {
+        criticSession_.emplace(*criticProvider_, directorToolRegistry_, mainQueue_, nullptr,
+                               criticDesc);
+    }
+    if (sceneSession_.has_value()) {
+        Director::Hooks hooks;
+        hooks.scene = &*sceneSession_;
+        hooks.shader = shaderSession_.has_value() ? &*shaderSession_ : nullptr;
+        hooks.director = directorSession_.has_value() ? &*directorSession_ : nullptr;
+        hooks.critic = criticSession_.has_value() ? &*criticSession_ : nullptr;
+        hooks.screenshot = screenshotTool_;
+        hooks.assetList = [this] { return sceneToolRegistry_.invoke("asset_list", "{}"); };
+        hooks.specTemplates = specTemplateLookup_;
+        hooks.storeSpec = [this](const std::string& raw) { directorSpecRaw_ = raw; };
+        director_.emplace(std::move(hooks));
     }
 }
 
@@ -975,6 +1051,47 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
         return result.dump();
     };
     self->sceneToolRegistry_.add(screenshotToolDef, viewerScreenshot);
+    // The Director's critic stage reuses the exact screenshot tool entry
+    // point (MC): same views/long_side/detail args, same temp-file pruning.
+    self->screenshotTool_ = viewerScreenshot;
+    // Spec-template retrieval for the director's context (MR spec entries):
+    // FTS over the brief plus the query embedding when available, then the
+    // top matches' full template files.
+    self->specTemplateLookup_ = [runtime = self.get(), searchCache](
+                                    std::string_view brief, int k) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        if (runtime->assetDir_.empty()) {
+            return out;
+        }
+        std::lock_guard<std::mutex> lock(searchCache->mutex);
+        agent::search::refreshSearchCacheLocked(*searchCache, runtime->assetDir_);
+        if (!searchCache->index.has_value()) {
+            return out;
+        }
+        const agent::AssetIndex& index = *searchCache->index;
+        agent::search::Filters filters;
+        filters.kinds = {agent::AssetIndexKind::Spec};
+        const std::vector<std::string> tokens = agent::search::tokenizeQuery(brief);
+        std::vector<float> queryVec;
+        if (runtime->embeddingClient_ != nullptr && index.embedding.has_value() &&
+            index.embedding->dim > 0 && !searchCache->rows.empty()) {
+            const std::vector<std::string> texts{std::string(brief)};
+            if (auto rows = runtime->embeddingClient_->embed(texts);
+                rows.has_value() && !rows->empty() && (*rows)[0].size() == index.embedding->dim) {
+                queryVec = std::move((*rows)[0]);
+            }
+        }
+        const std::vector<agent::search::Match> matches =
+            agent::search::searchIndex(index, searchCache->rows, filters, tokens, queryVec,
+                                       std::clamp(k, 1, agent::search::kMaxResults));
+        for (const agent::search::Match& match : matches) {
+            if (const auto text = readTextFile(runtime->assetDir_ / "specs" /
+                                               (index.entries[match.entryIndex].id + ".json"))) {
+                out.push_back(*text);
+            }
+        }
+        return out;
+    };
 
     agent::ShaderToolContext shaderTools;
     shaderTools.scene = &self->world_;
@@ -1139,15 +1256,25 @@ std::unique_ptr<EngineRuntime> EngineRuntime::create(gpu::Device& device, const 
 }
 
 bool EngineRuntime::reloadAgentSessions() {
+    if (director_.has_value() && director_->active()) {
+        logInfo("agent reload: the director pipeline is running; cancel it or wait first");
+        return false;
+    }
     if ((sceneSession_.has_value() && sceneSession_->busy()) ||
         (shaderSession_.has_value() && shaderSession_->busy())) {
         logInfo("agent reload: a session is still running a turn; try again once it finishes");
         return false;
     }
-    // Tear down before rebuilding: assembleAgentSessions() assumes these five
-    // start empty, same as create() finds them. AgentSession's destructor
-    // aborts/joins safely (verified idle above, so this is instant), and no
-    // tool call can be mid-confirmation while both sessions are idle.
+    // Tear down before rebuilding: assembleAgentSessions() assumes these
+    // start empty, same as create() finds them. The director (raw session
+    // pointers) must go before the sessions it points at. AgentSession's
+    // destructor aborts/joins safely (verified idle above, so this is
+    // instant), and no tool call can be mid-confirmation while idle.
+    director_.reset();
+    directorSession_.reset();
+    criticSession_.reset();
+    directorProvider_.reset();
+    criticProvider_.reset();
     sceneSession_.reset();
     shaderSession_.reset();
     sceneProvider_.reset();
@@ -1190,6 +1317,10 @@ bool EngineRuntime::pump() {
     // frame to pick it up.
     if (mainQueue_.drain() > 0) {
         markDirty();
+    }
+    // Director pipeline (MC): submits/polls session turns; never blocks.
+    if (director_.has_value()) {
+        director_->tick();
     }
     // Animated materials (frame.timeParams) need a fresh render every pump even
     // with no other state change, or an on-demand viewport would freeze on the
@@ -1273,6 +1404,18 @@ agent::AgentSession* EngineRuntime::shaderSession() {
 
 agent::ConfirmationGate* EngineRuntime::confirmGate() {
     return confirmGate_.has_value() ? &*confirmGate_ : nullptr;
+}
+
+Director* EngineRuntime::director() {
+    return director_.has_value() ? &*director_ : nullptr;
+}
+
+agent::AgentSession* EngineRuntime::directorSession() {
+    return directorSession_.has_value() ? &*directorSession_ : nullptr;
+}
+
+agent::AgentSession* EngineRuntime::criticSession() {
+    return criticSession_.has_value() ? &*criticSession_ : nullptr;
 }
 
 bool EngineRuntime::reloadPipelines() {
@@ -1377,8 +1520,9 @@ bool EngineRuntime::saveScene(const std::filesystem::path& path) const {
     const std::optional<scene::SavedEnvironment> savedEnvironment =
         environmentSky_.has_value() ? std::make_optional(toSavedEnvironment(*environmentSky_))
                                     : std::nullopt;
-    const std::string json = scene::saveSceneJson(world_, modelPath_.string(), lookup,
-                                                  savedEnvironment, shaderLookup, surfaceLookup);
+    const std::string json =
+        scene::saveSceneJson(world_, modelPath_.string(), lookup, savedEnvironment, shaderLookup,
+                             surfaceLookup, directorSpecRaw_);
     std::ofstream out(path, std::ios::binary);
     out << json;
     if (!out) {
@@ -1413,6 +1557,7 @@ bool EngineRuntime::loadScene(const std::filesystem::path& path) {
         logInfo("scene load: saved model '{}' differs from the current '{}'; proceeding anyway",
                 saved.modelPath, modelPath_.string());
     }
+    directorSpecRaw_ = saved.directorSpec;
 
     world_.entities.clear();
     world_.clearLights();

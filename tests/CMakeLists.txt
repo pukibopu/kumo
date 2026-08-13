@@ -32,6 +32,7 @@ add_executable(kumo_tests
     test_facade_runtime.cpp
     test_facade_undo.cpp
     test_facade_frame_dirty.cpp
+    test_facade_director.cpp
     test_facade_orbit.cpp
 )
 target_link_libraries(kumo_tests PRIVATE doctest::doctest kumo_core kumo_math kumo_shaderc

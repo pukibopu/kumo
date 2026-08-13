@@ -80,6 +80,14 @@ public:
     Status status() const;
     std::vector<TranscriptEntry> drainTranscript();
 
+    // Non-destructive observers for an orchestrator (MC): the shell keeps
+    // draining the transcript, the orchestrator only counts and peeks.
+    // completedTurns() counts finished submit() turns (failed ones included);
+    // lastAssistantText() is the final assistant text of the most recent
+    // turn, empty when it produced none (e.g. a provider error).
+    std::size_t completedTurns() const;
+    std::string lastAssistantText() const;
+
 private:
     void workerLoop();
     void runTurn(std::string userText, std::vector<UserImage> images, std::string imageDetail);
@@ -108,6 +116,8 @@ private:
     bool stopping_ = false;
     Status status_ = Status::Idle;
     std::vector<TranscriptEntry> transcript_;
+    std::size_t completedTurns_ = 0;
+    std::string lastAssistantText_;
     std::atomic<bool> abort_{false};
 
     // Last member: started after every other member is initialized.

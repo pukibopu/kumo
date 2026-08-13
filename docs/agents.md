@@ -98,6 +98,15 @@ Shader 工具（M6）：
 - 成功的生成结果落盘 `shaders/generated/material_<N>.frag`（gitignored），人工审阅后可移入 `shaders/examples/`；
 - 编译在主线程串行执行（`compileGlsl` 非线程安全，工具本就经主线程队列执行，天然满足）。
 
+## 导演流水线（MC）
+
+App 聊天面板第三段「导演」：一句话 brief + 档位（标准/精修）→ 编排器驱动多 agent 流水线自动出片。角色配置在 `agents.director` / `agents.critic`（缺省逐字段继承 `provider`；两者均为**无工具会话**，不受 OpenAI tools+reasoning 互斥限制，可开高推理）。状态机：`Directing → Building → Materials → Critique →（RepairBuild → RepairMaterials → Critique）× N → Done/Failed/Cancelled`，修复轮预算标准 1 / 精修 3。
+
+- **导演**产出 SceneSpec（style_tier/palette/camera/assets/elements[build+material_intent]/lighting/banned/budgets 的单 JSON 对象，`engine/facade/scene_spec.{h,cpp}` 宽容解析：剥栅栏找配平大括号，解析失败一次纠偏重提）；上下文注入 asset_list 快照与检索到的 top-2 spec 模板（`assets/specs/`，仅作基调参考）；接受的 spec 原文随场景存档（`director_spec`）
+- **搭建/材质**阶段把 spec 按阶段切片作为前缀 user 消息交给场景/shader 会话（session prompt 不动，转录自带可观察性）；**评审**由编排器按轮次表确定性截图（r1: main/640/low；r2+: main+clay+normal/1024/high）经参考图通道喂给 critic，verdict JSON（pass/revise + issues[target/severity]）路由修复：lighting/camera/layout 归 RepairBuild、材质归 RepairMaterials
+- **回合协议**：每阶段提交前记 `expected = completedTurns()+1`（`AgentSession` 的非破坏访问器，MC-1），发现多余回合即外部注入 → 重提阶段指令；流水线运行期间双页签聊天输入禁用、`reloadAgentSessions` 拒绝
+- **降级矩阵**：无 director → brief 直建；无 shader → 跳过材质阶段；无 critic → 搭完即 Done；critic verdict 两次不可解析 → 按现状交付；软取消在当前阶段完成后生效
+
 ## 会话管理
 
 历史超过 `agents.summary_threshold_tokens`（默认 8000，粗略 bytes/4 估算）后自动压缩：较早消息由模型压缩为一条状态摘要（保留 entity_id、名称、位置等关键事实），最近若干条保留原文；压缩切点绝不落在 tool_use 与其 tool_result 之间；压缩失败降级为不压缩。压缩动作在聊天面板以提示行可见。

@@ -8,6 +8,7 @@
 #include <kumo/asset/asset.h>
 #include <kumo/asset/procedural_sky.h>
 #include <kumo/core/main_thread_queue.h>
+#include <kumo/facade/director.h>
 #include <kumo/facade/frame_dirty.h>
 #include <kumo/facade/orbit_camera.h>
 #include <kumo/facade/undo_stack.h>
@@ -237,6 +238,15 @@ public:
     agent::AgentSession* sceneSession();
     agent::AgentSession* shaderSession();
     agent::ConfirmationGate* confirmGate();
+    // Director pipeline (MC): non-null whenever a scene session exists (the
+    // director/critic roles degrade individually inside). Ticked by pump();
+    // the shell drives start/cancel/state/drainEvents on it directly and must
+    // disable chat input while it is active.
+    Director* director();
+    // The scene/shader assistants' UI transcripts for the director/critic
+    // sessions are never shown; their activity surfaces via Director events.
+    agent::AgentSession* directorSession();
+    agent::AgentSession* criticSession();
     bool reloadPipelines();
 
     // Hot-applies whatever the config file/env say now: re-resolves the agent
@@ -372,6 +382,22 @@ private:
     std::unique_ptr<agent::ILLMProvider> shaderProvider_;
     std::optional<agent::AgentSession> sceneSession_;
     std::optional<agent::AgentSession> shaderSession_;
+
+    // Director pipeline (MC). Declared after the scene/shader sessions so the
+    // orchestrator (raw session pointers) tears down first; the empty registry
+    // makes the director/critic sessions tool-less by construction.
+    agent::ToolRegistry directorToolRegistry_;
+    std::unique_ptr<agent::ILLMProvider> directorProvider_;
+    std::unique_ptr<agent::ILLMProvider> criticProvider_;
+    std::optional<agent::AgentSession> directorSession_;
+    std::optional<agent::AgentSession> criticSession_;
+    std::optional<Director> director_;
+    // The accepted plan's verbatim JSON; persisted as SavedScene::directorSpec.
+    std::optional<std::string> directorSpecRaw_;
+    // create()-time lambdas the (re)assembled Director hooks reuse: the
+    // screenshot tool entry point and the MR spec-template retrieval.
+    std::function<std::string(std::string_view)> screenshotTool_;
+    std::function<std::vector<std::string>(std::string_view, int)> specTemplateLookup_;
 
     // Poly Haven client backing asset_fetch (M6.99); owns the real transport,
     // constructed once in create(). Forward-declared type (see the

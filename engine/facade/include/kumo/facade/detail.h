@@ -24,6 +24,18 @@ struct SessionPlan {
     agent::AgentEndpoint shaderEndpoint;
     std::string shaderUnavailableReason;
 
+    // Director pipeline roles (MC): tool-less, so their reasoning effort is
+    // NOT coerced on OpenAI endpoints the way the tool-carrying sessions'
+    // is. The critic additionally requires the scene session (it reviews the
+    // scene session's work); the director alone degrades to a direct build.
+    bool directorEnabled = false;
+    agent::AgentEndpoint directorEndpoint;
+    std::string directorUnavailableReason;
+
+    bool criticEnabled = false;
+    agent::AgentEndpoint criticEndpoint;
+    std::string criticUnavailableReason;
+
     bool confirmDestructive = false;
 };
 

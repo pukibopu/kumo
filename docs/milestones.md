@@ -24,8 +24,9 @@
 | v0.11.2 | MB | 反馈闭环 v2：多视图审图 + 参考图上传 + per-agent 模型配置 | 完成 |
 | v0.11.3 | MD | Shader 表面函数：surface_write + 参数滑杆 + recipe 库 | 完成 |
 | v0.11.4 | MR | 专用检索：asset_search + material_recipe_search | 完成 |
-| v0.11.5 | MC | 导演流水线：SceneSpec + 编排 + 视觉 Critic | — |
-| v0.11.6 | ME | 渲染扩容：曝光/白平衡 + spot light + 雾 + bloom | — |
+| v0.11.5 | MC | 导演流水线：SceneSpec + 编排 + 视觉 Critic | 完成 |
+| v0.11.6 | MS | 素材扩容与组装质量：风格化包 + model-first + 本地混搭 | — |
+| v0.11.7 | ME | 渲染扩容：曝光/白平衡 + spot light + 雾 + bloom | — |
 
 ¹ Vulkan 后端随 M4 移除，项目聚焦 Metal；完整双后端实现保留在 v0.4.0。
 

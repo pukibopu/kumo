@@ -1,4 +1,5 @@
-add_library(kumo_facade STATIC src/engine_runtime.cpp src/undo_stack.cpp src/orbit_camera.cpp)
+add_library(kumo_facade STATIC src/engine_runtime.cpp src/undo_stack.cpp src/orbit_camera.cpp
+                               src/scene_spec.cpp src/director.cpp)
 target_include_directories(kumo_facade PUBLIC include)
 # engine_runtime.cpp is the composition root (ADR 0037) and constructs the
 # concrete PolyHavenClient wired into asset_fetch's SceneToolContext callback;

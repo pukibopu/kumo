@@ -307,7 +307,8 @@ std::expected<SavedEntity, std::string> readEntity(const json& obj) {
 std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
                           const MaterialLookup& materials,
                           const std::optional<SavedEnvironment>& environment,
-                          const ShaderLookup& shaders, const SurfaceLookup& surfaces) {
+                          const ShaderLookup& shaders, const SurfaceLookup& surfaces,
+                          const std::optional<std::string>& directorSpec) {
     json entities = json::array();
     scene.entities.forEach([&](EntityId, const Entity& entity) {
         json e{{"name", entity.name},
@@ -379,6 +380,9 @@ std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
     if (environment.has_value()) {
         out["environment"] = environmentJson(*environment);
     }
+    if (directorSpec.has_value() && !directorSpec->empty()) {
+        out["director_spec"] = *directorSpec;
+    }
     // Invalid UTF-8 (e.g. legacy-encoded glTF node names carried in entity
     // names) must degrade to U+FFFD, never to a dump() throw.
     return out.dump(2, ' ', false, json::error_handler_t::replace);
@@ -446,6 +450,9 @@ std::expected<SavedScene, std::string> parseSceneJson(std::string_view text) {
             return std::unexpected(error);
         }
         scene.environment = env;
+    }
+    if (const auto it = parsed.find("director_spec"); it != parsed.end() && it->is_string()) {
+        scene.directorSpec = it->get<std::string>();
     }
     return scene;
 }

@@ -520,3 +520,19 @@ TEST_CASE("parseSceneJson rejects malformed surface params and defaults to none 
 "surface_params":[{"name":"x","type":"vec4","value":[1,2]}]}]})");
     CHECK(!badArity.has_value());
 }
+
+TEST_CASE("director_spec round-trips verbatim and stays absent when unset (MC)") {
+    scene::Scene world;
+    const std::string spec = R"({"style_tier":"realistic","elements":[{"name":"a"}]})";
+    const std::string with =
+        scene::saveSceneJson(world, "model.glb", {}, std::nullopt, {}, {}, spec);
+    const auto loaded = scene::parseSceneJson(with);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->directorSpec.has_value());
+    CHECK(*loaded->directorSpec == spec);
+
+    const std::string without = scene::saveSceneJson(world, "model.glb", {});
+    const auto plain = scene::parseSceneJson(without);
+    REQUIRE(plain.has_value());
+    CHECK(!plain->directorSpec.has_value());
+}

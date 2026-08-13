@@ -68,6 +68,9 @@ struct SavedScene {
     std::vector<Light> lights;
     Camera camera;
     std::optional<SavedEnvironment> environment;
+    // Verbatim director plan JSON (MC); opaque to this layer, absent for
+    // scenes never built through the director pipeline.
+    std::optional<std::string> directorSpec;
 };
 
 using MaterialLookup = std::function<std::optional<SavedMaterial>(std::int32_t materialIndex)>;
@@ -84,7 +87,8 @@ using SurfaceLookup = std::function<std::vector<SavedSurfaceParam>(std::int32_t 
 std::string saveSceneJson(const Scene& scene, std::string_view modelPath,
                           const MaterialLookup& materials,
                           const std::optional<SavedEnvironment>& environment = std::nullopt,
-                          const ShaderLookup& shaders = {}, const SurfaceLookup& surfaces = {});
+                          const ShaderLookup& shaders = {}, const SurfaceLookup& surfaces = {},
+                          const std::optional<std::string>& directorSpec = std::nullopt);
 std::expected<SavedScene, std::string> parseSceneJson(std::string_view json);
 
 } // namespace kumo::scene

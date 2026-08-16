@@ -143,6 +143,39 @@ fetch_model() {
 # dependency and break image loading. Also writes a pack.json manifest
 # asset_index/`viewer --thumbnails` read for category/style/source/license.
 # Idempotent: a category directory that already has a pack.json is skipped.
+# Shared tail of fetch_pack/unpack_local_pack: flatten every directory that
+# holds .glb files (keeping siblings like a shared Textures/ folder) into the
+# category directory and write its pack.json manifest.
+flatten_pack_zip() {
+    local category="$1" zip="$2" style="$3" source="$4" license="$5"
+    local dest="$MODELS_DIR/$category"
+    local tmp
+    tmp="$(mktemp -d)"
+    if ! unzip -q -o "$zip" -d "$tmp/extracted"; then
+        fail "models/$category: unzip failed"
+        rm -rf "$tmp"
+        return 1
+    fi
+    mkdir -p "$dest"
+    while IFS= read -r glbDir; do
+        [ -n "$glbDir" ] || continue
+        cp -R "$glbDir"/. "$dest"/
+    done < <(find "$tmp/extracted" -iname "*.glb" -exec dirname {} \; | sort -u)
+    rm -rf "$tmp"
+
+    local count
+    count="$(find "$dest" -iname "*.glb" | wc -l | tr -d ' ')"
+    if [ "$count" -eq 0 ]; then
+        fail "models/$category: no .glb files found in the pack"
+        rm -rf "$dest"
+        return 1
+    fi
+    printf '{"category":"%s","style":"%s","source":"%s","license":"%s"}\n' \
+        "$category" "$style" "$source" "$license" > "$dest/pack.json"
+    log "models/$category: $count models from $source"
+    FETCHED=$((FETCHED + count))
+}
+
 fetch_pack() {
     local category="$1" url="$2" style="$3" source="$4" license="$5"
     local dest="$MODELS_DIR/$category"
@@ -159,30 +192,18 @@ fetch_pack() {
         rm -rf "$tmp"
         return
     fi
-    if ! unzip -q -o "$tmp/pack.zip" -d "$tmp/extracted"; then
-        fail "models/$category: unzip failed"
-        rm -rf "$tmp"
-        return
-    fi
-
-    mkdir -p "$dest"
-    while IFS= read -r glbDir; do
-        [ -n "$glbDir" ] || continue
-        cp -R "$glbDir"/. "$dest"/
-    done < <(find "$tmp/extracted" -iname "*.glb" -exec dirname {} \; | sort -u)
+    flatten_pack_zip "$category" "$tmp/pack.zip" "$style" "$source" "$license" || true
     rm -rf "$tmp"
+}
 
-    local count
-    count="$(find "$dest" -iname "*.glb" | wc -l | tr -d ' ')"
-    if [ "$count" -eq 0 ]; then
-        fail "models/$category: no .glb files found in $url"
-        rm -rf "$dest"
+unpack_local_pack() {
+    local category="$1" zip="$2" style="$3" source="$4" license="$5"
+    if [ -f "$MODELS_DIR/$category/pack.json" ]; then
+        log "models/$category already present, skipping"
+        SKIPPED=$((SKIPPED + 1))
         return
     fi
-    printf '{"category":"%s","style":"%s","source":"%s","license":"%s"}\n' \
-        "$category" "$style" "$source" "$license" > "$dest/pack.json"
-    log "models/$category: $count models fetched from $source"
-    FETCHED=$((FETCHED + count))
+    flatten_pack_zip "$category" "$zip" "$style" "$source" "$license" || true
 }
 
 fetch_env() {
@@ -232,14 +253,53 @@ fetch_env night  dikhololo_night
 fetch_env city_night  potsdamer_platz
 fetch_env city_night2 shanghai_bund
 
-# Model packs (MA milestone): Kenney CC0 kits, single-file .glb per model
-# (URLs verified with `curl -sI`; see the header comment above for why
-# Quaternius is manual-only). Nature Kit was evaluated and REMOVED: its glbs
-# come from a broken UniGLTF export (the real scene root is missing from
-# scenes[0].nodes, cgltf rejects every file as invalid_gltf), so shipping it
-# only floods asset_list with unusable entries. Revisit if Kenney re-exports.
+# Model packs (MA milestone; MS expands to 8 more kits): Kenney CC0 kits,
+# single-file .glb per model (URLs verified with `curl -sI`; see the header
+# comment above for why Quaternius is manual-only). Every pack below passed
+# the MS intake gate: a full `viewer --index` run with zero load or render
+# failures. Nature Kit was evaluated and REMOVED: its glbs come from a broken
+# UniGLTF export (the real scene root is missing from scenes[0].nodes, cgltf
+# rejects every file as invalid_gltf), so shipping it only floods asset_list
+# with unusable entries. Revisit if Kenney re-exports.
 fetch_pack survival "https://kenney.nl/media/pages/assets/survival-kit/4065a8185b-1712149243/kenney_survival-kit.zip" \
     stylized "Kenney (Survival Kit)" CC0
+fetch_pack furniture "https://kenney.nl/media/pages/assets/furniture-kit/440e0608a4-1677580847/kenney_furniture-kit.zip" \
+    stylized "Kenney (Furniture Kit)" CC0
+fetch_pack food "https://kenney.nl/media/pages/assets/food-kit/83086fa91c-1719418518/kenney_food-kit.zip" \
+    stylized "Kenney (Food Kit)" CC0
+fetch_pack suburban "https://kenney.nl/media/pages/assets/city-kit-suburban/2c871b7af2-1745479373/kenney_city-kit-suburban_20.zip" \
+    stylized "Kenney (City Kit Suburban)" CC0
+fetch_pack commercial "https://kenney.nl/media/pages/assets/city-kit-commercial/a742d900eb-1753115042/kenney_city-kit-commercial_2.1.zip" \
+    stylized "Kenney (City Kit Commercial)" CC0
+fetch_pack castle "https://kenney.nl/media/pages/assets/castle-kit/a395102d20-1711543616/kenney_castle-kit.zip" \
+    stylized "Kenney (Castle Kit)" CC0
+fetch_pack graveyard "https://kenney.nl/media/pages/assets/graveyard-kit/ba8d4b4517-1760691807/kenney_graveyard-kit_5.0.zip" \
+    stylized "Kenney (Graveyard Kit)" CC0
+fetch_pack holiday "https://kenney.nl/media/pages/assets/holiday-kit/3976a6496a-1733923970/kenney_holiday-kit.zip" \
+    stylized "Kenney (Holiday Kit)" CC0
+fetch_pack pirate "https://kenney.nl/media/pages/assets/pirate-kit/e6d4bb1525-1771333093/kenney_pirate-kit.zip" \
+    stylized "Kenney (Pirate Kit)" CC0
+
+# Manual pack channel (MS): zips that cannot be fetched with a stable URL
+# (Quaternius/KayKit distribute via Drive/itch). Drop them into assets/packs/
+# as <category>__<Source Name>.zip (double underscore separates the category
+# from the human-readable source) and they are unpacked through the same
+# layout and manifest path as fetch_pack. Idempotent like fetch_pack: a
+# category that already has a pack.json is skipped.
+PACKS_DIR="$ASSET_DIR/packs"
+if [ -d "$PACKS_DIR" ]; then
+    for zip in "$PACKS_DIR"/*.zip; do
+        [ -e "$zip" ] || continue
+        base="$(basename "$zip" .zip)"
+        category="${base%%__*}"
+        source_name="${base#*__}"
+        if [ "$category" = "$base" ]; then
+            fail "packs/$base.zip: name must be <category>__<Source Name>.zip"
+            continue
+        fi
+        unpack_local_pack "$category" "$zip" stylized "$source_name" CC0
+    done
+fi
 
 log "done: $FETCHED fetched, $SKIPPED skipped, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

@@ -278,7 +278,10 @@ std::expected<AgentConfig, std::string> loadAgentConfig(const std::filesystem::p
             }
             std::string error3;
             std::string embeddingModel;
-            if (!readField(retrieval, "embedding_model", embeddingModel, error3)) {
+            if (!readField(retrieval, "embedding_model", embeddingModel, error3) ||
+                !readField(retrieval, "base_url", config.retrievalBaseUrl, error3) ||
+                !readField(retrieval, "api_key", config.retrievalApiKey, error3) ||
+                !readField(retrieval, "caption_model", config.captionModel, error3)) {
                 return std::unexpected("retrieval." + error3);
             }
             if (!embeddingModel.empty()) {

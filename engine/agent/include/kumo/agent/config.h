@@ -46,9 +46,17 @@ struct AgentConfig {
     // per-agent override), applied to both the scene and shader sessions.
     int maxToolRounds = 24;
     // retrieval.embedding_model (MR): the /v1/embeddings model used by the
-    // index builder and query-time asset_search; the endpoint itself comes
-    // from whichever configured agent endpoint is openai-typed.
+    // index builder and query-time asset_search. The endpoint comes from
+    // retrieval.base_url when set (MS: a local Ollama can serve retrieval
+    // while the agents stay on a cloud provider; api_key may stay empty for
+    // local servers), else from whichever agent endpoint is openai-typed.
     std::string embeddingModel = "text-embedding-3-small";
+    std::string retrievalBaseUrl;
+    std::string retrievalApiKey;
+    // retrieval.caption_model (MS): when set, `viewer --index` captions
+    // thumbnails via chat completions on the retrieval endpoint with this
+    // model instead of the scene/shader agent endpoint.
+    std::string captionModel;
 };
 
 // Loads kumo.config.json then applies overrides: real environment beats .env

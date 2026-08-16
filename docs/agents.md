@@ -77,6 +77,16 @@ LLM 往返在 session 专属 worker 线程执行；工具回调经 `MainThreadQu
 
 **素材库 v2**（MA）：模型名可带一层分类前缀（`<category>/<name>`，`kumo::isPlainAssetPath`），解析顺序 `models/<name>.glb` → `models/<name>/<name>.gltf` → `models/<name>/scene.gltf` → 同三种布局套一层分类目录（`asset::resolveModelPath`），首个存在的文件生效；`asset_fetch` 的 `kind:"model"` 从 Poly Haven 下载多文件 glTF 包，整理为 `models/<id>/scene.gltf` + 相对路径贴图/`.bin`；`tools/fetch_assets.sh` 的 `fetch_pack` 拉取 Kenney 等分类风格化道具包（每分类一个 `pack.json`：`category`/`style`/`source`/`license`）。`viewer --thumbnails`（离屏、无窗口）为模型/贴图套/环境各渲染一张 256px 预览图到 `assets/.thumbnails/`，并（重）写 `assets/index.json`（含分类/风格/尺寸/三角形数等摘要）；`asset_list` 始终扫目录枚举实际存在的素材（目录才是真相源，避免索引滞后于 `asset_fetch`/手动拷贝新增的素材），`index.json` 存在时仅作元数据叠加（按 id 匹配补充分类/风格/尺寸等字段，磁盘上没有的条目不出现，索引没有的条目不带额外字段）；两者均为生成产物不入库，单个模型加载失败只记日志跳过，不中断整批。曾纳入的 Kenney Nature Kit 因上游 UniGLTF 导出缺陷（`cgltf` 全量拒绝解析）已整包移除，见 `assets/README.md`。
 
+**Model-first 政策**（MS）：可见道具必须用真实库模型（`asset_search` → `scene_add_model`，其次 `asset_fetch`），图元只允许做建筑基元（地面/墙体/平台/水面），库中确无匹配才允许图元组合并须在回复中说明；`scene_validate` 新增 `primitive_heavy` 检查（非 plane 图元实体 >5 个且占形体实体过半 → warning 指路 asset_search）；导演 spec 的 elements 要求引用库资产名，critic 把「图元拼凑感」计为 build issue。支撑该政策的库容量：9 个 Kenney 分类包约 845 个模型（见 assets/README.md，含手动包通道接 Quaternius/KayKit）。
+
+**零成本本地配置**（MS）：检索链路可整体指向本地 OpenAI 兼容端点（Ollama/LM Studio），与云端 agent 自由混搭——`retrieval.base_url`（本地免 key）+ `retrieval.embedding_model`（如 nomic-embed-text，换模型后 `--index` 全量重嵌，本地免费）+ 可选 `retrieval.caption_model`（本地视觉模型出缩略图 caption，未设则沿用 agent 端点）。agent 角色同理按块混搭（如 `agents.director/critic` 指本地小模型、场景/shader 留云端）。实测参考（Apple M2 + Ollama）：870 条目 nomic-embed-text 全量重嵌约 30 秒；英文语义查询命中与云端 embedding 相当，中文查询是本地小 embedding 模型弱项——prompt 本就引导 agent 用英文检索词。示例：
+
+```json
+"retrieval": {"embedding_model": "nomic-embed-text", "base_url": "http://127.0.0.1:11434"},
+"agents": {"director": {"type": "openai", "base_url": "http://127.0.0.1:11434", "model": "qwen2.5:14b"},
+           "critic":   {"type": "openai", "base_url": "http://127.0.0.1:11434", "model": "qwen2.5:14b"}}
+```
+
 **专用检索**（MR）：`viewer --index` 是 `--thumbnails` 的超集——除模型/贴图/环境外，还把 shader recipe（标准球实渲预览图）与 `assets/specs/*.json` 场景模板（人工模板，导演流水线的基调参考）纳入 `assets/index.json`，为每张缩略图经配置的视觉模型生成一句话 caption（`--no-captions` 跳过；重跑只为变化的条目付费），并把 `caption+名字+tags+分类` 文本经 OpenAI 兼容端点 `/v1/embeddings` 批量向量化（64 条/请求，模型走 `retrieval.embedding_model`，默认 text-embedding-3-small）写进 sidecar `index_embeddings.bin`（float32 连续行，条目存行号）；index 与 sidecar 均临时文件+rename 原子落盘，文本未变的条目复用旧向量零请求。查询时 `asset_search` / `material_recipe_search` 共享一个 mtime 失效的进程内缓存：硬筛选 → FTS（id/名字 > tags > caption > 分类分层计分）与查询向量余弦各自排序 → RRF（k=60）融合 → top 3-5，检索核心为纯函数（`engine/agent/src/asset_search.{h,cpp}`）全 fixture 可测。降级链条确定性：无 embedding 端点/离线 → 纯 FTS+筛选；无 index → 报错指路 `--index`（`asset_list` / `recipe_list` 始终可用）。**反目标**（固化）：不索引 `shaders/generated/`、不做文档知识库、检索结果永不含 shader 源码、候选封顶 5。
 
 Shader 工具（M6）：

@@ -363,3 +363,25 @@ TEST_CASE("a wrong-typed director field points at its own path (MC)") {
     REQUIRE(!config.has_value());
     CHECK(config.error().find("agents.director.model") != std::string::npos);
 }
+
+TEST_CASE("retrieval endpoint overrides parse and default empty (MS)") {
+    ConfigSandbox sandbox;
+    sandbox.writeConfig(R"({
+        "retrieval": {"embedding_model": "nomic-embed-text",
+                      "base_url": "http://127.0.0.1:11434",
+                      "caption_model": "qwen2.5vl"}
+    })");
+    const auto config = sandbox.load();
+    REQUIRE(config.has_value());
+    CHECK(config->embeddingModel == "nomic-embed-text");
+    CHECK(config->retrievalBaseUrl == "http://127.0.0.1:11434");
+    CHECK(config->retrievalApiKey.empty());
+    CHECK(config->captionModel == "qwen2.5vl");
+
+    ConfigSandbox plain;
+    plain.writeConfig(R"({})");
+    const auto defaults = plain.load();
+    REQUIRE(defaults.has_value());
+    CHECK(defaults->retrievalBaseUrl.empty());
+    CHECK(defaults->captionModel.empty());
+}

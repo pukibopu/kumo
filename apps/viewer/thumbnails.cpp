@@ -1070,11 +1070,21 @@ int runIndexing(const fs::path& assetDir, const fs::path& shaderDir, const Index
             logWarn("index: agent config: {}; captions and embeddings skipped", config.error());
         } else {
             if (options.captions) {
-                const agent::AgentEndpoint* endpoint = config->scene.available() ? &config->scene
-                                                       : config->shader.available()
-                                                           ? &config->shader
-                                                           : nullptr;
-                if (endpoint != nullptr) {
+                // retrieval.caption_model routes captions to the retrieval
+                // endpoint (MS: a local vision model keeps a full re-index
+                // free); otherwise the scene/shader agent endpoint serves.
+                if (!config->captionModel.empty()) {
+                    const std::string base = !config->retrievalBaseUrl.empty()
+                                                 ? config->retrievalBaseUrl
+                                                 : config->scene.baseUrl;
+                    vision = std::make_unique<agent::OpenAiProvider>(
+                        base, config->retrievalApiKey, agent::makeUrlSessionTransport());
+                    visionModel = config->captionModel;
+                } else if (const agent::AgentEndpoint* endpoint =
+                               config->scene.available()    ? &config->scene
+                               : config->shader.available() ? &config->shader
+                                                            : nullptr;
+                           endpoint != nullptr) {
                     if (endpoint->type == agent::ProviderType::OpenAi) {
                         vision = std::make_unique<agent::OpenAiProvider>(
                             endpoint->baseUrl, endpoint->apiKey, agent::makeUrlSessionTransport());
@@ -1088,20 +1098,25 @@ int runIndexing(const fs::path& assetDir, const fs::path& shaderDir, const Index
                 }
             }
             if (options.embeddings) {
-                const agent::AgentEndpoint* endpoint = nullptr;
-                if (config->scene.type == agent::ProviderType::OpenAi &&
-                    config->scene.available()) {
-                    endpoint = &config->scene;
-                } else if (config->shader.type == agent::ProviderType::OpenAi &&
-                           config->shader.available()) {
-                    endpoint = &config->shader;
+                std::string base = config->retrievalBaseUrl;
+                std::string key = config->retrievalApiKey;
+                if (base.empty()) {
+                    if (config->scene.type == agent::ProviderType::OpenAi &&
+                        config->scene.available()) {
+                        base = config->scene.baseUrl;
+                        key = config->scene.apiKey;
+                    } else if (config->shader.type == agent::ProviderType::OpenAi &&
+                               config->shader.available()) {
+                        base = config->shader.baseUrl;
+                        key = config->shader.apiKey;
+                    }
                 }
-                if (endpoint != nullptr) {
+                if (!base.empty()) {
                     embedder = std::make_unique<agent::EmbeddingClient>(
-                        agent::makeUrlSessionTransport(), endpoint->baseUrl, endpoint->apiKey,
-                        config->embeddingModel);
+                        agent::makeUrlSessionTransport(), base, key, config->embeddingModel);
                 } else {
-                    logInfo("index: embeddings skipped (needs an openai-typed endpoint)");
+                    logInfo("index: embeddings skipped (needs an openai-typed endpoint or "
+                            "retrieval.base_url)");
                 }
             }
         }

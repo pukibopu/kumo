@@ -128,13 +128,18 @@ constexpr const char* kSceneSystemPrompt =
     "deliberately across the scene and avoid saturated pure primaries — real surfaces are "
     "mixed. For effects factors cannot express — iridescence, patterns, glass, procedural "
     "texture — tell the user to ask the shader assistant.\n\n"
-    "Assets. To find assets, describe what you need to asset_search ('mossy stone wall', "
-    "'small wooden crate', kind/style/max_dimension filters as needed) — it returns the "
-    "best matches with thumbnails; go straight to an asset name only when you already "
-    "know it, and use asset_list only for a full inventory. Real assets beat primitives: "
-    "prefer scene_add_model for organic or detailed things (trees, props) when a fitting "
-    "model exists; use primitives for simple geometry (walls, platforms, "
-    "panels). Dress every large surface with material_set_texture (ground gets sand or "
+    "Assets. Every visible prop MUST be a real library model: describe what you need to "
+    "asset_search ('bar stool', 'gravestone', kind/style/max_dimension filters as needed) "
+    "— it returns the best matches with thumbnails — then place it with scene_add_model; "
+    "when the library has nothing fitting, try asset_fetch before anything else. "
+    "Primitives are for architecture ONLY (ground, floors, walls, platforms, water "
+    "planes) — never approximate furniture, plants, vehicles or props out of cubes and "
+    "spheres. Only when both asset_search and asset_fetch come up empty may you assemble "
+    "a prop from primitives, and say so in your reply. Repeat a model by looping "
+    "scene_add_model (snap_to_ground/avoid_overlap) instead of substituting primitives. "
+    "Never mix style tiers on one stage: stylized props with stylized props. Use "
+    "asset_list only for a full inventory. "
+    "Dress every large surface with material_set_texture (ground gets sand or "
     "grass or rock, structures get planks or bark) and set tiling so texels stay roughly "
     "square — a 20 m ground with a 1 m texture wants tiling around 20. Prefer an HDR file "
     "environment (environment_set file) over the procedural sky when one matches the "
@@ -703,22 +708,28 @@ void EngineRuntime::assembleAgentSessions(bool isReload) {
         } else {
             logInfo("critic agent disabled: {}", plan.criticUnavailableReason);
         }
-        // Query embeddings ride whichever endpoint is OpenAI-compatible
-        // (/v1/embeddings is not an Anthropic API); none means asset_search
-        // degrades to FTS + filters, deterministically.
-        const agent::AgentEndpoint* embedEndpoint = nullptr;
-        if (config->scene.type == agent::ProviderType::OpenAi && config->scene.available()) {
-            embedEndpoint = &config->scene;
-        } else if (config->shader.type == agent::ProviderType::OpenAi &&
-                   config->shader.available()) {
-            embedEndpoint = &config->shader;
+        // Query embeddings ride retrieval.base_url when set (MS: a local
+        // Ollama serves retrieval while the agents stay on a cloud provider),
+        // else whichever agent endpoint is OpenAI-compatible (/v1/embeddings
+        // is not an Anthropic API); none means asset_search degrades to FTS +
+        // filters, deterministically.
+        std::string embedBaseUrl = config->retrievalBaseUrl;
+        std::string embedApiKey = config->retrievalApiKey;
+        if (embedBaseUrl.empty()) {
+            if (config->scene.type == agent::ProviderType::OpenAi && config->scene.available()) {
+                embedBaseUrl = config->scene.baseUrl;
+                embedApiKey = config->scene.apiKey;
+            } else if (config->shader.type == agent::ProviderType::OpenAi &&
+                       config->shader.available()) {
+                embedBaseUrl = config->shader.baseUrl;
+                embedApiKey = config->shader.apiKey;
+            }
         }
-        if (embedEndpoint != nullptr) {
+        if (!embedBaseUrl.empty()) {
             embeddingClient_ = std::make_unique<agent::EmbeddingClient>(
-                agent::makeUrlSessionTransport(), embedEndpoint->baseUrl, embedEndpoint->apiKey,
+                agent::makeUrlSessionTransport(), embedBaseUrl, embedApiKey,
                 config->embeddingModel);
-            logInfo("retrieval embeddings ready: {} at {}", config->embeddingModel,
-                    embedEndpoint->baseUrl);
+            logInfo("retrieval embeddings ready: {} at {}", config->embeddingModel, embedBaseUrl);
         }
     }
     if (wantConfirm) {

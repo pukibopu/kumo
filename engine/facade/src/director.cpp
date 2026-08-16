@@ -471,7 +471,9 @@ std::string Director::directorMessage() const {
         "palette: 3-5 hex colors;\n"
         "camera: {{\"fov_y_deg\", \"elevation_deg\", \"notes\"}};\n"
         "assets: library asset names to use (ONLY names from the library snapshot below);\n"
-        "elements: 4-10 of {{\"name\", \"build\" (what to construct, placement, scale), "
+        "elements: 4-10 of {{\"name\", \"build\" (what to construct, placement, scale — "
+        "reference concrete library asset names from the snapshot below; props must come "
+        "from the library, primitives only for architecture), "
         "\"material_intent\" (surface look)}};\n"
         "lighting: {{\"environment\", \"key\", \"fill\", \"rim\"}};\n"
         "banned: things that must not appear;\n"
@@ -501,8 +503,10 @@ std::string Director::critiqueMessage() const {
         out += std::format("The director's plan was:\n{}\n", truncated(spec_.raw, kMaxSpecChars));
     }
     out += "Judge the attached screenshots against six points: composition, focal point, "
-           "layering, materials, lighting, detail. Clay/normal views (when present) reveal "
-           "shape and shading problems the lit view hides.\n"
+           "layering, materials, lighting, detail. Props visibly cobbled from bare "
+           "primitives count as a build issue — real library models should stand in. "
+           "Clay/normal views (when present) reveal shape and shading problems the lit "
+           "view hides.\n"
            "Reply with ONLY one JSON object: {\"verdict\": \"pass\"|\"revise\", \"score\": "
            "0-10, \"issues\": [{\"target\": \"build\"|\"materials\", \"severity\": "
            "\"low\"|\"medium\"|\"high\", \"note\": \"...\"}], \"praise\": \"...\"}. "

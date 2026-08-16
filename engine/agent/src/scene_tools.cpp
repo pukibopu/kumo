@@ -2203,6 +2203,33 @@ void checkLights(const scene::Scene& scene, std::vector<Finding>& findings) {
 
 // Read-only: pure math over the current scene/renderer state, never mutates
 // anything and never auto-fixes what it finds.
+// Model-first policy (MS): visible props should be library models, primitives
+// only architecture. Planes are exempt (ground/walls/water are legitimate
+// primitive uses); a scene whose shaped entities are mostly cobbled
+// primitives gets one warning nudging asset_search/scene_add_model.
+void checkPrimitiveHeavy(const scene::Scene& scene, std::vector<Finding>& findings) {
+    int primitives = 0;
+    int models = 0;
+    scene.entities.forEach([&](scene::EntityId, const scene::Entity& entity) {
+        if (!entity.model.empty()) {
+            ++models;
+        } else if (!entity.primitive.empty() && entity.primitive != "plane") {
+            ++primitives;
+        }
+    });
+    if (primitives > 5 && primitives * 2 > primitives + models) {
+        findings.push_back(
+            {.check = "primitive_heavy",
+             .severity = "warning",
+             .entityId = {},
+             .message = std::format(
+                 "{} of {} shaped entities are bare primitives; real library models read far "
+                 "better -- find them with asset_search and place with scene_add_model, "
+                 "keeping primitives for architecture (ground, walls, platforms)",
+                 primitives, primitives + models)});
+    }
+}
+
 std::string sceneValidate(const SceneToolContext& context) {
     std::vector<Finding> findings;
     const std::vector<AabbEntity> aabbs = collectAabbs(context);
@@ -2211,6 +2238,7 @@ std::string sceneValidate(const SceneToolContext& context) {
     checkCameraInside(context.scene->camera, aabbs, findings);
     checkFrustum(context, aabbs, findings);
     checkLights(*context.scene, findings);
+    checkPrimitiveHeavy(*context.scene, findings);
 
     json out{{"status", "ok"}, {"findings", json::array()}};
     for (const Finding& finding : findings) {

@@ -1977,3 +1977,52 @@ TEST_CASE("asset_search fuses the embedded query when sidecar and effector exist
     CHECK(fallback["vector_search"] == false);
     CHECK(fallback["results"].empty());
 }
+
+// --- primitive_heavy (MS) ---------------------------------------------
+
+namespace {
+
+void insertShaped(scene::Scene& scene, const char* primitive, const char* model, int count) {
+    for (int i = 0; i < count; ++i) {
+        scene::Entity entity;
+        entity.primitive = primitive;
+        entity.model = model;
+        scene.entities.insert(entity);
+    }
+}
+
+bool primitiveHeavyFlagged(Fixture& f) {
+    const json result = f.invoke("scene_validate", "");
+    REQUIRE(result["status"] == "ok");
+    return hasFinding(result["findings"], "primitive_heavy");
+}
+
+} // namespace
+
+TEST_CASE("scene_validate flags a primitive-heavy scene (MS model-first policy)") {
+    Fixture f;
+    insertShaped(f.scene, "cube", "", 6);
+    CHECK(primitiveHeavyFlagged(f));
+}
+
+TEST_CASE("scene_validate primitive_heavy stays quiet at or under the count threshold") {
+    Fixture f;
+    insertShaped(f.scene, "cube", "", 5); // needs MORE than 5
+    CHECK(!primitiveHeavyFlagged(f));
+}
+
+TEST_CASE("scene_validate primitive_heavy exempts planes and model-majority scenes") {
+    Fixture planes;
+    insertShaped(planes.scene, "plane", "", 10); // architecture, exempt
+    CHECK(!primitiveHeavyFlagged(planes));
+
+    Fixture mixed;
+    insertShaped(mixed.scene, "cube", "", 6);
+    insertShaped(mixed.scene, "", "furniture/bedDouble", 7); // models outnumber
+    CHECK(!primitiveHeavyFlagged(mixed));
+
+    Fixture tipped;
+    insertShaped(tipped.scene, "cube", "", 8);
+    insertShaped(tipped.scene, "", "furniture/bedDouble", 3);
+    CHECK(primitiveHeavyFlagged(tipped));
+}

@@ -67,6 +67,8 @@ viewer 以 Cook-Torrance PBR + IBL 渲染 glTF 场景（MSAA 4x、ACES tone mapp
 
 - **Anthropic Messages API**（官方或兼容中转）：`type` 填 `anthropic`，key 用 `ANTHROPIC_API_KEY`。
 
+检索链路（素材语义搜索的 embedding / 缩略图 caption）与导演/critic 角色同样可以整体或按块指向本地端点，与云端 agent 自由混搭——日常开发可以做到零 API 成本（`retrieval.base_url` + `agents.<role>.*`，配置示例见 docs/agents.md 的「零成本本地配置」）。
+
 `viewer --offline` 运行零网络的内置演示脚本。未配置时渲染功能不受影响。细节（工具清单、绑定契约、历史压缩、确认弹窗）见 [docs/agents.md](docs/agents.md)。
 
 ### MCP

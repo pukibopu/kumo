@@ -67,6 +67,8 @@ Two wire protocols (`provider.type`), and each assistant can point at its own en
 
 - **Anthropic Messages API** (official or a compatible relay): set `type` to `anthropic` and use `ANTHROPIC_API_KEY`.
 
+The retrieval stack (asset-search embeddings / thumbnail captions) and the director/critic roles can likewise point at a local endpoint, wholesale or per block, mixing freely with cloud agents — day-to-day development can run at zero API cost (`retrieval.base_url` + `agents.<role>.*`; see the local-setup section in docs/agents.md).
+
 `viewer --offline` replays a built-in scripted demo with zero network. Rendering works fine without any assistant configuration. Details (tool set, binding contract, history compression, confirmation dialog) live in [docs/agents.md](docs/agents.md).
 
 ### MCP
